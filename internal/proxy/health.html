@@ -61,6 +61,7 @@
         .badge-vertex { background: #0984e3; color: white; }
         .badge-gemini { background: #1809e3; color: white; }
         .badge-anthropic { background: #fdcb6e; color: #2d3436; }
+        .badge-bedrock { background: #dda130; color: #2d3436; }
         .badge-fallback { background: #ff7675; color: white; }
         .badge-banned { background: var(--accent-error); color: white; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
@@ -130,9 +131,6 @@
                     {{ $name }}
                     {{ if eq $cred.Type "proxy" }}
                         <span class="credential-badge badge-proxy">PROXY</span>
-                        {{ if $cred.IsFallback }}
-                            <span class="credential-badge badge-fallback">FALLBACK</span>
-                        {{ end }}
                     {{ else if eq $cred.Type "openai" }}
                         <span class="credential-badge badge-openai">OPENAI</span>
                     {{ else if eq $cred.Type "vertex-ai" }}
@@ -141,8 +139,13 @@
                         <span class="credential-badge badge-gemini">GOOGLE GEMINI</span>
                     {{ else if eq $cred.Type "anthropic" }}
                         <span class="credential-badge badge-anthropic">ANTHROPIC</span>
+                    {{ else if eq $cred.Type "bedrock" }}
+                        <span class="credential-badge badge-bedrock">AWS BEDROCK</span>
                     {{ end }}
 
+                    {{ if $cred.IsFallback }}
+                        <span class="credential-badge badge-fallback">FALLBACK</span>
+                    {{ end }}
                     {{ if $cred.IsBanned }}
                         <span class="credential-badge badge-banned">BANNED</span>
                     {{ end }}
