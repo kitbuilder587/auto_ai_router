@@ -97,6 +97,38 @@ var (
 		},
 		[]string{"credential", "model"},
 	)
+
+	InputTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_input_tokens_total",
+			Help: "Total input tokens processed",
+		},
+		[]string{"credential", "model"},
+	)
+
+	OutputTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_output_tokens_total",
+			Help: "Total output tokens generated",
+		},
+		[]string{"credential", "model"},
+	)
+
+	ReasoningTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_reasoning_tokens_total",
+			Help: "Total reasoning tokens generated",
+		},
+		[]string{"credential", "model"},
+	)
+
+	CachedTokensTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_cached_tokens_total",
+			Help: "Total cached input tokens used",
+		},
+		[]string{"credential", "model"},
+	)
 )
 
 type Metrics struct {
@@ -168,4 +200,22 @@ func (m *Metrics) UpdateModelRPM(credential, model string, rpm int) {
 
 func (m *Metrics) UpdateModelTPM(credential, model string, tpm int) {
 	m.updateModelMetric(ModelTPMCurrent, credential, model, tpm)
+}
+
+func (m *Metrics) RecordTokenUsage(credential, model string, inputTokens, outputTokens, reasoningTokens, cachedTokens int) {
+	if !m.isEnabled() {
+		return
+	}
+	if inputTokens > 0 {
+		InputTokensTotal.WithLabelValues(credential, model).Add(float64(inputTokens))
+	}
+	if outputTokens > 0 {
+		OutputTokensTotal.WithLabelValues(credential, model).Add(float64(outputTokens))
+	}
+	if reasoningTokens > 0 {
+		ReasoningTokensTotal.WithLabelValues(credential, model).Add(float64(reasoningTokens))
+	}
+	if cachedTokens > 0 {
+		CachedTokensTotal.WithLabelValues(credential, model).Add(float64(cachedTokens))
+	}
 }
