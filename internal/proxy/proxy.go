@@ -901,6 +901,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Log to LiteLLM DB (non-streaming)
 		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
+		if logCtx.TokenUsage != nil {
+			p.metrics.RecordTokenUsage(cred.Name, modelID,
+				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
+				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
+		}
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL

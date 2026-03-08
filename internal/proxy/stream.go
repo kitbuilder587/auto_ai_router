@@ -490,6 +490,12 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		}
 	}
 
+	if logCtx.Credential != nil {
+		p.metrics.RecordTokenUsage(logCtx.Credential.Name, logCtx.ModelID,
+			logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
+			logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
+	}
+
 	logCtx.HTTPStatus = statusCode
 	if statusCode >= 400 {
 		logCtx.Status = "failure"
