@@ -20,6 +20,28 @@ var hopByHopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
+// privacyHeaders are headers that reveal client IP or routing information.
+// These are added by reverse proxies/load balancers and must not be forwarded
+// to upstream AI providers to protect user privacy.
+var privacyHeaders = map[string]bool{
+	"X-Forwarded-For":     true,
+	"X-Forwarded-Host":    true,
+	"X-Forwarded-Port":    true,
+	"X-Forwarded-Proto":   true,
+	"X-Forwarded-Server":  true,
+	"X-Real-Ip":           true,
+	"X-Original-For":      true,
+	"X-Client-Ip":         true,
+	"X-Cluster-Client-Ip": true,
+	"Forwarded":           true,
+	"Via":                 true,
+}
+
+// isPrivacyHeader checks if a header reveals client IP or routing information.
+func isPrivacyHeader(key string) bool {
+	return privacyHeaders[key]
+}
+
 // isHopByHopHeader checks if a header should not be proxied.
 // Returns true for hop-by-hop headers that must not be forwarded to upstream.
 // RFC 7230: https://tools.ietf.org/html/rfc7230#section-6.1
@@ -43,7 +65,7 @@ func GetHopByHopHeaders() map[string]bool {
 // Accept-Encoding is also skipped (see copyHeadersSkipAuth for rationale).
 func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding to upstream (proxy handles per-segment).
@@ -76,7 +98,7 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 // bytes to flow through instead of decoded content.
 func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || key == "Authorization" {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || key == "Authorization" {
 			continue
 		}
 		// Don't forward Accept-Encoding: proxy manages compression per connection segment.
