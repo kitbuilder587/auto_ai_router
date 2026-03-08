@@ -134,6 +134,11 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 	}
 	if tc := mapReasoningToThinkingConfig(thinkingParam, req.ReasoningEffort, model); tc != nil {
 		cfg.ThinkingConfig = tc
+	} else if isThinkingCapableModel(model) {
+		// No thinking params specified: explicitly disable dynamic thinking for
+		// predictable latency. Without this, Gemini 2.5/3 models autonomously
+		// decide whether to reason, causing unpredictable latency spikes.
+		cfg.ThinkingConfig = disableThinkingConfig(model)
 	}
 
 	// Phase 4: Audio output (SpeechConfig)

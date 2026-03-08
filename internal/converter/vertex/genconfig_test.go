@@ -3,10 +3,59 @@ package vertex
 import (
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
 )
+
+func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
+	t.Run("gemini25_no_params_disables_thinking", func(t *testing.T) {
+		req := &openai.OpenAIRequest{Model: "gemini-2.5-flash"}
+		// Need at least one param to trigger buildGenerationConfig (hasParams check)
+		temp := float64(0.7)
+		req.Temperature = &temp
+		cfg := buildGenerationConfig(req, "gemini-2.5-flash")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ThinkingConfig)
+		assert.False(t, cfg.ThinkingConfig.IncludeThoughts)
+		require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
+		assert.Equal(t, int32(0), *cfg.ThinkingConfig.ThinkingBudget)
+	})
+
+	t.Run("gemini3_no_params_disables_thinking", func(t *testing.T) {
+		req := &openai.OpenAIRequest{Model: "gemini-3-flash-preview"}
+		temp := float64(0.7)
+		req.Temperature = &temp
+		cfg := buildGenerationConfig(req, "gemini-3-flash-preview")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ThinkingConfig)
+		assert.False(t, cfg.ThinkingConfig.IncludeThoughts)
+		assert.Equal(t, genai.ThinkingLevelMinimal, cfg.ThinkingConfig.ThinkingLevel)
+	})
+
+	t.Run("non_thinking_model_no_thinking_config", func(t *testing.T) {
+		req := &openai.OpenAIRequest{Model: "gemini-2.0-flash"}
+		temp := float64(0.7)
+		req.Temperature = &temp
+		cfg := buildGenerationConfig(req, "gemini-2.0-flash")
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.ThinkingConfig)
+	})
+
+	t.Run("explicit_reasoning_effort_overrides_default", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model:           "gemini-2.5-flash",
+			ReasoningEffort: "high",
+		}
+		cfg := buildGenerationConfig(req, "gemini-2.5-flash")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ThinkingConfig)
+		assert.True(t, cfg.ThinkingConfig.IncludeThoughts)
+		require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
+		assert.Equal(t, int32(30000), *cfg.ThinkingConfig.ThinkingBudget)
+	})
+}
 
 func TestApplyExtraBodyToConfig(t *testing.T) {
 	t.Run("nil extra_body does nothing", func(t *testing.T) {

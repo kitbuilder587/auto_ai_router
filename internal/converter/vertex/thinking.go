@@ -30,6 +30,31 @@ func isFlashModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "flash")
 }
 
+// isThinkingCapableModel returns true for models that support dynamic thinking
+// (Gemini 2.5+ and Gemini 3+). These models think autonomously when ThinkingConfig
+// is not set, causing unpredictable latency.
+func isThinkingCapableModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "gemini-2.5") || strings.Contains(lower, "gemini-3")
+}
+
+// disableThinkingConfig returns a ThinkingConfig that minimizes thinking computation.
+// For Gemini 2.5: sets ThinkingBudget=0 (full disable).
+// For Gemini 3: sets ThinkingLevel=Minimal (lowest level; no complete disable exists).
+func disableThinkingConfig(model string) *genai.ThinkingConfig {
+	if isGemini3Model(model) {
+		return &genai.ThinkingConfig{
+			IncludeThoughts: false,
+			ThinkingLevel:   genai.ThinkingLevelMinimal,
+		}
+	}
+	zero := int32(0)
+	return &genai.ThinkingConfig{
+		IncludeThoughts: false,
+		ThinkingBudget:  &zero,
+	}
+}
+
 // mapReasoningEffort maps OpenAI reasoning_effort to Vertex ThinkingConfig.
 // Gemini 2.5 uses ThinkingBudget (tokens), Gemini 3+ uses ThinkingLevel (enum).
 func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
@@ -58,7 +83,7 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 		case "high":
 			config.ThinkingLevel = genai.ThinkingLevelHigh
 		case "disable", "none":
-			config.IncludeThoughts = false
+			return disableThinkingConfig(model)
 		}
 	} else {
 		// Gemini 2.5: ThinkingBudget (tokens)
@@ -79,10 +104,7 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 		case "high":
 			budget = 30000
 		case "disable", "none":
-			config.IncludeThoughts = false
-			zero := int32(0)
-			config.ThinkingBudget = &zero
-			return config
+			return disableThinkingConfig(model)
 		}
 		config.ThinkingBudget = &budget
 	}
@@ -96,11 +118,11 @@ func mapAnthropicThinking(thinking map[string]interface{}, model string) *genai.
 	thinkingType, _ := thinking["type"].(string)
 	budgetTokens, _ := thinking["budget_tokens"].(float64)
 
-	config := &genai.ThinkingConfig{}
 	if thinkingType != "enabled" || budgetTokens <= 0 {
-		config.IncludeThoughts = false
-		return config
+		return disableThinkingConfig(model)
 	}
+
+	config := &genai.ThinkingConfig{}
 
 	config.IncludeThoughts = true
 
