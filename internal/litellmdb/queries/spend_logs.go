@@ -321,7 +321,7 @@ func BuildBatchInsertQuery(count int) string {
 			if j > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(fmt.Sprintf("$%d", paramIdx))
+			fmt.Fprintf(&b, "$%d", paramIdx)
 			paramIdx++
 		}
 		b.WriteString(", NULL, NULL)") // messages, response = NULL

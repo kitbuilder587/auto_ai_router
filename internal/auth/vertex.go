@@ -334,10 +334,11 @@ func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, cr
 		return "", fmt.Errorf("credentials must be for a service account, got type: %v", serviceAccount["type"])
 	}
 
-	// Create credentials with Vertex AI scope
-	creds, err := google.CredentialsFromJSON(
+	// Create credentials with Vertex AI scope (ServiceAccount type is validated above)
+	creds, err := google.CredentialsFromJSONWithType(
 		context.Background(),
 		credBytes,
+		google.ServiceAccount,
 		"https://www.googleapis.com/auth/cloud-platform",
 	)
 	if err != nil {

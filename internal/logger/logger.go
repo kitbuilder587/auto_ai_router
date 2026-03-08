@@ -75,15 +75,15 @@ func (h *PrettyHandler) Handle(ctx context.Context, record slog.Record) error {
 
 	// Start building the log line
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s%s%s %s[%s]%s » %s",
+	fmt.Fprintf(&sb, "%s%s%s %s[%s]%s » %s",
 		colorGray, timeStr, colorReset,
 		levelColor, levelStr, colorReset,
 		record.Message,
-	))
+	)
 
 	// Add attributes
 	record.Attrs(func(attr slog.Attr) bool {
-		sb.WriteString(fmt.Sprintf(" %s=%v", attr.Key, attr.Value.Any()))
+		fmt.Fprintf(&sb, " %s=%v", attr.Key, attr.Value.Any())
 		return true
 	})
 
