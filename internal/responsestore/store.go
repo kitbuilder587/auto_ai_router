@@ -13,9 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
-var responseBucket = []byte("responses")
-
-// StoredEntry is the JSON value stored in bbolt per response.
+// StoredEntry is the value persisted per response (shared by all backends).
 type StoredEntry struct {
 	ResponseID       string              `json:"response_id"`
 	APIKeyHash       string              `json:"api_key_hash"`
@@ -27,15 +25,52 @@ type StoredEntry struct {
 	AccumulatedInput json.RawMessage     `json:"accumulated_input,omitempty"` // full input context for multi-turn
 }
 
-// Store is a bbolt-backed response store.
-type Store struct {
+// Store is the pluggable response storage interface.
+// Implementations: bboltStore (local), redisStore (distributed).
+type Store interface {
+	// SaveResponse persists a response. ttlSeconds==0 means no expiry.
+	// accumulatedInput is the full normalised input array; may be nil.
+	SaveResponse(
+		ctx context.Context,
+		apiKeyHash string,
+		resp *responses.Response,
+		metadata map[string]string,
+		ttlSeconds int,
+		accumulatedInput json.RawMessage,
+	) error
+
+	// GetResponse returns the response if it exists, is not expired, and the
+	// apiKeyHash matches the one used at save time.
+	GetResponse(ctx context.Context, responseID, apiKeyHash string) (*responses.Response, error)
+
+	// GetEntry returns the full StoredEntry including AccumulatedInput.
+	// Same ownership and expiry checks as GetResponse.
+	GetEntry(ctx context.Context, responseID, apiKeyHash string) (*StoredEntry, error)
+
+	// GetResponseByID returns a stored response by ID without an ownership
+	// check (intended for master-key requests).
+	GetResponseByID(ctx context.Context, responseID string) (*responses.Response, error)
+
+	// CleanupExpired removes all entries whose TTL has elapsed.
+	// Redis-backed stores may treat this as a no-op (TTL handled natively).
+	CleanupExpired(ctx context.Context) error
+
+	// Close releases any resources held by the store.
+	Close() error
+}
+
+// ── bbolt backend ─────────────────────────────────────────────────────────────
+
+var responseBucket = []byte("responses")
+
+type bboltStore struct {
 	db *bolt.DB
 }
 
 // New opens (or creates) the bbolt database and returns a Store.
 // Database location: /data/auto_ai_router/responses.db if /data/auto_ai_router exists,
 // otherwise /tmp/auto_ai_router/responses.db.
-func New() (*Store, error) {
+func New() (Store, error) {
 	dir := "/data/auto_ai_router"
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		dir = "/tmp/auto_ai_router"
@@ -55,18 +90,12 @@ func New() (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("responsestore: failed to create bucket: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &bboltStore{db: db}, nil
 }
 
-// Close closes the underlying database.
-func (s *Store) Close() error {
-	return s.db.Close()
-}
+func (s *bboltStore) Close() error { return s.db.Close() }
 
-// SaveResponse saves a response to the store.
-// ttlSeconds == 0 means no expiry.
-// accumulatedInput is the full normalised input array after history prepending; may be nil.
-func (s *Store) SaveResponse(
+func (s *bboltStore) SaveResponse(
 	_ context.Context,
 	apiKeyHash string,
 	resp *responses.Response,
@@ -99,9 +128,7 @@ func (s *Store) SaveResponse(
 	})
 }
 
-// GetResponse returns a stored response if it exists, is not expired,
-// and the apiKeyHash matches the one used when saving.
-func (s *Store) GetResponse(_ context.Context, responseID, apiKeyHash string) (*responses.Response, error) {
+func (s *bboltStore) GetResponse(_ context.Context, responseID, apiKeyHash string) (*responses.Response, error) {
 	entry, err := s.getEntry(responseID)
 	if err != nil {
 		return nil, err
@@ -112,9 +139,7 @@ func (s *Store) GetResponse(_ context.Context, responseID, apiKeyHash string) (*
 	return entry.ResponseJSON, nil
 }
 
-// GetEntry returns the full StoredEntry (including AccumulatedInput) if it exists,
-// is not expired, and the apiKeyHash matches the one used when saving.
-func (s *Store) GetEntry(_ context.Context, responseID, apiKeyHash string) (*StoredEntry, error) {
+func (s *bboltStore) GetEntry(_ context.Context, responseID, apiKeyHash string) (*StoredEntry, error) {
 	entry, err := s.getEntry(responseID)
 	if err != nil {
 		return nil, err
@@ -125,9 +150,7 @@ func (s *Store) GetEntry(_ context.Context, responseID, apiKeyHash string) (*Sto
 	return entry, nil
 }
 
-// GetResponseByID returns a stored response by ID without an ownership check
-// (intended for master-key requests).
-func (s *Store) GetResponseByID(_ context.Context, responseID string) (*responses.Response, error) {
+func (s *bboltStore) GetResponseByID(_ context.Context, responseID string) (*responses.Response, error) {
 	entry, err := s.getEntry(responseID)
 	if err != nil {
 		return nil, err
@@ -135,7 +158,7 @@ func (s *Store) GetResponseByID(_ context.Context, responseID string) (*response
 	return entry.ResponseJSON, nil
 }
 
-func (s *Store) getEntry(responseID string) (*StoredEntry, error) {
+func (s *bboltStore) getEntry(responseID string) (*StoredEntry, error) {
 	var entry StoredEntry
 	if err := s.db.View(func(tx *bolt.Tx) error {
 		v := tx.Bucket(responseBucket).Get([]byte(responseID))
@@ -152,8 +175,7 @@ func (s *Store) getEntry(responseID string) (*StoredEntry, error) {
 	return &entry, nil
 }
 
-// CleanupExpired deletes all entries whose ExpiresAt is in the past.
-func (s *Store) CleanupExpired(_ context.Context) error {
+func (s *bboltStore) CleanupExpired(_ context.Context) error {
 	now := time.Now().Unix()
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(responseBucket)

@@ -72,6 +72,23 @@ models:
     rpm: 100
     tpm: 50000
 
+# Optional: Redis/Valkey backend for distributed rate limiting and response storage.
+# When enabled, all replicas share a single counter namespace — RPM/TPM limits are
+# enforced globally across the whole cluster instead of per-pod.
+# The response store (store: true in Responses API) is also backed by Redis when enabled.
+redis:
+  enabled: false                         # Set to true to enable Redis backend
+  addresses:
+    - "os.environ/REDIS_ADDRESS"         # e.g. "redis:6379" or "valkey:6379"
+  # username: ""                         # Optional: Redis ACL username
+  # password: "os.environ/REDIS_PASSWORD"
+  # select_db: 0                         # Redis database index (default: 0)
+  key_prefix: "rl:"                      # Prefix for all keys (default: "rl:")
+  # tls_enabled: false                   # Enable TLS (default: false)
+  connect_timeout: 5s                    # TCP connect timeout (default: 5s)
+  conn_write_timeout: 10s               # Write/pipeline timeout (default: 10s)
+  force_single_client: true             # Disable cluster detection for single-node setup
+
 # Optional: LiteLLM database integration for spend logging and auth
 litellm_db:
   enabled: false  # Set to true to enable LiteLLM DB integration

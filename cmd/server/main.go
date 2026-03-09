@@ -63,7 +63,22 @@ func main() {
 	startup.ValidateProxyCredentialsAtStartup(cfg, log)
 
 	// ==================== Initialize Core Components ====================
-	_, rateLimiter, bal := initializeBalancer(cfg, log)
+
+	// Create a shared Redis/Valkey backend if enabled.
+	// The same underlying client is reused by both the rate limiter and the response store.
+	var redisBackend *ratelimit.RedisBackend
+	if cfg.Redis.Enabled {
+		rb, err := ratelimit.NewRedisBackend(cfg.Redis)
+		if err != nil {
+			log.Error("Failed to connect to Redis, falling back to local backends", "error", err)
+		} else {
+			log.Info("Connected to Redis/Valkey", "addresses", cfg.Redis.InitAddresses)
+			redisBackend = rb
+			defer rb.Close()
+		}
+	}
+
+	_, rateLimiter, bal := initializeBalancer(cfg, log, redisBackend)
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
@@ -89,18 +104,25 @@ func main() {
 	}
 
 	// ==================== Create Response Store ====================
-	respStore, storeErr := responsestore.New()
-	if storeErr != nil {
-		log.Warn("Failed to initialize response store (Responses API store/previous_response_id will be disabled)",
-			"error", storeErr)
-		respStore = nil
+	var respStore responsestore.Store
+	if redisBackend != nil {
+		respStore = responsestore.NewRedis(redisBackend.Client(), cfg.Redis.KeyPrefix)
+		log.Info("Response store: using Redis backend")
 	} else {
-		log.Info("Response store initialized")
-		defer func() {
-			if err := respStore.Close(); err != nil {
-				log.Error("Failed to close response store", "error", err)
-			}
-		}()
+		var storeErr error
+		respStore, storeErr = responsestore.New()
+		if storeErr != nil {
+			log.Warn("Failed to initialize response store (Responses API store/previous_response_id will be disabled)",
+				"error", storeErr)
+			respStore = nil
+		} else {
+			log.Info("Response store initialized (bbolt)")
+			defer func() {
+				if err := respStore.Close(); err != nil {
+					log.Error("Failed to close response store", "error", err)
+				}
+			}()
+		}
 	}
 
 	// ==================== Create Proxy ====================
@@ -246,12 +268,20 @@ func logCredentials(log *slog.Logger, credentials []config.CredentialConfig) {
 func initializeBalancer(
 	cfg *config.Config,
 	log *slog.Logger,
+	redisBackend *ratelimit.RedisBackend,
 ) (*fail2ban.Fail2Ban, *ratelimit.RPMLimiter, *balancer.RoundRobin) {
 	rules := convertFailBanRules(cfg.Fail2Ban.ErrorCodeRules, cfg.Fail2Ban.BanDuration, log)
 	f2b := fail2ban.NewWithRules(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration,
 		cfg.Fail2Ban.ErrorCodes, rules)
 
-	rateLimiter := ratelimit.New()
+	var rateLimiter *ratelimit.RPMLimiter
+	if redisBackend != nil {
+		log.Info("Rate limiter: using Redis backend")
+		rateLimiter = ratelimit.NewWithRedis(redisBackend)
+	} else {
+		rateLimiter = ratelimit.New()
+	}
+
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
 	bal.SetLogger(log)
 
@@ -550,7 +580,7 @@ func startDBHealthMonitor(
 func startResponseStoreCleanup(
 	log *slog.Logger,
 	bgCtx context.Context,
-	store *responsestore.Store,
+	store responsestore.Store,
 	wg *sync.WaitGroup,
 ) {
 	wg.Add(1)

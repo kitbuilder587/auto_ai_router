@@ -1,0 +1,390 @@
+package ratelimit
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/valkey-io/valkey-go"
+)
+
+const (
+	rpmWindow = 60 * time.Second
+	tpmWindow = 60 * time.Second
+	keyTTL    = 120 // seconds — auto-expire idle keys
+)
+
+// Lua script: atomically check+record RPM in a ZSET sliding window.
+// KEYS[1] = rpm key
+// ARGV[1] = now (unix ms as string)
+// ARGV[2] = window size in ms
+// ARGV[3] = limit (-1 = unlimited)
+// ARGV[4] = unique member id
+// Returns 1 if allowed, 0 if rejected.
+const luaTryAllowRPM = `
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit  = tonumber(ARGV[3])
+local member = ARGV[4]
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local count = redis.call('ZCARD', key)
+if limit ~= -1 and count >= limit then
+  return 0
+end
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, tonumber(ARGV[5]))
+return 1
+`
+
+// Lua script: check RPM without recording.
+const luaCanAllowRPM = `
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit  = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local count = redis.call('ZCARD', key)
+if limit ~= -1 and count >= limit then
+  return 0
+end
+return 1
+`
+
+// Lua script: check TPM (sum of token counts in window) without recording.
+// Token entries are stored as "uuid:count" members with score = timestamp_ms.
+const luaCanAllowTPM = `
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit  = tonumber(ARGV[3])
+if limit == -1 then return 1 end
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local members = redis.call('ZRANGE', key, 0, -1)
+local total = 0
+for _, m in ipairs(members) do
+  local sep = string.find(m, ':', 1, true)
+  if sep then
+    total = total + tonumber(string.sub(m, sep + 1)) or 0
+  end
+end
+if total >= limit then return 0 end
+return 1
+`
+
+// Lua script: record token consumption.
+// ARGV[4] = "uuid:count" member
+const luaConsumeTokens = `
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local member = ARGV[3]
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, tonumber(ARGV[4]))
+return 1
+`
+
+// Lua script: get current RPM count.
+const luaCurrentRPM = `
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+return redis.call('ZCARD', key)
+`
+
+// Lua script: get current TPM sum.
+const luaCurrentTPM = `
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local members = redis.call('ZRANGE', key, 0, -1)
+local total = 0
+for _, m in ipairs(members) do
+  local sep = string.find(m, ':', 1, true)
+  if sep then
+    total = total + tonumber(string.sub(m, sep + 1)) or 0
+  end
+end
+return total
+`
+
+// Lua script: atomic TryAllowAll — check cred RPM+TPM + optional model RPM+TPM,
+// record cred+model RPM only if all checks pass.
+//
+// KEYS[1] = cred rpm key
+// KEYS[2] = cred tpm key
+// KEYS[3] = model rpm key (may be "")
+// KEYS[4] = model tpm key (may be "")
+// ARGV[1] = now ms
+// ARGV[2] = window ms
+// ARGV[3] = cred rpm limit
+// ARGV[4] = cred tpm limit
+// ARGV[5] = model rpm limit
+// ARGV[6] = model tpm limit
+// ARGV[7] = cred rpm member (uuid)
+// ARGV[8] = model rpm member (uuid)
+// ARGV[9] = ttl (seconds)
+// Returns 1 allowed, 0 rejected.
+const luaTryAllowAll = `
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local ttl    = tonumber(ARGV[9])
+
+local function check_rpm(key, limit)
+  if key == '' then return true end
+  redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+  local count = redis.call('ZCARD', key)
+  if limit ~= -1 and count >= limit then return false end
+  return true
+end
+
+local function check_tpm(key, limit)
+  if key == '' or limit == -1 then return true end
+  redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+  local members = redis.call('ZRANGE', key, 0, -1)
+  local total = 0
+  for _, m in ipairs(members) do
+    local sep = string.find(m, ':', 1, true)
+    if sep then
+      total = total + (tonumber(string.sub(m, sep + 1)) or 0)
+    end
+  end
+  if total >= limit then return false end
+  return true
+end
+
+local function record_rpm(key, member)
+  if key == '' then return end
+  redis.call('ZADD', key, now, member)
+  redis.call('EXPIRE', key, ttl)
+end
+
+-- Check all limits first.
+if not check_rpm(KEYS[1], tonumber(ARGV[3])) then return 0 end
+if not check_tpm(KEYS[2], tonumber(ARGV[4])) then return 0 end
+if KEYS[3] ~= '' then
+  if not check_rpm(KEYS[3], tonumber(ARGV[5])) then return 0 end
+  if not check_tpm(KEYS[4], tonumber(ARGV[6])) then return 0 end
+end
+
+-- All passed — record RPM.
+record_rpm(KEYS[1], ARGV[7])
+if KEYS[3] ~= '' then
+  record_rpm(KEYS[3], ARGV[8])
+end
+return 1
+`
+
+// RedisBackend implements counterBackend using Valkey/Redis.
+// It is exported so that the underlying valkey.Client can be reused by other
+// packages (e.g. responsestore) via Client().
+type RedisBackend struct {
+	client    valkey.Client
+	keyPrefix string
+}
+
+// NewValkeyClient creates a valkey.Client from RedisConfig.
+// Callers that need to share one connection across multiple subsystems should
+// call this once and pass the resulting client to each subsystem's constructor.
+func NewValkeyClient(cfg config.RedisConfig) (valkey.Client, error) {
+	opt := valkey.ClientOption{
+		InitAddress:       cfg.InitAddresses,
+		Username:          cfg.Username,
+		Password:          cfg.Password,
+		SelectDB:          cfg.SelectDB,
+		ForceSingleClient: cfg.ForceSingleClient,
+		ConnWriteTimeout:  cfg.ConnWriteTimeout,
+		Dialer:            net.Dialer{Timeout: cfg.ConnectTimeout},
+	}
+	if cfg.TLSEnabled {
+		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	client, err := valkey.NewClient(opt)
+	if err != nil {
+		return nil, fmt.Errorf("redis: failed to create client: %w", err)
+	}
+	return client, nil
+}
+
+// NewRedisBackend creates a Redis/Valkey-backed counterBackend from config.
+func NewRedisBackend(cfg config.RedisConfig) (*RedisBackend, error) {
+	client, err := NewValkeyClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewRedisBackendFromClient(client, cfg.KeyPrefix), nil
+}
+
+// NewRedisBackendFromClient wraps an existing valkey.Client.
+// Useful when a single client is shared between rate limiting and other stores.
+func NewRedisBackendFromClient(client valkey.Client, keyPrefix string) *RedisBackend {
+	return &RedisBackend{client: client, keyPrefix: keyPrefix}
+}
+
+// Client returns the underlying valkey.Client so it can be shared with other components.
+func (b *RedisBackend) Client() valkey.Client { return b.client }
+
+// Close shuts down the underlying Valkey client.
+func (b *RedisBackend) Close() { b.client.Close() }
+
+func (b *RedisBackend) rpmKey(key string) string { return b.keyPrefix + "rpm:" + key }
+func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpm:" + key }
+
+func nowMS() int64 { return time.Now().UTC().UnixMilli() }
+
+func (b *RedisBackend) tryAllowRPM(key string, limit int) bool {
+	ctx := context.Background()
+	now := nowMS()
+	member := uuid.New().String()
+	res, err := b.client.Do(ctx, b.client.B().Eval().
+		Script(luaTryAllowRPM).
+		Numkeys(1).
+		Key(b.rpmKey(key)).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+		Arg(fmt.Sprintf("%d", limit)).
+		Arg(member).
+		Arg(fmt.Sprintf("%d", keyTTL)).
+		Build()).AsInt64()
+	if err != nil {
+		return false
+	}
+	return res == 1
+}
+
+func (b *RedisBackend) canAllowRPM(key string, limit int) bool {
+	ctx := context.Background()
+	now := nowMS()
+	res, err := b.client.Do(ctx, b.client.B().Eval().
+		Script(luaCanAllowRPM).
+		Numkeys(1).
+		Key(b.rpmKey(key)).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+		Arg(fmt.Sprintf("%d", limit)).
+		Build()).AsInt64()
+	if err != nil {
+		return false
+	}
+	return res == 1
+}
+
+func (b *RedisBackend) canAllowTPM(key string, limit int) bool {
+	if limit == -1 {
+		return true
+	}
+	ctx := context.Background()
+	now := nowMS()
+	res, err := b.client.Do(ctx, b.client.B().Eval().
+		Script(luaCanAllowTPM).
+		Numkeys(1).
+		Key(b.tpmKey(key)).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
+		Arg(fmt.Sprintf("%d", limit)).
+		Build()).AsInt64()
+	if err != nil {
+		return false
+	}
+	return res == 1
+}
+
+func (b *RedisBackend) consumeTokens(key string, tokenCount int) {
+	ctx := context.Background()
+	now := nowMS()
+	member := fmt.Sprintf("%s:%d", uuid.New().String(), tokenCount)
+	_ = b.client.Do(ctx, b.client.B().Eval().
+		Script(luaConsumeTokens).
+		Numkeys(1).
+		Key(b.tpmKey(key)).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
+		Arg(member).
+		Arg(fmt.Sprintf("%d", keyTTL)).
+		Build()).Error()
+}
+
+func (b *RedisBackend) currentRPM(key string) int {
+	ctx := context.Background()
+	now := nowMS()
+	res, err := b.client.Do(ctx, b.client.B().Eval().
+		Script(luaCurrentRPM).
+		Numkeys(1).
+		Key(b.rpmKey(key)).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+		Build()).AsInt64()
+	if err != nil {
+		return 0
+	}
+	return int(res)
+}
+
+func (b *RedisBackend) currentTPM(key string) int {
+	ctx := context.Background()
+	now := nowMS()
+	res, err := b.client.Do(ctx, b.client.B().Eval().
+		Script(luaCurrentTPM).
+		Numkeys(1).
+		Key(b.tpmKey(key)).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
+		Build()).AsInt64()
+	if err != nil {
+		return 0
+	}
+	return int(res)
+}
+
+func (b *RedisBackend) tryAllowAll(
+	credKey string, credRPM, credTPM int,
+	modelKey string, modelRPM, modelTPM int,
+) bool {
+	ctx := context.Background()
+	now := nowMS()
+	credMember := uuid.New().String()
+	modelMember := uuid.New().String()
+
+	// Build key list: always 4 keys (empty string = skip in Lua).
+	credRPMKey := b.rpmKey(credKey)
+	credTPMKey := b.tpmKey(credKey)
+	modRPMKey := ""
+	modTPMKey := ""
+	if modelKey != "" {
+		modRPMKey = b.rpmKey(modelKey)
+		modTPMKey = b.tpmKey(modelKey)
+	}
+
+	res, err := b.client.Do(ctx, b.client.B().Eval().
+		Script(luaTryAllowAll).
+		Numkeys(4).
+		Key(credRPMKey).
+		Key(credTPMKey).
+		Key(modRPMKey).
+		Key(modTPMKey).
+		Arg(fmt.Sprintf("%d", now)).
+		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+		Arg(fmt.Sprintf("%d", credRPM)).
+		Arg(fmt.Sprintf("%d", credTPM)).
+		Arg(fmt.Sprintf("%d", modelRPM)).
+		Arg(fmt.Sprintf("%d", modelTPM)).
+		Arg(credMember).
+		Arg(modelMember).
+		Arg(fmt.Sprintf("%d", keyTTL)).
+		Build()).AsInt64()
+	if err != nil {
+		return false
+	}
+	return res == 1
+}
+
+// setCurrentUsage is a no-op for the Redis backend: all replicas write to the
+// shared Redis instance directly, so remote-sync is unnecessary.
+func (b *RedisBackend) setCurrentUsage(_ string, _, _ int) {}

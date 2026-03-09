@@ -1,18 +1,27 @@
-version: '3.8'
-
 services:
   auto-ai-router:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: auto-ai-router
+    # container_name: auto-ai-router
+
+    deploy:
+      replicas: 3
+
     ports:
-      - "8080:8080"
+      - "8080-8082:8080"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - ./vertex-api-keys:/app/vertex-api-keys:ro
       - ./logs:/app/logs
+
     environment:
       - LOG_LEVEL=debug
+      # Uncomment when redis section is enabled in config.yaml:
+      - REDIS_ADDRESS=valkey:6379
+      - REDIS_PASSWORD=changeme
+      - REDIS_ENABLED=true
+
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
@@ -20,9 +29,44 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+    networks:
+      - app-network
+
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: valkey
+    ports:
+      - "6379:6379"
+    command:
+      - "valkey-server"
+      - "--requirepass"
+      - "changeme"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--save"
+      - ""
+    volumes:
+      - valkey-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "changeme", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     networks:
       - app-network
 
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  valkey-data:

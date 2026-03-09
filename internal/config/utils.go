@@ -38,6 +38,10 @@ func parseField[T any](tempValue string, defaultValue T, parser parseFunc[T], fi
 	}
 
 	resolved := resolveEnvString(tempValue)
+	if resolved == "" {
+		return defaultValue, nil
+	}
+
 	parsed, err := parser(resolved)
 	if err != nil {
 		return defaultValue, fmt.Errorf("invalid %s: %w", fieldPath, err)
