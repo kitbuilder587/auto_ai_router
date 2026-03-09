@@ -172,14 +172,6 @@ func NormalizeModelName(fullName string) string {
 	parts := strings.Split(fullName, "/")
 	modelName := parts[len(parts)-1]
 
-	// Split by '.' to remove namespace prefixes (e.g., "anthropic.claude" -> take last part)
-	// But keep the model name intact
-	if len(parts) == 1 && strings.Contains(fullName, ".") {
-		// Format like "anthropic.claude/model" was not found, try splitting by dot
-		dotParts := strings.Split(fullName, ".")
-		modelName = dotParts[len(dotParts)-1]
-	}
-
 	// Convert to lowercase for case-insensitive matching
 	return strings.ToLower(modelName)
 }
