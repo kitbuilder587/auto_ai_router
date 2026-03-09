@@ -27,6 +27,9 @@ nav = [
     { "Grafana" = "monitoring/grafana.md" },
   ]},
   { "LiteLLM Integration" = "litellm-integration/litellm_db.md" },
+  { "CLI Integration" = [
+    {"Codex" = "cli-tools/codex.md"},
+  ]},
   { "Advanced" = [
     { "Security" = "advanced/security.md" },
     { "Load Balancing" = "advanced/balancing.md" },

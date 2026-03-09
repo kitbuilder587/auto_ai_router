@@ -74,25 +74,27 @@ response = client.responses.create(
 ```python
 response = client.responses.create(
     model="gpt-4o",
-    input=[{
-        "role": "user",
-        "content": [
-            {"type": "input_text", "text": "What color is this image?"},
-            {"type": "input_image", "image_url": "https://..."},
-        ],
-    }],
+    input=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What color is this image?"},
+                {"type": "input_image", "image_url": "https://..."},
+            ],
+        }
+    ],
 )
 ```
 
 Supported content part types:
 
-| Type | Description |
-|------|-------------|
-| `input_text` | Plain text |
-| `input_image` | Image by URL or data URL (`image_url` field). `detail` is forwarded. |
-| `input_audio` | Audio data (`data` + `format` fields) |
-| `output_text` | Assistant text (for passing history) |
-| `output_refusal` | Assistant refusal (for passing history) |
+| Type             | Description                                                          |
+| ---------------- | -------------------------------------------------------------------- |
+| `input_text`     | Plain text                                                           |
+| `input_image`    | Image by URL or data URL (`image_url` field). `detail` is forwarded. |
+| `input_audio`    | Audio data (`data` + `format` fields)                                |
+| `output_text`    | Assistant text (for passing history)                                 |
+| `output_refusal` | Assistant refusal (for passing history)                              |
 
 > **Not supported:** `input_image` with `file_id`, and `input_file`.
 
@@ -152,44 +154,50 @@ Only `function` type tools are supported. Both the flat Responses API format and
 
 ```python
 # Flat Responses API format
-tools = [{
-    "type": "function",
-    "name": "get_weather",
-    "description": "Get weather for a location",
-    "parameters": {
-        "type": "object",
-        "properties": {"location": {"type": "string"}},
-        "required": ["location"],
-    },
-    "strict": True,
-}]
+tools = [
+    {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get weather for a location",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"],
+        },
+        "strict": True,
+    }
+]
 ```
 
 ### Tool Choice
 
-| Value | Behavior |
-|-------|----------|
-| `"auto"` | Model decides whether to call a tool |
-| `"none"` | Model must not call any tool |
-| `"required"` | Model must call at least one tool |
+| Value                               | Behavior                               |
+| ----------------------------------- | -------------------------------------- |
+| `"auto"`                            | Model decides whether to call a tool   |
+| `"none"`                            | Model must not call any tool           |
+| `"required"`                        | Model must call at least one tool      |
 | `{"type": "function", "name": "x"}` | Model must call the specified function |
 
 > Other `tool_choice` object types (e.g. `file_search`) are rejected with an error.
 
 ## Parameters Mapping
 
-| Responses API | Chat Completions | Notes |
-|---------------|-----------------|-------|
-| `input` | `messages` | Converted as described above |
-| `instructions` | prepended `developer` message | |
-| `max_output_tokens` | `max_completion_tokens` | |
-| `reasoning.effort` | `reasoning_effort` | `"low"`, `"medium"`, `"high"` |
-| `text.format` | `response_format` | See below |
-| `tools` | `tools` | Flat → nested conversion |
-| `tool_choice` | `tool_choice` | Object form re-wrapped |
-| `temperature` | `temperature` | Passed through |
-| `top_p` | `top_p` | Passed through |
-| `stream` | `stream` | Passed through |
+| Responses API          | Chat Completions              | Notes                                      |
+| ---------------------- | ----------------------------- | ------------------------------------------ |
+| `input`                | `messages`                    | Converted as described above               |
+| `instructions`         | prepended `developer` message |                                            |
+| `max_output_tokens`    | `max_completion_tokens`       |                                            |
+| `reasoning.effort`     | `reasoning_effort`            | `"low"`, `"medium"`, `"high"`              |
+| `text.format`          | `response_format`             | See below                                  |
+| `tools`                | `tools`                       | Flat → nested conversion                   |
+| `tool_choice`          | `tool_choice`                 | Object form re-wrapped                     |
+| `temperature`          | `temperature`                 | Passed through                             |
+| `top_p`                | `top_p`                       | Passed through                             |
+| `stream`               | `stream`                      | Passed through                             |
+| `store`                | —                             | Handled server-side; see Response Storage  |
+| `previous_response_id` | —                             | History prepended before conversion        |
+| `metadata`             | —                             | Echoed back in response; not forwarded     |
+| `ttl`                  | —                             | Response expiry in seconds (0 = no expiry) |
 
 ### Structured Output (text.format)
 
@@ -197,16 +205,20 @@ tools = [{
 response = client.responses.create(
     model="gpt-4o",
     input="List three colors as JSON.",
-    text={"format": {
-        "type": "json_schema",
-        "name": "colors",
-        "schema": {
-            "type": "object",
-            "properties": {"colors": {"type": "array", "items": {"type": "string"}}},
-            "required": ["colors"],
-        },
-        "strict": True,
-    }},
+    text={
+        "format": {
+            "type": "json_schema",
+            "name": "colors",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "colors": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["colors"],
+            },
+            "strict": True,
+        }
+    },
 )
 ```
 
@@ -250,9 +262,9 @@ The response is a `Response` object with `object: "response"`:
 
 ### Status Values
 
-| Status | Cause |
-|--------|-------|
-| `"completed"` | Normal completion |
+| Status         | Cause                                     |
+| -------------- | ----------------------------------------- |
+| `"completed"`  | Normal completion                         |
 | `"incomplete"` | Hit `max_output_tokens` or content filter |
 
 When status is `"incomplete"`, `incomplete_details` contains `{"reason": "max_output_tokens"}` or `{"reason": "content_filter"}`.
@@ -289,6 +301,7 @@ with client.responses.stream(
 ### SSE Event Sequence
 
 **Text response:**
+
 ```
 response.created          → initial response object (status: in_progress)
 response.in_progress      → same response object
@@ -302,6 +315,7 @@ response.completed        → full response with usage
 ```
 
 **Tool call response:**
+
 ```
 response.created
 response.in_progress
@@ -314,12 +328,83 @@ response.completed
 
 Usage (`input_tokens`, `output_tokens`, `total_tokens`) is available in the `response.completed` event.
 
-## Ignored / Pass-Through Fields
+## Response Storage
 
-The following Responses API fields are accepted without error but are not processed:
+When `store: true` is set, the completed response is saved in a local [bbolt](https://github.com/etcd-io/bbolt) database.
 
-- `store`, `previous_response_id` — stateless proxy, no server-side state
-- `conversation` — use `input` array for conversation history instead
-- `include` — additional output inclusions not supported
-- `truncation`, `safety_identifier`, `service_tier`, `stream_options`
-- `metadata`, `user`, `parallel_tool_calls`
+```python
+response = client.responses.create(
+    model="gpt-4o",
+    input="What is the capital of France?",
+    store=True,
+    metadata={"session": "abc123"},
+    ttl=3600,  # optional: expire after 1 hour
+)
+print(response.id)  # e.g. "resp_abc123"
+```
+
+Stored responses can be retrieved with `GET /v1/responses/{id}`:
+
+```python
+stored = client.get("https://your-proxy/v1/responses/resp_abc123")
+```
+
+The stored record includes `store`, `metadata`, and `previous_response_id` echoed back from the original request.
+
+Database location:
+
+- `/data/auto_ai_router/responses.db` if `/data/auto_ai_router` exists
+- `/tmp/auto_ai_router/responses.db` otherwise
+
+Expired entries (when `ttl` is set) are cleaned up automatically by an hourly background worker.
+
+### Multi-Turn with previous_response_id
+
+Pass `previous_response_id` to continue a conversation from a stored response. The proxy automatically prepends the full history (accumulated input + previous output) before forwarding to the provider:
+
+```python
+response2 = client.responses.create(
+    model="gpt-4o",
+    input="And what is the population of that city?",
+    previous_response_id=response.id,
+    store=True,
+)
+```
+
+The previous response must have been stored with `store=True` and must belong to the same API key (or be accessed via master key).
+
+## Field Handling Reference
+
+### Forwarded to Provider (pass-through)
+
+These fields survive conversion and are sent to the backend as-is in the Chat Completions body:
+
+| Field                  | Notes                                                     |
+| ---------------------- | --------------------------------------------------------- |
+| `temperature`, `top_p` | Standard Chat Completions params                          |
+| `user`                 | Forwarded; providers that support it (OpenAI) will use it |
+| `parallel_tool_calls`  | Valid Chat Completions param, forwarded as-is             |
+
+### Handled Server-Side (not forwarded to provider)
+
+These fields are consumed by the proxy before the request reaches the provider:
+
+| Field                  | Behavior                                                       |
+| ---------------------- | -------------------------------------------------------------- |
+| `store`                | `true` → response saved to bbolt store after completion        |
+| `previous_response_id` | History prepended to `input` from the stored previous response |
+| `metadata`             | Stored alongside response; echoed back in the Response object  |
+| `ttl`                  | Response expiry in seconds; 0 = no expiry                      |
+
+### Deleted Before Forwarding (not yet implemented)
+
+These fields are stripped in `deleteResponsesFields()` before the request reaches the provider:
+
+| Field               | Reason not forwarded                                       |
+| ------------------- | ---------------------------------------------------------- |
+| `conversation`      | Requires server-side conversation management               |
+| `include`           | Each includable needs separate implementation              |
+| `stream_options`    | We inject our own `include_usage:true`; user settings lost |
+| `truncation`        | Context truncation not yet implemented                     |
+| `service_tier`      | Not mapped to credential selection yet                     |
+| `safety_identifier` | No provider-agnostic mapping                               |
