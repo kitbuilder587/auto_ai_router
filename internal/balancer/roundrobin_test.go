@@ -1047,6 +1047,71 @@ func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
 	}
 }
 
+// TestNextSameTypeForModelExcluding_ProxyDoesNotReturnVertexAI reproduces the bug where
+// same-type proxy retry could return a vertex-ai credential with empty BaseURL, causing
+// "unsupported protocol scheme" errors.
+func TestNextSameTypeForModelExcluding_ProxyDoesNotReturnVertexAI(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
+		{Name: "proxy2", Type: config.ProviderTypeProxy, BaseURL: "http://proxy2.com", RPM: -1},
+		{Name: "vertex1", Type: config.ProviderTypeVertexAI, RPM: -1},
+		{Name: "vertex2", Type: config.ProviderTypeVertexAI, RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Simulate: proxy1 tried, retry should return proxy2 (not vertex-ai)
+	exclude := map[string]bool{"proxy1": true}
+	cred, err := bal.NextSameTypeForModelExcluding("gemini-model", config.ProviderTypeProxy, exclude)
+	require.NoError(t, err)
+	assert.Equal(t, config.ProviderTypeProxy, cred.Type, "Same-type retry must return proxy type, not vertex-ai")
+	assert.Equal(t, "proxy2", cred.Name)
+}
+
+// TestNextSameTypeForModelExcluding_VertexAIDoesNotReturnProxy verifies that same-type
+// retry for vertex-ai credentials does not return proxy credentials.
+func TestNextSameTypeForModelExcluding_VertexAIDoesNotReturnProxy(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
+		{Name: "vertex1", Type: config.ProviderTypeVertexAI, RPM: -1},
+		{Name: "vertex2", Type: config.ProviderTypeVertexAI, RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Simulate: vertex1 tried, retry should return vertex2 (not proxy)
+	exclude := map[string]bool{"vertex1": true}
+	cred, err := bal.NextSameTypeForModelExcluding("gemini-model", config.ProviderTypeVertexAI, exclude)
+	require.NoError(t, err)
+	assert.Equal(t, config.ProviderTypeVertexAI, cred.Type, "Same-type retry must return vertex-ai type, not proxy")
+	assert.Equal(t, "vertex2", cred.Name)
+}
+
+// TestNextSameTypeForModelExcluding_NoSameTypeAvailable verifies proper error
+// when no same-type credentials are available.
+func TestNextSameTypeForModelExcluding_NoSameTypeAvailable(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
+		{Name: "vertex1", Type: config.ProviderTypeVertexAI, RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// All proxy credentials excluded
+	exclude := map[string]bool{"proxy1": true}
+	_, err := bal.NextSameTypeForModelExcluding("", config.ProviderTypeProxy, exclude)
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+}
+
 func TestSetLogger(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{500})
 	rl := ratelimit.New()

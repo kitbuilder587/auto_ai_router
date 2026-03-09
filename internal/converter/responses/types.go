@@ -4,18 +4,23 @@ package responses
 
 // Request represents an OpenAI Responses API request.
 type Request struct {
-	Model           string            `json:"model"`
-	Input           interface{}       `json:"input"` // string | []InputItem
-	Instructions    string            `json:"instructions,omitempty"`
-	MaxOutputTokens *int              `json:"max_output_tokens,omitempty"`
-	Temperature     *float64          `json:"temperature,omitempty"`
-	TopP            *float64          `json:"top_p,omitempty"`
-	Stream          bool              `json:"stream,omitempty"`
-	Tools           []Tool            `json:"tools,omitempty"`
-	ToolChoice      interface{}       `json:"tool_choice,omitempty"`
-	Reasoning       *Reasoning        `json:"reasoning,omitempty"`
-	Text            *TextConfig       `json:"text,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	Model            string            `json:"model"`
+	Input            interface{}       `json:"input"` // string | []InputItem
+	Instructions     string            `json:"instructions,omitempty"`
+	MaxOutputTokens  *int              `json:"max_output_tokens,omitempty"`
+	Temperature      *float64          `json:"temperature,omitempty"`
+	TopP             *float64          `json:"top_p,omitempty"`
+	Stream           bool              `json:"stream,omitempty"`
+	Tools            []Tool            `json:"tools,omitempty"`
+	ToolChoice       interface{}       `json:"tool_choice,omitempty"`
+	Reasoning        *Reasoning        `json:"reasoning,omitempty"`
+	Text             *TextConfig       `json:"text,omitempty"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
+	Conversation     interface{}       `json:"conversation,omitempty"`
+	Include          []string          `json:"include,omitempty"`
+	StreamOptions    interface{}       `json:"stream_options,omitempty"`
+	Truncation       string            `json:"truncation,omitempty"`
+	SafetyIdentifier string            `json:"safety_identifier,omitempty"`
 	// Fields we pass through but don't convert
 	Store              *bool  `json:"store,omitempty"`
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
@@ -74,7 +79,8 @@ type Reasoning struct {
 
 // TextConfig represents text output configuration in the Responses API.
 type TextConfig struct {
-	Format interface{} `json:"format,omitempty"` // {type: "text"} | {type: "json_schema", ...}
+	Format    interface{} `json:"format,omitempty"` // {type: "text"} | {type: "json_schema", ...}
+	Verbosity string      `json:"verbosity,omitempty"`
 }
 
 // Response types
@@ -104,6 +110,7 @@ type Response struct {
 	Truncation         string      `json:"truncation,omitempty"`
 	PreviousResponseID interface{} `json:"previous_response_id"` // null
 	Store              bool        `json:"store"`
+	ServiceTier        string      `json:"service_tier,omitempty"`
 }
 
 // OutputItem represents an output item in a Responses API response.
@@ -124,6 +131,7 @@ type OutputContent struct {
 	Type        string        `json:"type"` // "output_text"
 	Text        string        `json:"text"`
 	Annotations []interface{} `json:"annotations"`
+	Refusal     string        `json:"refusal,omitempty"`
 }
 
 // Usage represents token usage in a Responses API response.

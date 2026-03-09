@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,19 +13,21 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
 type orchestratedRequest struct {
-	request        *http.Request
-	body           []byte
-	modelID        string // alias name (for rate limiting, credential lookup, logging)
-	realModelID    string // real model name sent to provider (equals modelID if no alias configured)
-	streaming      bool
-	cred           *config.CredentialConfig
-	isResponsesAPI bool
-	convertedResp  bool
+	request           *http.Request
+	body              []byte
+	modelID           string // alias name (for rate limiting, credential lookup, logging)
+	realModelID       string // real model name sent to provider (equals modelID if no alias configured)
+	streaming         bool
+	cred              *config.CredentialConfig
+	isResponsesAPI    bool
+	convertedResp     bool
+	responsesMetadata *responses.ResponsesMetadata // non-nil for Responses API requests
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -62,12 +65,48 @@ func (p *Proxy) orchestrateRequest(
 		"url_path", r.URL.Path)
 
 	convertedResp := false
+	var responsesMetadata *responses.ResponsesMetadata
+
 	// Always convert Responses API requests for ALL providers.
 	// Even "openai"-type credentials may point to Azure OpenAI or other
 	// OpenAI-compatible endpoints that don't support the native /v1/responses
 	// endpoint and return Chat Completions SSE instead of Responses API SSE.
 	// Chat Completions API is universally supported, so converting is always safe.
 	if isResponsesAPI {
+		// Extract Responses-API-only metadata before the fields are deleted.
+		meta := responses.ExtractResponsesMetadata(body)
+		responsesMetadata = &meta
+
+		// Handle previous_response_id: load the previous entry and prepend its
+		// accumulated input + output so the model sees the full conversation history.
+		if meta.PreviousResponseID != "" && p.responseStore != nil {
+			apiKeyHash := litellmdb.HashToken(logCtx.Token)
+			prevEntry, loadErr := p.responseStore.GetEntry(r.Context(), meta.PreviousResponseID, apiKeyHash)
+			if loadErr != nil {
+				p.logger.Warn("Could not load previous_response_id, proceeding without history",
+					"id", meta.PreviousResponseID, "error", loadErr)
+			} else if prevEntry != nil && prevEntry.ResponseJSON != nil {
+				var accInput json.RawMessage
+				if prevEntry.AccumulatedInput != nil {
+					accInput = prevEntry.AccumulatedInput
+				}
+				newBody, prependErr := responses.PrependHistoryToInput(body, accInput, prevEntry.ResponseJSON.Output)
+				if prependErr != nil {
+					p.logger.Warn("Failed to prepend previous response history, ignoring",
+						"id", meta.PreviousResponseID, "error", prependErr)
+				} else {
+					body = newBody
+					p.logger.Debug("Prepended previous response history to input",
+						"previous_response_id", meta.PreviousResponseID,
+						"output_items", len(prevEntry.ResponseJSON.Output))
+				}
+			}
+		}
+
+		// Capture the full accumulated input (history + current) for storage.
+		// This must happen after any history prepending but before RequestToChat removes "input".
+		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(body)
+
 		chatBody, convErr := responses.RequestToChat(body)
 		if convErr != nil {
 			p.logger.Error("Failed to convert Responses API request", "error", convErr)
@@ -96,14 +135,15 @@ func (p *Proxy) orchestrateRequest(
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:        r,
-		body:           body,
-		modelID:        modelID,
-		realModelID:    realModelID,
-		streaming:      streaming,
-		cred:           cred,
-		isResponsesAPI: isResponsesAPI,
-		convertedResp:  convertedResp,
+		request:           r,
+		body:              body,
+		modelID:           modelID,
+		realModelID:       realModelID,
+		streaming:         streaming,
+		cred:              cred,
+		isResponsesAPI:    isResponsesAPI,
+		convertedResp:     convertedResp,
+		responsesMetadata: responsesMetadata,
 	}, true
 }
 

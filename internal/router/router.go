@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -50,6 +51,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Handle GET /v1/models
 	if req.URL.Path == "/v1/models" && req.Method == "GET" {
 		r.handleModels(w, req)
+		return
+	}
+
+	// Handle GET /v1/responses/{response_id} — retrieve a stored response
+	if req.Method == "GET" && strings.HasPrefix(req.URL.Path, "/v1/responses/") {
+		r.proxy.HandleGetResponse(w, req)
 		return
 	}
 

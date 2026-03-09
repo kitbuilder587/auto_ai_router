@@ -8,6 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
+	go.etcd.io/bbolt v1.3.11
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/genai v1.49.0
 	gopkg.in/yaml.v3 v3.0.1

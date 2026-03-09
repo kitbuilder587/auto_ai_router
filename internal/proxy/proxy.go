@@ -28,6 +28,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
@@ -90,6 +91,7 @@ type Config struct {
 	HealthChecker          HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry          *models.ModelPriceRegistry // Model pricing information (optional)
 	MaxProviderRetries     int                        // Max same-type credential retries (default: 2)
+	ResponseStore          *responsestore.Store       // Optional: bbolt-backed Responses API store
 }
 
 type Proxy struct {
@@ -109,6 +111,7 @@ type Proxy struct {
 	healthChecker       HealthChecker              // Cached DB health status (optional)
 	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
+	responseStore       *responsestore.Store       // Optional: bbolt-backed Responses API store
 }
 
 var (
@@ -170,6 +173,7 @@ func New(cfg *Config) *Proxy {
 		healthChecker:       cfg.HealthChecker,
 		priceRegistry:       cfg.PriceRegistry,
 		maxProviderRetries:  cfg.MaxProviderRetries,
+		responseStore:       cfg.ResponseStore,
 		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
 }
@@ -343,6 +347,29 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	logCtx.IsResponsesAPI = prepared.isResponsesAPI
 	logCtx.RealModelID = realModelID
 
+	// Build a callback that saves the completed Responses API response if store=true.
+	// Captured by streaming handlers and called when the stream completes.
+	// The callback enriches the response with request-echoed fields (store, previous_response_id,
+	// metadata) before persisting so GET /responses/{id} returns the canonical record.
+	var saveResponseFn func(*responses.Response)
+	if prepared.responsesMetadata != nil && prepared.responsesMetadata.Store && p.responseStore != nil {
+		apiKeyHash := litellmdb.HashToken(logCtx.Token)
+		meta := prepared.responsesMetadata
+		saveResponseFn = func(resp *responses.Response) {
+			if resp == nil {
+				return
+			}
+			applyResponsesMetadata(resp, meta)
+			if err := p.responseStore.SaveResponse(
+				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput,
+			); err != nil {
+				p.logger.Warn("Failed to save response to store", "id", resp.ID, "error", err)
+			} else {
+				p.logger.Debug("Saved response to store", "id", resp.ID)
+			}
+		}
+	}
+
 	// Log request details at DEBUG level
 	p.logger.Debug("Processing request",
 		"credential", cred.Name,
@@ -362,7 +389,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextForModelExcluding(modelID, triedCreds)
+				nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, config.ProviderTypeProxy, triedCreds)
 				if err != nil {
 					p.logger.Debug("No more same-type proxy credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
@@ -474,7 +501,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					Header:     proxyResp.Headers,
 					Body:       proxyResp.StreamBody,
 				}
-				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, realModelID, logCtx)
+				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
 					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
 				}
@@ -500,6 +527,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if convErr != nil {
 					p.logger.Error("Failed to convert proxy response to Responses API format", "error", convErr)
 				} else {
+					// Enrich the response with request-echoed fields (store, previous_response_id,
+					// metadata) for both the client payload and the store record.
+					var respObj responses.Response
+					if err := json.Unmarshal(responsesBody, &respObj); err == nil {
+						applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+						if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
+							responsesBody = enriched
+						}
+						if saveResponseFn != nil {
+							saveResponseFn(&respObj)
+						}
+					} else if saveResponseFn != nil {
+						// Fallback: save unenriched on unmarshal failure (shouldn't happen)
+						var r2 responses.Response
+						if json.Unmarshal(responsesBody, &r2) == nil {
+							saveResponseFn(&r2)
+						}
+					}
 					proxyResp.Body = responsesBody
 				}
 			}
@@ -544,6 +589,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Retry loop: try same-type credentials on provider errors (429/5xx/auth)
 	triedCreds := GetTried(r.Context())
+	initialCredType := cred.Type
 	var (
 		resp            *http.Response
 		responseBody    []byte
@@ -566,7 +612,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp = nil
 			responseBody = nil
 
-			nextCred, err := p.balancer.NextForModelExcluding(modelID, triedCreds)
+			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
 			if err != nil {
 				p.logger.Debug("No more same-type credentials for retry",
 					"model", modelID, "attempt", attempt, "error", err)
@@ -877,6 +923,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.Error("Failed to convert to Responses API format", "error", convErr)
 				// fallback: use Chat Completions body
 			} else {
+				// Enrich the response with request-echoed fields (store, previous_response_id,
+				// metadata) for both the client payload and the store record.
+				var respObj responses.Response
+				if err := json.Unmarshal(responsesBody, &respObj); err == nil {
+					applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+					if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
+						responsesBody = enriched
+					}
+					if saveResponseFn != nil {
+						saveResponseFn(&respObj)
+					}
+				} else if saveResponseFn != nil {
+					var r2 responses.Response
+					if json.Unmarshal(responsesBody, &r2) == nil {
+						saveResponseFn(&r2)
+					}
+				}
 				finalResponseBody = responsesBody
 			}
 		}
@@ -956,7 +1019,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// For error responses (4xx/5xx), pass through the provider error as-is.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				// Transform to Responses API SSE format
-				err := p.handleResponsesAPIStreaming(w, resp, cred, realModelID, logCtx)
+				err := p.handleResponsesAPIStreaming(w, resp, cred, realModelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
 					p.logger.Error("Failed to handle Responses API streaming", "error", err)
 					// Note: finalizeStreamingLog inside handleTransformedStreaming already
@@ -1084,4 +1147,72 @@ func (p *Proxy) streamResponseBody(w io.Writer, reader io.Reader) (int64, error)
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 	return io.CopyBuffer(w, reader, *buf)
+}
+
+// applyResponsesMetadata echoes request-side fields (store, previous_response_id, metadata)
+// into a Response object so the stored record and the client payload match the request.
+// It is safe to call multiple times (idempotent field assignment).
+func applyResponsesMetadata(resp *responses.Response, meta *responses.ResponsesMetadata) {
+	if meta == nil || resp == nil {
+		return
+	}
+	resp.Store = meta.Store
+	if meta.PreviousResponseID != "" {
+		resp.PreviousResponseID = meta.PreviousResponseID
+	}
+	if meta.Metadata != nil {
+		resp.Metadata = meta.Metadata
+	}
+}
+
+// HandleGetResponse handles GET /v1/responses/{response_id}.
+// Returns the stored Responses API response if the caller owns it.
+func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
+	if p.responseStore == nil {
+		WriteErrorNotFound(w, "Response store not enabled")
+		return
+	}
+
+	// Extract response_id from path (e.g. /v1/responses/resp_abc123)
+	const prefix = "/v1/responses/"
+	responseID := strings.TrimPrefix(r.URL.Path, prefix)
+	if responseID == "" || strings.ContainsRune(responseID, '/') {
+		WriteErrorNotFound(w, "Not Found")
+		return
+	}
+
+	// Auth
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		WriteErrorUnauthorized(w, "Missing Authorization header")
+		return
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == authHeader {
+		WriteErrorUnauthorized(w, "Invalid Authorization header format")
+		return
+	}
+
+	var resp *responses.Response
+	var err error
+
+	if token == p.masterKey {
+		// Master key: bypass ownership check
+		resp, err = p.responseStore.GetResponseByID(r.Context(), responseID)
+	} else {
+		apiKeyHash := litellmdb.HashToken(token)
+		resp, err = p.responseStore.GetResponse(r.Context(), responseID, apiKeyHash)
+	}
+
+	if err != nil {
+		p.logger.Debug("HandleGetResponse: not found or unauthorized", "id", responseID, "error", err)
+		WriteErrorNotFound(w, "Not Found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
+		p.logger.Error("HandleGetResponse: failed to encode response", "id", responseID, "error", encErr)
+	}
 }

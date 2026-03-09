@@ -145,7 +145,7 @@ func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.Credenti
 }
 
 func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool) (*config.CredentialConfig, error) {
-	return r.nextExcluding(modelID, allowOnlyFallback, allowOnlyProxy, nil)
+	return r.nextExcluding(modelID, allowOnlyFallback, allowOnlyProxy, "", nil)
 }
 
 // nextExcluding is the core credential selection logic with optional exclude set.
@@ -157,7 +157,7 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 //  2. Select the next candidate using an independent per-type counter when all candidates
 //     share the same ProviderType. This prevents high-frequency traffic of one provider type
 //     (e.g. OpenAI) from interfering with the round-robin cycling of another (e.g. Vertex AI).
-func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyProxy bool, exclude map[string]bool) (*config.CredentialConfig, error) {
+func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, exclude map[string]bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -177,6 +177,11 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 
 		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
+			continue
+		}
+
+		if requiredType != "" && cred.Type != requiredType {
+			monitoring.CredentialSelectionRejected.WithLabelValues("type_mismatch").Inc()
 			continue
 		}
 
@@ -279,10 +284,20 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 }
 
 // NextForModelExcluding returns the next available non-fallback credential that supports
-// the specified model, excluding credentials in the exclude set. Used for same-type
-// credential retry on provider errors (429/5xx/auth errors).
+// the specified model, excluding credentials in the exclude set.
 func (r *RoundRobin) NextForModelExcluding(modelID string, exclude map[string]bool) (*config.CredentialConfig, error) {
-	return r.nextExcluding(modelID, false, false, exclude)
+	return r.nextExcluding(modelID, false, false, "", exclude)
+}
+
+// NextSameTypeForModelExcluding returns the next available non-fallback credential of the
+// same type as credType, excluding credentials in the exclude set. Used for same-type
+// credential retry on provider errors (429/5xx/auth errors) to prevent cross-type routing.
+func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType config.ProviderType, exclude map[string]bool) (*config.CredentialConfig, error) {
+	if credType == config.ProviderTypeProxy {
+		// allowOnlyProxy=true already restricts to proxy type
+		return r.nextExcluding(modelID, false, true, "", exclude)
+	}
+	return r.nextExcluding(modelID, false, false, credType, exclude)
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
