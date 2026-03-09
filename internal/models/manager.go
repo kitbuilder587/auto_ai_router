@@ -60,7 +60,7 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.prices[modelName]
+	return r.prices[NormalizeModelName(modelName)]
 }
 
 // Update safely updates the registry with new prices
