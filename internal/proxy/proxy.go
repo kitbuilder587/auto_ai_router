@@ -389,7 +389,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextForModelExcluding(modelID, triedCreds)
+				nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, config.ProviderTypeProxy, triedCreds)
 				if err != nil {
 					p.logger.Debug("No more same-type proxy credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
@@ -589,6 +589,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Retry loop: try same-type credentials on provider errors (429/5xx/auth)
 	triedCreds := GetTried(r.Context())
+	initialCredType := cred.Type
 	var (
 		resp            *http.Response
 		responseBody    []byte
@@ -611,7 +612,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp = nil
 			responseBody = nil
 
-			nextCred, err := p.balancer.NextForModelExcluding(modelID, triedCreds)
+			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
 			if err != nil {
 				p.logger.Debug("No more same-type credentials for retry",
 					"model", modelID, "attempt", attempt, "error", err)
