@@ -605,7 +605,7 @@ func TestHandleResponsesAPIStreaming_Passthrough(t *testing.T) {
 		Type: config.ProviderTypeOpenAI,
 	}
 
-	err = prx.handleResponsesAPIStreaming(w, resp, cred, "gpt-4o", nil)
+	err = prx.handleResponsesAPIStreaming(w, resp, cred, "gpt-4o", nil, nil)
 	require.NoError(t, err)
 
 	body := w.Body.String()

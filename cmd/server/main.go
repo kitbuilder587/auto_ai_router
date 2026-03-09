@@ -24,6 +24,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -87,6 +88,21 @@ func main() {
 		log.Info("LiteLLM DB initial health check passed (marked healthy)")
 	}
 
+	// ==================== Create Response Store ====================
+	respStore, storeErr := responsestore.New()
+	if storeErr != nil {
+		log.Warn("Failed to initialize response store (Responses API store/previous_response_id will be disabled)",
+			"error", storeErr)
+		respStore = nil
+	} else {
+		log.Info("Response store initialized")
+		defer func() {
+			if err := respStore.Close(); err != nil {
+				log.Error("Failed to close response store", "error", err)
+			}
+		}()
+	}
+
 	// ==================== Create Proxy ====================
 	prx := proxy.New(&proxy.Config{
 		Balancer:               bal,
@@ -108,6 +124,7 @@ func main() {
 		HealthChecker:          healthChecker,
 		PriceRegistry:          priceRegistry,
 		MaxProviderRetries:     cfg.Server.MaxProviderRetries,
+		ResponseStore:          respStore,
 	})
 
 	// ==================== Background Goroutines ====================
@@ -119,6 +136,10 @@ func main() {
 
 	startMetricsUpdater(cfg, log, bgCtx, bal, rateLimiter, metrics, &wg, &updateMutex)
 	startProxyStatsUpdater(log, bgCtx, bal, rateLimiter, modelManager, &wg, &updateMutex)
+
+	if respStore != nil {
+		startResponseStoreCleanup(log, bgCtx, respStore, &wg)
+	}
 
 	if litellmDBManager.IsEnabled() {
 		startDBHealthMonitor(log, bgCtx, litellmDBManager, healthChecker, &wg)
@@ -524,4 +545,31 @@ func startDBHealthMonitor(
 	}()
 
 	log.Info("LiteLLM DB health monitor started (checks every 30 seconds)")
+}
+
+func startResponseStoreCleanup(
+	log *slog.Logger,
+	bgCtx context.Context,
+	store *responsestore.Store,
+	wg *sync.WaitGroup,
+) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				if err := store.CleanupExpired(bgCtx); err != nil {
+					log.Warn("Response store cleanup error", "error", err)
+				} else {
+					log.Debug("Response store cleanup completed")
+				}
+			}
+		}
+	}()
+	log.Info("Response store cleanup worker started (runs every 1 hour)")
 }

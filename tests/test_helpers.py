@@ -2,6 +2,9 @@
 Common test helpers and fixtures to reduce code duplication
 """
 
+import base64
+import struct
+import zlib
 import numpy as np
 from typing import Any, List, Dict
 
@@ -263,6 +266,29 @@ class ImageTestData:
     def get_red_pixel_base64() -> str:
         """Simple 1x1 red pixel PNG as base64"""
         return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+
+    @staticmethod
+    def create_data_url_png(width: int = 32, height: int = 32) -> str:
+        """Create a valid PNG image as a data URL.
+
+        Generates a white RGB PNG of the given dimensions.
+        Default 32x32 meets Azure OpenAI minimum (28x28 pixels).
+        """
+        def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+            payload = chunk_type + data
+            return (
+                struct.pack('>I', len(data))
+                + payload
+                + struct.pack('>I', zlib.crc32(payload) & 0xFFFFFFFF)
+            )
+
+        signature = b'\x89PNG\r\n\x1a\n'
+        ihdr = png_chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+        raw_data = (b'\x00' + b'\xff\xff\xff' * width) * height
+        idat = png_chunk(b'IDAT', zlib.compress(raw_data))
+        iend = png_chunk(b'IEND', b'')
+        png_bytes = signature + ihdr + idat + iend
+        return 'data:image/png;base64,' + base64.b64encode(png_bytes).decode()
 
     @staticmethod
     def build_image_url_message(url: str, text: str) -> Dict[str, Any]:

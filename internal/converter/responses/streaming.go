@@ -35,6 +35,9 @@ type streamAccumulator struct {
 	// State
 	state streamState
 
+	// Finish reason status
+	finishReason *string
+
 	// Whether header events have been emitted
 	headerEmitted bool
 	// Whether a message output item has been started
@@ -43,6 +46,11 @@ type streamAccumulator struct {
 	messageItemID string
 	// Whether completion events have been emitted (via [DONE])
 	completed bool
+
+	// Request-echoed metadata (populated from ResponsesMetadata when available)
+	storeFlag          bool
+	previousResponseID string
+	requestMetadata    map[string]string
 }
 
 type accumulatedToolCall struct {
@@ -99,13 +107,39 @@ type chatStreamChunk struct {
 
 // TransformChatStreamToResponses reads Chat Completions SSE from reader,
 // transforms to Responses API SSE events, and writes to writer.
-func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model string) error {
+// The optional onComplete callback is invoked with the fully-built Response
+// once the stream is complete (on [DONE] or stream end).
+// Pass a *ResponsesMetadata as the second variadic element to have store,
+// previous_response_id and metadata echoed back in all SSE response objects.
+func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model string, onComplete ...func(*Response)) error {
+	return transformChatStreamToResponsesInner(reader, writer, model, nil, onComplete...)
+}
+
+// TransformChatStreamToResponsesWithMeta is like TransformChatStreamToResponses but
+// additionally echoes request-side fields (store, previous_response_id, metadata) into
+// every emitted response object so the wire payload matches the stored record.
+func TransformChatStreamToResponsesWithMeta(reader io.Reader, writer io.Writer, model string, meta *ResponsesMetadata, onComplete ...func(*Response)) error {
+	return transformChatStreamToResponsesInner(reader, writer, model, meta, onComplete...)
+}
+
+func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, model string, meta *ResponsesMetadata, onComplete ...func(*Response)) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	acc := &streamAccumulator{
 		responseID: generateResponseID(),
 		model:      model,
+	}
+	if meta != nil {
+		acc.storeFlag = meta.Store
+		acc.previousResponseID = meta.PreviousResponseID
+		acc.requestMetadata = meta.Metadata
+	}
+
+	callOnComplete := func() {
+		if len(onComplete) > 0 && onComplete[0] != nil {
+			onComplete[0](buildTypedCompletedResponse(acc))
+		}
 	}
 
 	lineCount := 0
@@ -135,6 +169,7 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 				return err
 			}
 			acc.completed = true
+			callOnComplete()
 			break
 		}
 
@@ -184,6 +219,7 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 				"reason", *choice.FinishReason,
 				"accumulated_text_len", len(acc.fullText),
 				"tool_calls", len(acc.toolCalls))
+			acc.finishReason = choice.FinishReason
 			// The stream is ending; completion events will be emitted on [DONE]
 			continue
 		}
@@ -230,6 +266,10 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 
 			// New tool call (has ID)
 			if tc.ID != "" {
+				idx := tc.Index
+				for len(acc.toolCalls) <= idx {
+					acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{})
+				}
 				toolCall := accumulatedToolCall{
 					id:     tc.ID,
 					itemID: generateItemID("fc_"),
@@ -237,8 +277,8 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 				if tc.Function != nil {
 					toolCall.name = tc.Function.Name
 				}
-				acc.toolCalls = append(acc.toolCalls, toolCall)
-				acc.currentToolID = len(acc.toolCalls) - 1
+				acc.toolCalls[idx] = toolCall
+				acc.currentToolID = idx
 				acc.state = stateStreamingToolCall
 
 				// Emit output_item.added for function_call
@@ -253,9 +293,9 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 					"output_index": outputIndex,
 					"item": map[string]interface{}{
 						"type":      "function_call",
-						"id":        toolCall.itemID,
-						"call_id":   toolCall.id,
-						"name":      toolCall.name,
+						"id":        acc.toolCalls[idx].itemID,
+						"call_id":   acc.toolCalls[idx].id,
+						"name":      acc.toolCalls[idx].name,
 						"arguments": "",
 						"status":    "in_progress",
 					},
@@ -266,8 +306,14 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 			}
 
 			// Accumulate arguments
-			if tc.Function != nil && tc.Function.Arguments != "" && len(acc.toolCalls) > 0 {
-				idx := acc.currentToolID
+			if tc.Function != nil && tc.Function.Arguments != "" {
+				idx := tc.Index
+				if idx >= len(acc.toolCalls) {
+					for len(acc.toolCalls) <= idx {
+						acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{})
+					}
+					acc.toolCalls[idx].itemID = generateItemID("fc_")
+				}
 				acc.toolCalls[idx].arguments += tc.Function.Arguments
 
 				outputIndex := 0
@@ -306,6 +352,7 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 		if err := emitCompletionEvents(writer, acc); err != nil {
 			return err
 		}
+		callOnComplete()
 	}
 
 	// If no header events were emitted, emit them now along with completion
@@ -319,9 +366,90 @@ func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model st
 		if err := emitCompletionEvents(writer, acc); err != nil {
 			return err
 		}
+		callOnComplete()
 	}
 
 	return nil
+}
+
+// buildTypedCompletedResponse builds a typed *Response from the stream accumulator.
+func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
+	var output []OutputItem
+
+	if acc.messageStarted && acc.fullText != "" {
+		output = append(output, OutputItem{
+			Type:   "message",
+			ID:     acc.messageItemID,
+			Status: "completed",
+			Role:   "assistant",
+			Content: []OutputContent{{
+				Type:        "output_text",
+				Text:        acc.fullText,
+				Annotations: []interface{}{},
+			}},
+		})
+	}
+
+	for _, tc := range acc.toolCalls {
+		output = append(output, OutputItem{
+			Type:      "function_call",
+			ID:        tc.itemID,
+			Status:    "completed",
+			CallID:    tc.id,
+			Name:      tc.name,
+			Arguments: tc.arguments,
+		})
+	}
+
+	var usage *Usage
+	if acc.usage != nil {
+		usage = &Usage{
+			InputTokens:         acc.usage.PromptTokens,
+			OutputTokens:        acc.usage.CompletionTokens,
+			TotalTokens:         acc.usage.TotalTokens,
+			InputTokensDetails:  &InputDetails{CachedTokens: acc.usage.CachedTokens},
+			OutputTokensDetails: &OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens},
+		}
+	}
+
+	status := "completed"
+	var incompleteDetails interface{}
+	if acc.finishReason != nil {
+		switch *acc.finishReason {
+		case "length":
+			status = "incomplete"
+			incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+		case "content_filter":
+			status = "incomplete"
+			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+		}
+	}
+
+	metadata := map[string]string{}
+	for k, v := range acc.requestMetadata {
+		metadata[k] = v
+	}
+	var prevRespID interface{}
+	if acc.previousResponseID != "" {
+		prevRespID = acc.previousResponseID
+	}
+	return &Response{
+		ID:                 acc.responseID,
+		Object:             "response",
+		CreatedAt:          acc.createdAt,
+		Model:              acc.model,
+		Status:             status,
+		Output:             output,
+		Usage:              usage,
+		Error:              nil,
+		IncompleteDetails:  incompleteDetails,
+		Metadata:           metadata,
+		Tools:              []Tool{},
+		ParallelToolCalls:  true,
+		Instructions:       nil,
+		PreviousResponseID: prevRespID,
+		Store:              acc.storeFlag,
+	}
 }
 
 // truncate returns at most n bytes of s for safe debug logging.
@@ -487,22 +615,42 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 
 // buildInProgressResponse builds the response object for in-progress events.
 func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
+	status := "in_progress"
+	var incompleteDetails interface{}
+	if acc.finishReason != nil {
+		switch *acc.finishReason {
+		case "length":
+			status = "incomplete"
+			incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+		case "content_filter":
+			status = "incomplete"
+			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+		}
+	}
+	metadata := map[string]interface{}{}
+	for k, v := range acc.requestMetadata {
+		metadata[k] = v
+	}
+	var prevRespID interface{}
+	if acc.previousResponseID != "" {
+		prevRespID = acc.previousResponseID
+	}
 	return map[string]interface{}{
 		"id":                   acc.responseID,
 		"object":               "response",
 		"created_at":           acc.createdAt,
 		"model":                acc.model,
-		"status":               "in_progress",
+		"status":               status,
 		"output":               []interface{}{},
 		"usage":                nil,
 		"error":                nil,
-		"incomplete_details":   nil,
-		"metadata":             map[string]interface{}{},
+		"incomplete_details":   incompleteDetails,
+		"metadata":             metadata,
 		"tools":                []interface{}{},
 		"parallel_tool_calls":  true,
 		"instructions":         nil,
-		"previous_response_id": nil,
-		"store":                false,
+		"previous_response_id": prevRespID,
+		"store":                acc.storeFlag,
 	}
 }
 
@@ -552,22 +700,43 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 		}
 	}
 
+	status := "completed"
+	var incompleteDetails interface{}
+	if acc.finishReason != nil {
+		switch *acc.finishReason {
+		case "length":
+			status = "incomplete"
+			incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+		case "content_filter":
+			status = "incomplete"
+			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+		}
+	}
+
+	metadata := map[string]interface{}{}
+	for k, v := range acc.requestMetadata {
+		metadata[k] = v
+	}
+	var prevRespID interface{}
+	if acc.previousResponseID != "" {
+		prevRespID = acc.previousResponseID
+	}
 	return map[string]interface{}{
 		"id":                   acc.responseID,
 		"object":               "response",
 		"created_at":           acc.createdAt,
 		"model":                acc.model,
-		"status":               "completed",
+		"status":               status,
 		"output":               output,
 		"usage":                usageObj,
 		"error":                nil,
-		"incomplete_details":   nil,
-		"metadata":             map[string]interface{}{},
+		"incomplete_details":   incompleteDetails,
+		"metadata":             metadata,
 		"tools":                []interface{}{},
 		"parallel_tool_calls":  true,
 		"instructions":         nil,
-		"previous_response_id": nil,
-		"store":                false,
+		"previous_response_id": prevRespID,
+		"store":                acc.storeFlag,
 	}
 }
 

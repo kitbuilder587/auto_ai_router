@@ -51,6 +51,89 @@ func TestChatToResponse_BasicText(t *testing.T) {
 	assert.NotNil(t, resp.Output[0].Content[0].Annotations)
 }
 
+func TestChatToResponse_ContentArray(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": [{"type": "text", "text": "hi"}, {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}]
+			},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	assert.Len(t, resp.Output, 1)
+	assert.Equal(t, "message", resp.Output[0].Type)
+	assert.Equal(t, "hi", resp.Output[0].Content[0].Text)
+}
+
+func TestChatToResponse_Refusal(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "",
+				"refusal": "I can not do that"
+			},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	assert.Len(t, resp.Output, 1)
+	assert.Equal(t, "output_refusal", resp.Output[0].Content[0].Type)
+	assert.Equal(t, "I can not do that", resp.Output[0].Content[0].Refusal)
+}
+
+func TestChatToResponse_ContentArray_NoText(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": [{"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}]
+			},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	// Fallback empty message is created when no output items are generated
+	require.Len(t, resp.Output, 1)
+	assert.Equal(t, "message", resp.Output[0].Type)
+	assert.Equal(t, "", resp.Output[0].Content[0].Text)
+}
+
 func TestChatToResponse_ToolCalls(t *testing.T) {
 	ccBody := `{
 		"id": "chatcmpl-abc123",
@@ -210,6 +293,34 @@ func TestChatToResponse_EmptyContent(t *testing.T) {
 	}
 	assert.Len(t, resp.Output, 1)
 	assert.Equal(t, "function_call", resp.Output[0].Type)
+}
+
+func TestChatToResponse_MultipleChoices(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "hi"},
+			"finish_reason": "stop"
+		},{
+			"index": 1,
+			"message": {"role": "assistant", "content": "hello"},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	assert.Len(t, resp.Output, 2)
+	assert.Equal(t, "hi", resp.Output[0].Content[0].Text)
+	assert.Equal(t, "hello", resp.Output[1].Content[0].Text)
 }
 
 func TestChatToResponse_Structure(t *testing.T) {

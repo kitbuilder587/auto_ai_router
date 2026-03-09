@@ -31,8 +31,9 @@ func ChatToResponse(body []byte) ([]byte, error) {
 		Choices []struct {
 			Index   int `json:"index"`
 			Message struct {
-				Role      string `json:"role"`
-				Content   string `json:"content"`
+				Role      string      `json:"role"`
+				Content   interface{} `json:"content"`
+				Refusal   string      `json:"refusal,omitempty"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -67,57 +68,52 @@ func ChatToResponse(body []byte) ([]byte, error) {
 	var incompleteDetails interface{}
 
 	if len(ccResp.Choices) > 0 {
-		choice := ccResp.Choices[0]
+		for _, choice := range ccResp.Choices {
+			// Map finish_reason to status (use the first non-completed as overall status)
+			switch choice.FinishReason {
+			case "length":
+				status = "incomplete"
+				incompleteDetails = map[string]interface{}{
+					"reason": "max_output_tokens",
+				}
+			case "content_filter":
+				status = "incomplete"
+				incompleteDetails = map[string]interface{}{
+					"reason": "content_filter",
+				}
+			}
 
-		// Map finish_reason to status
-		switch choice.FinishReason {
-		case "stop":
-			status = "completed"
-		case "length":
-			status = "incomplete"
-			incompleteDetails = map[string]interface{}{
-				"reason": "max_output_tokens",
+			// Add message output item if there's content or refusal
+			msgContent := convertChatMessageContent(choice.Message.Content)
+			if choice.Message.Refusal != "" {
+				msgContent = append(msgContent, OutputContent{
+					Type:    "output_refusal",
+					Refusal: choice.Message.Refusal,
+				})
 			}
-		case "content_filter":
-			status = "incomplete"
-			incompleteDetails = map[string]interface{}{
-				"reason": "content_filter",
+			if len(msgContent) > 0 {
+				msgItem := OutputItem{
+					Type:    "message",
+					ID:      generateItemID("msg_"),
+					Status:  "completed",
+					Role:    "assistant",
+					Content: msgContent,
+				}
+				output = append(output, msgItem)
 			}
-		case "tool_calls":
-			status = "completed"
-		default:
-			status = "completed"
-		}
 
-		// Add message output item if there's text content
-		if choice.Message.Content != "" {
-			msgItem := OutputItem{
-				Type:   "message",
-				ID:     generateItemID("msg_"),
-				Status: "completed",
-				Role:   "assistant",
-				Content: []OutputContent{
-					{
-						Type:        "output_text",
-						Text:        choice.Message.Content,
-						Annotations: []interface{}{},
-					},
-				},
+			// Add function_call output items for each tool call
+			for _, tc := range choice.Message.ToolCalls {
+				fcItem := OutputItem{
+					Type:      "function_call",
+					ID:        generateItemID("fc_"),
+					Status:    "completed",
+					CallID:    tc.ID,
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				}
+				output = append(output, fcItem)
 			}
-			output = append(output, msgItem)
-		}
-
-		// Add function_call output items for each tool call
-		for _, tc := range choice.Message.ToolCalls {
-			fcItem := OutputItem{
-				Type:      "function_call",
-				ID:        generateItemID("fc_"),
-				Status:    "completed",
-				CallID:    tc.ID,
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-			}
-			output = append(output, fcItem)
 		}
 	}
 
@@ -185,4 +181,41 @@ func ChatToResponse(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal responses API response: %w", err)
 	}
 	return result, nil
+}
+
+func convertChatMessageContent(content interface{}) []OutputContent {
+	switch c := content.(type) {
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []OutputContent{
+			{
+				Type:        "output_text",
+				Text:        c,
+				Annotations: []interface{}{},
+			},
+		}
+	case []interface{}:
+		var out []OutputContent
+		for _, part := range c {
+			partMap, ok := part.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			partType, _ := partMap["type"].(string)
+			switch partType {
+			case "text":
+				text, _ := partMap["text"].(string)
+				out = append(out, OutputContent{
+					Type:        "output_text",
+					Text:        text,
+					Annotations: []interface{}{},
+				})
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }

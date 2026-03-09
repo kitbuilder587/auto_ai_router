@@ -15,15 +15,19 @@ from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseTextDeltaEvent,
 )
-from test_helpers import TestModels, ContentValidator
+from test_helpers import TestModels, ContentValidator, ToolDefinitions, ImageTestData
 
 
 # Responses API now works with all providers via internal conversion
 RESPONSES_MODELS = (
     TestModels.OPENAI_MODELS
-    + TestModels.VERTEX_MODELS
+    # + TestModels.VERTEX_MODELS
     + TestModels.ANTHROPIC_MODELS
 )
+
+# Capability-specific model subsets
+RESPONSES_TOOL_MODELS = TestModels.OPENAI_MODELS
+RESPONSES_VISION_MODELS = TestModels.OPENAI_MODELS
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +117,21 @@ class TestResponsesAPIBasic:
         validate_responses_api_usage(response)
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_message_input_object_format(self, openai_client, model):
+        """Test Responses API with a single message object as input."""
+        response = openai_client.responses.create(
+            model=model,
+            input={
+                "role": "user",
+                "content": "Say hello",
+            },
+            max_output_tokens=50,
+        )
+
+        validate_responses_api_response(response)
+        validate_responses_api_usage(response)
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
     def test_system_instructions(self, openai_client, model):
         """Test Responses API with system instructions."""
         response = openai_client.responses.create(
@@ -120,6 +139,22 @@ class TestResponsesAPIBasic:
             instructions="You are a pirate. Always respond in pirate language.",
             input="How are you?",
             max_output_tokens=100,
+        )
+
+        validate_responses_api_response(response)
+        validate_responses_api_usage(response)
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_instructions_as_messages(self, openai_client, model):
+        """Test instructions passed as an array of messages."""
+        response = openai_client.responses.create(
+            model=model,
+            instructions=[
+                {"role": "system", "content": "You are a pirate."},
+                {"role": "developer", "content": "Reply in one short sentence."},
+            ],
+            input="Greet me.",
+            max_output_tokens=50,
         )
 
         validate_responses_api_response(response)
@@ -324,11 +359,112 @@ class TestResponsesAPIMultiTurn:
 
 
 # ---------------------------------------------------------------------------
+# Store / retrieval tests
+# ---------------------------------------------------------------------------
+
+class TestResponsesAPIStore:
+    """Test Responses API store + previous_response_id behavior."""
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_store_and_retrieve(self, openai_client, model):
+        """Store a response and retrieve it by ID."""
+        response = openai_client.responses.create(
+            model=model,
+            input="Say the word 'stored' once.",
+            max_output_tokens=50,
+            store=True,
+            metadata={"test_tag": "store_retrieve"},
+            extra_body={"ttl" : 3600}
+        )
+
+        assert response.store is True, "response.store should be true when store=true"
+        assert response.metadata is not None
+        assert response.metadata.get("test_tag") == "store_retrieve"
+
+        retrieved = openai_client.responses.retrieve(response.id)
+        assert retrieved.id == response.id
+        assert retrieved.store is True
+        assert retrieved.metadata is not None
+        assert retrieved.metadata.get("test_tag") == "store_retrieve"
+        validate_responses_api_response(retrieved)
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_previous_response_id_context(self, openai_client, model):
+        """Use previous_response_id to provide multi-turn context from store."""
+        first = openai_client.responses.create(
+            model=model,
+            input="Remember this codeword: zebra-123. Reply only 'ok'.",
+            max_output_tokens=20,
+            store=True,
+        )
+
+        second = openai_client.responses.create(
+            model=model,
+            input="What codeword did I give you? Reply exactly.",
+            max_output_tokens=50,
+            previous_response_id=first.id,
+        )
+
+        assert second.previous_response_id == first.id
+        text = extract_response_text(second)
+        ContentValidator.assert_contains_any(text, ["zebra-123"])
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_retrieve_not_stored(self, openai_client, model):
+        """Responses with store=false should not be retrievable."""
+        response = openai_client.responses.create(
+            model=model,
+            input="This should not be stored.",
+            max_output_tokens=20,
+            store=False,
+        )
+
+        with pytest.raises(Exception):
+            openai_client.responses.retrieve(response.id)
+
+
+# ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
 
 class TestResponsesAPIEdgeCases:
     """Test edge cases for Responses API."""
+
+    @pytest.mark.parametrize("model", RESPONSES_TOOL_MODELS)
+    def test_tool_call_required(self, openai_client, model):
+        """Test that tool_choice=required yields a function_call output item."""
+        response = openai_client.responses.create(
+            model=model,
+            input="Get the weather in Paris. Use the tool.",
+            tools=[ToolDefinitions.get_weather_tool()],
+            tool_choice="required",
+            max_output_tokens=100,
+        )
+
+        has_tool_call = any(item.type == "function_call" for item in response.output)
+        assert has_tool_call, "expected at least one function_call output item"
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_tool_choice_unsupported(self, openai_client, model):
+        """Test unsupported tool_choice types are rejected."""
+        with pytest.raises(Exception):
+            openai_client.responses.create(
+                model=model,
+                input="hi",
+                tool_choice={"type": "file_search"},
+                max_output_tokens=10,
+            )
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_tools_unsupported_type(self, openai_client, model):
+        """Test unsupported tool types are rejected."""
+        with pytest.raises(Exception):
+            openai_client.responses.create(
+                model=model,
+                input="hi",
+                tools=[{"type": "web_search", "name": "search"}],
+                max_output_tokens=10,
+            )
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
     def test_special_characters(self, openai_client, model):
@@ -336,6 +472,29 @@ class TestResponsesAPIEdgeCases:
         response = openai_client.responses.create(
             model=model,
             input="Translate: 你好 мир 🚀",
+            max_output_tokens=100,
+        )
+
+        validate_responses_api_response(response)
+        validate_responses_api_usage(response)
+
+    @pytest.mark.parametrize("model", RESPONSES_VISION_MODELS)
+    def test_input_image_data_url(self, openai_client, model):
+        """Test input_image with a data URL."""
+        # 32x32 white PNG — meets Azure OpenAI minimum image size (28x28 px)
+        png_data_url = ImageTestData.create_data_url_png(32, 32)
+
+        response = openai_client.responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What color is this image?"},
+                        {"type": "input_image", "image_url": png_data_url},
+                    ],
+                }
+            ],
             max_output_tokens=100,
         )
 

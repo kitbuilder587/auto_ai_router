@@ -101,6 +101,36 @@ func buildToolCallStartChunk(callID, name string) string {
 	return string(data)
 }
 
+func buildToolCallStartChunkWithIndex(callID, name string, index int) string {
+	chunk := map[string]interface{}{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion.chunk",
+		"created": 1700000000,
+		"model":   "gpt-4o",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"delta": map[string]interface{}{
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"index": index,
+							"id":    callID,
+							"type":  "function",
+							"function": map[string]interface{}{
+								"name":      name,
+								"arguments": "",
+							},
+						},
+					},
+				},
+				"finish_reason": nil,
+			},
+		},
+	}
+	data, _ := json.Marshal(chunk)
+	return string(data)
+}
+
 func buildToolCallArgChunk(arguments string) string {
 	chunk := map[string]interface{}{
 		"id":      "chatcmpl-test",
@@ -114,6 +144,33 @@ func buildToolCallArgChunk(arguments string) string {
 					"tool_calls": []interface{}{
 						map[string]interface{}{
 							"index": 0,
+							"function": map[string]interface{}{
+								"arguments": arguments,
+							},
+						},
+					},
+				},
+				"finish_reason": nil,
+			},
+		},
+	}
+	data, _ := json.Marshal(chunk)
+	return string(data)
+}
+
+func buildToolCallArgChunkWithIndex(arguments string, index int) string {
+	chunk := map[string]interface{}{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion.chunk",
+		"created": 1700000000,
+		"model":   "gpt-4o",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"delta": map[string]interface{}{
+					"tool_calls": []interface{}{
+						map[string]interface{}{
+							"index": index,
 							"function": map[string]interface{}{
 								"arguments": arguments,
 							},
@@ -347,4 +404,66 @@ func TestStreamTransform_ToolCall(t *testing.T) {
 	assert.Contains(t, result, "get_weather")
 	assert.Contains(t, result, "call_abc")
 	assert.Contains(t, result, "response.completed")
+}
+
+func TestStreamTransform_ToolCall_Interleaved(t *testing.T) {
+	roleChunk := buildChatChunkWithRole("assistant")
+	tc1Start := buildToolCallStartChunkWithIndex("call_1", "fn1", 0)
+	tc2Start := buildToolCallStartChunkWithIndex("call_2", "fn2", 1)
+	tc1Arg1 := buildToolCallArgChunkWithIndex("{\"a\":", 0)
+	tc2Arg1 := buildToolCallArgChunkWithIndex("{\"b\":", 1)
+	tc1Arg2 := buildToolCallArgChunkWithIndex("1}", 0)
+	tc2Arg2 := buildToolCallArgChunkWithIndex("2}", 1)
+	stopReason := "tool_calls"
+	finishChunk := buildChatChunk("", &stopReason)
+
+	input := buildSSEChunk(roleChunk) +
+		buildSSEChunk(tc1Start) +
+		buildSSEChunk(tc2Start) +
+		buildSSEChunk(tc1Arg1) +
+		buildSSEChunk(tc2Arg1) +
+		buildSSEChunk(tc1Arg2) +
+		buildSSEChunk(tc2Arg2) +
+		buildSSEChunk(finishChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gpt-4o")
+	require.NoError(t, err)
+
+	result := output.String()
+	assert.Contains(t, result, "\"call_id\":\"call_1\"")
+	assert.Contains(t, result, "\"call_id\":\"call_2\"")
+	assert.Contains(t, result, "{\\\"a\\\":1}")
+	assert.Contains(t, result, "{\\\"b\\\":2}")
+}
+
+func TestStreamTransform_IncompleteFinishReason(t *testing.T) {
+	lengthReason := "length"
+	input := buildSSEChunk(buildChatChunk("Hello", nil)) +
+		buildSSEChunk(buildChatChunk("", &lengthReason)) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gpt-4o")
+	require.NoError(t, err)
+
+	result := output.String()
+	assert.Contains(t, result, "\"status\":\"incomplete\"")
+	assert.Contains(t, result, "\"incomplete_details\":{\"reason\":\"max_output_tokens\"}")
+}
+
+func TestStreamTransform_ContentFilterFinishReason(t *testing.T) {
+	filterReason := "content_filter"
+	input := buildSSEChunk(buildChatChunk("Hello", nil)) +
+		buildSSEChunk(buildChatChunk("", &filterReason)) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gpt-4o")
+	require.NoError(t, err)
+
+	result := output.String()
+	assert.Contains(t, result, "\"status\":\"incomplete\"")
+	assert.Contains(t, result, "\"incomplete_details\":{\"reason\":\"content_filter\"}")
 }

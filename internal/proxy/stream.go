@@ -578,12 +578,18 @@ func (p *Proxy) flushStreaming(controller *http.ResponseController, credName str
 // handleResponsesAPIStreaming handles streaming for Responses API requests.
 // It first converts the provider stream to OpenAI Chat Completions SSE format,
 // then converts that to Responses API SSE format.
+// The optional onComplete callback is invoked with the fully-built Response
+// once the stream finishes (used for store persistence).
+// meta (may be nil) is used to echo store/previous_response_id/metadata fields
+// back in every emitted SSE response object.
 func (p *Proxy) handleResponsesAPIStreaming(
 	w http.ResponseWriter,
 	resp *http.Response,
 	cred *config.CredentialConfig,
 	modelID string,
 	logCtx *RequestLogContext,
+	onComplete func(*responses.Response),
+	meta ...*responses.ResponsesMetadata,
 ) error {
 	p.logger.Debug("Starting Responses API streaming", "credential", cred.Name, "provider", cred.Type)
 
@@ -596,13 +602,19 @@ func (p *Proxy) handleResponsesAPIStreaming(
 		IsStreaming: true,
 	})
 
+	// Extract optional metadata for field echoing (nil is fine — echoing is skipped)
+	var reqMeta *responses.ResponsesMetadata
+	if len(meta) > 0 {
+		reqMeta = meta[0]
+	}
+
 	// Create a wrapper transformer that chains:
 	// Provider SSE -> Chat Completions SSE -> Responses API SSE
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		if conv.IsPassthrough() {
 			p.logger.Debug("Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
 				"model", modelID, "provider", cred.Type)
-			return responses.TransformChatStreamToResponses(r, w, modelID)
+			return responses.TransformChatStreamToResponsesWithMeta(r, w, modelID, reqMeta, onComplete)
 		}
 
 		p.logger.Debug("Responses API streaming: converted mode (Provider SSE → Chat Completions SSE → Responses SSE)",
@@ -628,7 +640,7 @@ func (p *Proxy) handleResponsesAPIStreaming(
 		}()
 
 		// Then convert Chat Completions SSE to Responses API SSE
-		err := responses.TransformChatStreamToResponses(pr, w, modelID)
+		err := responses.TransformChatStreamToResponsesWithMeta(pr, w, modelID, reqMeta, onComplete)
 		_ = pr.Close()
 		wg.Wait() // ensure goroutine completes before reading transformErr
 		if err != nil {
