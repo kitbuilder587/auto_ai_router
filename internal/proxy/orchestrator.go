@@ -19,15 +19,16 @@ import (
 )
 
 type orchestratedRequest struct {
-	request           *http.Request
-	body              []byte
-	modelID           string // alias name (for rate limiting, credential lookup, logging)
-	realModelID       string // real model name sent to provider (equals modelID if no alias configured)
-	streaming         bool
-	cred              *config.CredentialConfig
-	isResponsesAPI    bool
-	convertedResp     bool
-	responsesMetadata *responses.ResponsesMetadata // non-nil for Responses API requests
+	request              *http.Request
+	body                 []byte
+	modelID              string // alias name (for rate limiting, credential lookup, logging)
+	realModelID          string // real model name sent to provider (equals modelID if no alias configured)
+	streaming            bool
+	cred                 *config.CredentialConfig
+	isResponsesAPI       bool
+	convertedResp        bool
+	passthroughResponses bool                         // true for codex models: Responses API forwarded as-is (no Chat Completions conversion)
+	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -65,13 +66,9 @@ func (p *Proxy) orchestrateRequest(
 		"url_path", r.URL.Path)
 
 	convertedResp := false
+	passthroughResponses := false
 	var responsesMetadata *responses.ResponsesMetadata
 
-	// Always convert Responses API requests for ALL providers.
-	// Even "openai"-type credentials may point to Azure OpenAI or other
-	// OpenAI-compatible endpoints that don't support the native /v1/responses
-	// endpoint and return Chat Completions SSE instead of Responses API SSE.
-	// Chat Completions API is universally supported, so converting is always safe.
 	if isResponsesAPI {
 		// Extract Responses-API-only metadata before the fields are deleted.
 		meta := responses.ExtractResponsesMetadata(body)
@@ -79,6 +76,7 @@ func (p *Proxy) orchestrateRequest(
 
 		// Handle previous_response_id: load the previous entry and prepend its
 		// accumulated input + output so the model sees the full conversation history.
+		prevEntryHandled := false
 		if meta.PreviousResponseID != "" && p.responseStore != nil {
 			apiKeyHash := litellmdb.HashToken(logCtx.Token)
 			prevEntry, loadErr := p.responseStore.GetEntry(r.Context(), meta.PreviousResponseID, apiKeyHash)
@@ -96,6 +94,7 @@ func (p *Proxy) orchestrateRequest(
 						"id", meta.PreviousResponseID, "error", prependErr)
 				} else {
 					body = newBody
+					prevEntryHandled = true
 					p.logger.Debug("Prepended previous response history to input",
 						"previous_response_id", meta.PreviousResponseID,
 						"output_items", len(prevEntry.ResponseJSON.Output))
@@ -107,43 +106,71 @@ func (p *Proxy) orchestrateRequest(
 		// This must happen after any history prepending but before RequestToChat removes "input".
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(body)
 
-		chatBody, convErr := responses.RequestToChat(body)
-		if convErr != nil {
-			p.logger.Error("Failed to convert Responses API request", "error", convErr)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusBadRequest
-			logCtx.ErrorMsg = "Failed to convert Responses API request: " + convErr.Error()
-			WriteErrorBadRequest(w, "Failed to convert Responses API request")
-			return nil, false
+		if responses.IsCodexModel(modelID) {
+			// Codex passthrough: forward to the provider's native /v1/responses endpoint.
+			// Strip proxy-handled fields (store, metadata, ttl) from the forwarded body.
+			// If we resolved previous_response_id from our local store (history already
+			// injected into input), strip it too so the provider doesn't try to look it up.
+			// If we didn't resolve it, keep it in the body for the provider to handle natively.
+			var raw map[string]interface{}
+			if err := json.Unmarshal(body, &raw); err == nil {
+				delete(raw, "store")
+				delete(raw, "metadata")
+				delete(raw, "ttl")
+				if prevEntryHandled {
+					delete(raw, "previous_response_id")
+				}
+				if stripped, marshalErr := json.Marshal(raw); marshalErr == nil {
+					body = stripped
+				}
+			}
+			passthroughResponses = true
+			p.logger.Debug("Codex model: using native Responses API passthrough",
+				"model", modelID, "streaming", streaming)
+		} else {
+			// Non-codex: convert to Chat Completions format so all providers work uniformly.
+			// Even "openai"-type credentials may point to Azure OpenAI or other
+			// OpenAI-compatible endpoints that don't support the native /v1/responses
+			// endpoint. Chat Completions API is universally supported.
+			chatBody, convErr := responses.RequestToChat(body)
+			if convErr != nil {
+				p.logger.Error("Failed to convert Responses API request", "error", convErr)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusBadRequest
+				logCtx.ErrorMsg = "Failed to convert Responses API request: " + convErr.Error()
+				WriteErrorBadRequest(w, "Failed to convert Responses API request")
+				return nil, false
+			}
+			body = chatBody
+			convertedResp = true
+			// For streaming: inject stream_options.include_usage since extractMetadataFromBody
+			// skipped it for Responses API (the original body had "input" not "messages").
+			// Now that we've converted to Chat Completions format, providers need this.
+			if streaming {
+				body = injectStreamOptions(body)
+			}
+			// Rewrite URL path from /v1/responses to /v1/chat/completions
+			// so passthrough providers (OpenAI, Proxy) send to the correct endpoint.
+			r.URL.Path = strings.Replace(r.URL.Path, "/responses", "/chat/completions", 1)
+			p.logger.Debug("Converted Responses API request to Chat Completions format",
+				"model", modelID, "streaming", streaming)
 		}
-		body = chatBody
-		convertedResp = true
-		// For streaming: inject stream_options.include_usage since extractMetadataFromBody
-		// skipped it for Responses API (the original body had "input" not "messages").
-		// Now that we've converted to Chat Completions format, providers need this.
-		if streaming {
-			body = injectStreamOptions(body)
-		}
-		// Rewrite URL path from /v1/responses to /v1/chat/completions
-		// so passthrough providers (OpenAI, Proxy) send to the correct endpoint.
-		r.URL.Path = strings.Replace(r.URL.Path, "/responses", "/chat/completions", 1)
-		p.logger.Debug("Converted Responses API request to Chat Completions format",
-			"model", modelID, "streaming", streaming)
 	}
 
 	logCtx.Credential = cred
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:           r,
-		body:              body,
-		modelID:           modelID,
-		realModelID:       realModelID,
-		streaming:         streaming,
-		cred:              cred,
-		isResponsesAPI:    isResponsesAPI,
-		convertedResp:     convertedResp,
-		responsesMetadata: responsesMetadata,
+		request:              r,
+		body:                 body,
+		modelID:              modelID,
+		realModelID:          realModelID,
+		streaming:            streaming,
+		cred:                 cred,
+		isResponsesAPI:       isResponsesAPI,
+		convertedResp:        convertedResp,
+		passthroughResponses: passthroughResponses,
+		responsesMetadata:    responsesMetadata,
 	}, true
 }
 
