@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ResponsesMetadata holds Responses-API-only fields that are extracted from
@@ -196,6 +197,13 @@ func outputToInputItems(output []OutputItem) []interface{} {
 		}
 	}
 	return items
+}
+
+// IsCodexModel returns true when the model name indicates a codex model.
+// Codex models natively support the Responses API endpoint and should be
+// forwarded without converting to Chat Completions format.
+func IsCodexModel(modelID string) bool {
+	return strings.Contains(strings.ToLower(modelID), "codex")
 }
 
 // IsResponsesAPI checks if the body is a Responses API request.

@@ -505,6 +505,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
 				}
+			} else if prepared.passthroughResponses {
+				// Codex passthrough: provider returns native Responses API SSE — stream as-is.
+				defer func() {
+					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
+						p.logger.Error("Failed to close proxy streaming response body", "error", closeErr)
+					}
+				}()
+				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				w.WriteHeader(proxyResp.StatusCode)
+				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+				fakeResp := &http.Response{
+					StatusCode: proxyResp.StatusCode,
+					Header:     proxyResp.Headers,
+					Body:       proxyResp.StreamBody,
+				}
+				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
+					p.logger.Error("Failed to handle proxy passthrough Responses API streaming", "error", err)
+				}
 			} else {
 				totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
 				if err != nil {
@@ -521,8 +539,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			// Convert proxy response back to Responses API format if needed
-			if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+			// Save passthrough Responses API response or convert Chat Completions response if needed
+			if prepared.passthroughResponses && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				// Codex passthrough: body is already in Responses API format — just enrich and save.
+				var respObj responses.Response
+				if err := json.Unmarshal(proxyResp.Body, &respObj); err == nil {
+					applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+					if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
+						proxyResp.Body = enriched
+					}
+					if saveResponseFn != nil {
+						saveResponseFn(&respObj)
+					}
+				}
+			} else if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				responsesBody, convErr := responses.ChatToResponse(proxyResp.Body)
 				if convErr != nil {
 					p.logger.Error("Failed to convert proxy response to Responses API format", "error", convErr)
@@ -916,8 +946,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			bodyForTokenExtraction = []byte(decodedBody)
 		}
 
-		// Convert to Responses API format only if the request was converted to Chat Completions
-		if prepared.convertedResp && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// Handle Responses API response body.
+		if prepared.passthroughResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Codex passthrough: body is already in Responses API format — enrich and optionally save.
+			var respObj responses.Response
+			if err := json.Unmarshal(finalResponseBody, &respObj); err == nil {
+				applyResponsesMetadata(&respObj, prepared.responsesMetadata)
+				if enriched, marshalErr := json.Marshal(&respObj); marshalErr == nil {
+					finalResponseBody = enriched
+				}
+				if saveResponseFn != nil {
+					saveResponseFn(&respObj)
+				}
+			}
+		} else if prepared.convertedResp && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Non-codex: convert Chat Completions response back to Responses API format.
 			responsesBody, convErr := responses.ChatToResponse(finalResponseBody)
 			if convErr != nil {
 				p.logger.Error("Failed to convert to Responses API format", "error", convErr)
@@ -1050,6 +1093,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					if err != nil {
 						p.logger.Error("Failed to handle streaming response", "error", err)
 					}
+				}
+			}
+		} else if prepared.passthroughResponses {
+			// Codex passthrough: provider returns native Responses API SSE — forward as-is.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				if err := p.handlePassthroughResponsesStreaming(w, resp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
+					p.logger.Error("Failed to handle passthrough Responses API streaming", "error", err)
+				}
+			} else {
+				// Error response: stream as-is
+				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle streaming response", "error", err)
 				}
 			}
 		} else {
