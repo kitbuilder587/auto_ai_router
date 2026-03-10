@@ -657,3 +657,112 @@ func (p *Proxy) handleResponsesAPIStreaming(
 
 	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, string(cred.Type), transformer, logCtx)
 }
+
+// handlePassthroughResponsesStreaming handles Responses API streaming for codex models
+// that natively support the /v1/responses endpoint. The provider SSE stream is forwarded
+// to the client as-is.
+//
+// Token counts and the optional save callback are driven by the response.completed SSE
+// event. Because the event payload can be very large (full response JSON with reasoning),
+// it often spans multiple 8 KB buffer reads. This function maintains a line-level
+// accumulator (lineBuf) so that a data: line that arrives in pieces is reassembled
+// before JSON parsing, avoiding the silent json.Unmarshal failures that would otherwise
+// leave totalTokens = 0 and the store callback never invoked.
+func (p *Proxy) handlePassthroughResponsesStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	credName, modelID string,
+	logCtx *RequestLogContext,
+	onComplete func(*responses.Response),
+) error {
+	p.logger.Debug("Starting passthrough Responses API streaming",
+		"credential", credName, "model", modelID)
+
+	var (
+		totalTokens   int
+		chunkCount    int
+		lastRawChunk  []byte // last raw buffer for fallback in finalizeStreamingLog
+		completedData []byte // JSON payload of response.completed (used instead of lastRawChunk)
+		lineBuf       string // partial SSE line accumulator across buffer reads
+	)
+
+	onChunk := func(chunk []byte) {
+		chunkCount++
+		lastRawChunk = make([]byte, len(chunk))
+		copy(lastRawChunk, chunk)
+
+		// Combine the partial line buffered from the previous read with the new chunk.
+		// SSE data: lines can be arbitrarily long (e.g. response.completed with reasoning)
+		// and will be split across multiple 8 KB buffer reads.
+		combined := lineBuf + string(chunk)
+		lineBuf = ""
+
+		lastNL := strings.LastIndex(combined, "\n")
+		if lastNL < 0 {
+			// No newline yet — entire content is an incomplete line.
+			lineBuf = combined
+			return
+		}
+		if lastNL < len(combined)-1 {
+			// Characters after the last newline are an incomplete line.
+			lineBuf = combined[lastNL+1:]
+		}
+
+		// Walk every complete line in this chunk.
+		for _, line := range strings.Split(combined[:lastNL+1], "\n") {
+			line = strings.TrimRight(line, "\r")
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			jsonData := strings.TrimPrefix(line, "data: ")
+			if jsonData == "" || jsonData == "[DONE]" {
+				continue
+			}
+
+			var event struct {
+				Type     string             `json:"type"`
+				Response responses.Response `json:"response"`
+			}
+			if json.Unmarshal([]byte(jsonData), &event) == nil && event.Type == "response.completed" {
+				if event.Response.Usage != nil {
+					totalTokens = event.Response.Usage.TotalTokens
+				}
+				completedData = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it
+				if onComplete != nil {
+					onComplete(&event.Response)
+				}
+			}
+		}
+	}
+
+	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
+		p.logger.Error("streamToClient error in handlePassthroughResponsesStreaming",
+			"credential", credName, "error", err, "chunks_received", chunkCount)
+		return err
+	}
+
+	p.logger.Debug("handlePassthroughResponsesStreaming completed",
+		"credential", credName, "model", modelID,
+		"chunks_received", chunkCount, "total_tokens", totalTokens)
+
+	if totalTokens > 0 {
+		p.rateLimiter.ConsumeTokens(credName, totalTokens)
+		if modelID != "" {
+			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
+		}
+		p.logger.Debug("Streaming token usage recorded",
+			"credential", credName, "model", modelID, "tokens", totalTokens)
+	}
+
+	// Prefer the parsed response.completed payload for detailed token extraction.
+	// The raw lastRawChunk may contain only `data: [DONE]` with no usage info.
+	// completedData is plain JSON; extractJSONPayloadsFromStreamChunk handles it
+	// via the non-SSE fast path, so extractResponsesAPIUsage works correctly.
+	finalChunk := lastRawChunk
+	if len(completedData) > 0 {
+		finalChunk = completedData
+	}
+
+	p.finalizeStreamingLog(logCtx, totalTokens, finalChunk, "openai", resp.StatusCode)
+	return nil
+}

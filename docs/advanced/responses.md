@@ -21,18 +21,35 @@ The OpenAI SDK's `client.responses.create()` and `client.responses.stream()` wor
 flowchart LR
     Client["Client (openai SDK)"]
     Detect["IsResponsesAPI() has 'input' && !has 'messages'"]
+    IsCodex{"IsCodexModel()?"}
     ConvReq["RequestToChat() convert request"]
     Providers["Backend Providers (OpenAI / Vertex AI / Anthropic)"]
     ConvResp["ChatToResponse() or TransformChatStreamToResponses()"]
+    Passthrough["Native /v1/responses passthrough"]
     Client2["Client (Response object)"]
 
     Client -->|"POST /v1/responses Responses API body"| Detect
-    Detect -->|"yes"| ConvReq
+    Detect -->|"yes"| IsCodex
     Detect -->|"no → pass through"| Providers
+    IsCodex -->|"yes (codex)"| Passthrough
+    IsCodex -->|"no"| ConvReq
+    Passthrough -->|"Responses API body (proxy fields stripped)"| Providers
     ConvReq -->|"Chat Completions body"| Providers
     Providers -->|"Chat Completions response (streaming or non-streaming)"| ConvResp
+    Providers -->|"Responses API response (codex)"| Client2
     ConvResp -->|"Responses API response"| Client2
 ```
+
+### Codex Models — Native Passthrough
+
+Models whose name contains `codex` (e.g. `gpt-5.3-codex`) natively support the `/v1/responses` endpoint and are forwarded without Chat Completions conversion. The proxy:
+
+1. Strips proxy-only fields (`store`, `metadata`, `ttl`) from the forwarded body.
+2. Handles `previous_response_id` from the local store (prepends history to `input`), or keeps it in the body for the provider if not found locally.
+3. Forwards the body to the provider's `/v1/responses` endpoint unchanged.
+4. Saves the completed response to the local store if `store: true`.
+
+All response store features (`store`, `previous_response_id`, `metadata`, `ttl`, `GET /v1/responses/{id}`) work the same as for other models.
 
 ## Supported Input Formats
 
