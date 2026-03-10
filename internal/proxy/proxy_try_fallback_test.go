@@ -51,7 +51,7 @@ func TestTryFallbackProxy_NoFallback(t *testing.T) {
 
 	// Create HTTP request
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 
 	// Create response recorder to capture the response
@@ -140,7 +140,7 @@ func TestTryFallbackProxy_SameCredential(t *testing.T) {
 
 	// Create HTTP request
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 
 	// Create response recorder to capture the response

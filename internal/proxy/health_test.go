@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -15,18 +13,11 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
 
-func createHealthTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-}
-
 func createHealthTestProxy(credentialsCount int) *Proxy {
-	logger := createHealthTestLogger()
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
 	credentials := []config.CredentialConfig{}
 	for i := 1; i <= credentialsCount; i++ {
 		name := "cred_" + string(rune(i+'0'-1))
@@ -37,16 +28,12 @@ func createHealthTestProxy(credentialsCount int) *Proxy {
 			RPM:     100,
 			TPM:     1000,
 		})
-		rl.AddCredential(name, 100)
 	}
 
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
-	return prx
+	return NewTestProxyBuilder().
+		WithMasterKey("test-key").
+		WithCredentials(credentials...).
+		Build()
 }
 
 func TestHealthCheck_AllHealthy(t *testing.T) {
@@ -76,7 +63,7 @@ func TestHealthCheck_NoCredentials(t *testing.T) {
 }
 
 func TestHealthCheck_CredentialsInfo(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -128,7 +115,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 }
 
 func TestHealthCheck_CredentialRateLimit(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -163,7 +150,7 @@ func TestHealthCheck_CredentialRateLimit(t *testing.T) {
 }
 
 func TestHealthCheck_ModelInfo(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -207,25 +194,15 @@ func TestVisualHealthCheck_Success(t *testing.T) {
 }
 
 func TestVisualHealthCheck_NoTemplate(t *testing.T) {
-	logger := createHealthTestLogger()
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	cred := config.CredentialConfig{
-		Name:    "test_cred",
-		APIKey:  "sk-test",
-		BaseURL: "http://test.com",
-		RPM:     100,
-	}
-
-	rl.AddCredential(cred.Name, 100)
-
-	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithMasterKey("test-key").
+		WithCredentials(config.CredentialConfig{
+			Name:    "test_cred",
+			APIKey:  "sk-test",
+			BaseURL: "http://test.com",
+			RPM:     100,
+		}).
+		Build()
 
 	// Explicitly set template to nil to simulate template parsing error
 	prx.healthTemplate = nil
@@ -256,7 +233,7 @@ func TestVisualHealthCheck_HealthyStatus(t *testing.T) {
 }
 
 func TestHealthCheck_MultipleModelsPerCredential(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -289,7 +266,7 @@ func TestHealthCheck_MultipleModelsPerCredential(t *testing.T) {
 }
 
 func TestHealthCheck_BannedCredentials(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(1, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -330,7 +307,7 @@ func TestHealthCheck_BannedCredentials(t *testing.T) {
 }
 
 func TestHealthCheck_AllBanned(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(1, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -373,7 +350,7 @@ func TestHealthCheck_AllBanned(t *testing.T) {
 }
 
 func TestHealthCheck_CredentialsWithoutSpecificModels(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -406,7 +383,7 @@ func TestHealthCheck_CredentialsWithoutSpecificModels(t *testing.T) {
 }
 
 func TestVisualHealthCheck_ContainsCredentialInfo(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -440,7 +417,7 @@ func TestVisualHealthCheck_ContainsCredentialInfo(t *testing.T) {
 }
 
 func TestHealthCheck_ProxyCredentialLimitsFromRateLimiter(t *testing.T) {
-	logger := createHealthTestLogger()
+	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 

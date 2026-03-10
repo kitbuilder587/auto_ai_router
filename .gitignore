@@ -25,3 +25,4 @@ new_tests
 .env
 dashboard
 TODO.md
+coverage.html

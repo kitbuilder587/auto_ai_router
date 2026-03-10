@@ -1,7 +1,6 @@
 package testhelpers
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -40,26 +39,44 @@ func AssertJSONErrorResponse(t *testing.T, recorder *httptest.ResponseRecorder, 
 	assert.Equal(t, expectedMsg, resp.Error.Message)
 }
 
-// NewTestRequest creates an *http.Request with a JSON body for testing.
-func NewTestRequest(method, path string, body interface{}) *http.Request {
-	var bodyReader *bytes.Reader
-	if body != nil {
-		data, _ := json.Marshal(body)
-		bodyReader = bytes.NewReader(data)
-	} else {
-		bodyReader = bytes.NewReader(nil)
-	}
-
-	req := httptest.NewRequest(method, path, bodyReader)
-	req.Header.Set("Content-Type", "application/json")
-	return req
+// ResponseBuilder provides a fluent interface for building HTTP responses in tests.
+type ResponseBuilder struct {
+	statusCode int
+	headers    http.Header
+	body       interface{}
 }
 
-// NewTestRequestWithHeaders creates an *http.Request with a JSON body and custom headers.
-func NewTestRequestWithHeaders(method, path string, body interface{}, headers map[string]string) *http.Request {
-	req := NewTestRequest(method, path, body)
-	for k, v := range headers {
-		req.Header.Set(k, v)
+// NewResponseBuilder creates a new response builder with status 200 OK.
+func NewResponseBuilder() *ResponseBuilder {
+	return &ResponseBuilder{
+		statusCode: http.StatusOK,
+		headers:    make(http.Header),
 	}
-	return req
+}
+
+// WithStatus sets the HTTP status code.
+func (rb *ResponseBuilder) WithStatus(code int) *ResponseBuilder {
+	rb.statusCode = code
+	return rb
+}
+
+// WithJSONBody sets the response body to a JSON-encoded value and sets Content-Type to application/json.
+func (rb *ResponseBuilder) WithJSONBody(body interface{}) *ResponseBuilder {
+	rb.body = body
+	rb.headers.Set("Content-Type", "application/json")
+	return rb
+}
+
+// Write writes the response to the http.ResponseWriter.
+func (rb *ResponseBuilder) Write(w http.ResponseWriter) error {
+	for key, values := range rb.headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(rb.statusCode)
+	if rb.body != nil {
+		return json.NewEncoder(w).Encode(rb.body)
+	}
+	return nil
 }
