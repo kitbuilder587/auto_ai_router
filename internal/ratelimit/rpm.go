@@ -1,13 +1,15 @@
 package ratelimit
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
+
+// defaultContextTimeout is used when no context is provided
+const defaultContextTimeout = 30 * time.Second
 
 // RPMLimiter tracks and enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) limits.
 // Use this for API rate limiting where you need to track usage against configurable limits.
@@ -16,66 +18,79 @@ import (
 // - RPMLimiter: tracks usage against RPM/TPM limits (e.g., allow max 100 requests per minute)
 // - TimeBasedRateLimiter: enforces fixed minimum interval (e.g., wait 100ms between requests)
 //
-// Used for:
-// - Credential selection (balancer): check if credential RPM/TPM limits allow new request
-// - Token consumption tracking (proxy): record actual token usage for metrics
-// - Health checks: report current RPM/TPM usage against configured limits
+// Counter storage is delegated to a counterBackend (local in-process or distributed Redis).
+// The RPMLimiter itself only stores the configured limits.
 type RPMLimiter struct {
-	mu            sync.RWMutex
-	limiters      map[string]*limiter // credential limiters
-	modelLimiters map[string]*limiter // (credential:model) limiters
+	mu          sync.RWMutex
+	limits      map[string]*limiterConfig // credential name → limits
+	modelLimits map[string]*limiterConfig // "credential:model" → limits
+	backend     counterBackend
 }
 
+// limiterConfig holds the configured RPM and TPM limits for one key.
+// -1 means unlimited.
+type limiterConfig struct {
+	rpm int
+	tpm int
+}
+
+// tokenUsage is kept here (used by local_backend.go in the same package).
 type tokenUsage struct {
 	timestamp time.Time
 	count     int
 }
 
-type limiter struct {
-	rpm      int
-	tpm      int
-	requests []time.Time
-	tokens   []tokenUsage
-	mu       sync.Mutex
-}
-
-// MaxRequestsBufferSize limits the maximum number of request timestamps stored
-// This prevents unbounded memory growth. 10x the typical max RPM (1M) is safe upper bound
+// MaxRequestsBufferSize limits the maximum number of request timestamps stored in the
+// local backend. This prevents unbounded memory growth.
 const MaxRequestsBufferSize = 10_000_000
 
-// MaxTokensBufferSize limits the maximum number of token records stored
-// Similar protection for token tracking
+// MaxTokensBufferSize limits the maximum number of token records stored in the
+// local backend.
 const MaxTokensBufferSize = 10_000_000
 
+// New creates a new RPMLimiter backed by the in-process local backend.
 func New() *RPMLimiter {
 	return &RPMLimiter{
-		limiters:      make(map[string]*limiter),
-		modelLimiters: make(map[string]*limiter),
+		limits:      make(map[string]*limiterConfig),
+		modelLimits: make(map[string]*limiterConfig),
+		backend:     newLocalBackend(),
 	}
 }
 
-// makeModelKey creates a key for (credential, model) pair
+// NewWithRedis creates an RPMLimiter that stores counters in Redis/Valkey.
+func NewWithRedis(b *RedisBackend) *RPMLimiter {
+	return &RPMLimiter{
+		limits:      make(map[string]*limiterConfig),
+		modelLimits: make(map[string]*limiterConfig),
+		backend:     b,
+	}
+}
+
+// makeModelKey creates a composite key for a (credential, model) pair.
 func makeModelKey(credentialName, modelName string) string {
 	return fmt.Sprintf("%s:%s", credentialName, modelName)
 }
 
-// getCredentialLimiter retrieves credential limiter safely
-// Returns nil if credential not found
-func (r *RPMLimiter) getCredentialLimiter(credentialName string) *limiter {
-	r.mu.RLock()
-	limiter := r.limiters[credentialName]
-	r.mu.RUnlock()
-	return limiter
+// credKey returns the backend counter key for a credential.
+func credKey(credName string) string { return "c:" + credName }
+
+// modelCounterKey returns the backend counter key for a (credential, model) pair.
+func modelCounterKey(credName, modelName string) string {
+	return "m:" + makeModelKey(credName, modelName)
 }
 
-// getModelLimiter retrieves model limiter safely
-// Returns nil if model not tracked
-func (r *RPMLimiter) getModelLimiter(credentialName, modelName string) *limiter {
+func (r *RPMLimiter) getCredentialConfig(name string) *limiterConfig {
 	r.mu.RLock()
-	key := makeModelKey(credentialName, modelName)
-	limiter := r.modelLimiters[key]
+	cfg := r.limits[name]
 	r.mu.RUnlock()
-	return limiter
+	return cfg
+}
+
+func (r *RPMLimiter) getModelConfig(credName, modelName string) *limiterConfig {
+	r.mu.RLock()
+	cfg := r.modelLimits[makeModelKey(credName, modelName)]
+	r.mu.RUnlock()
+	return cfg
 }
 
 func (r *RPMLimiter) AddCredential(name string, rpm int) {
@@ -85,512 +100,387 @@ func (r *RPMLimiter) AddCredential(name string, rpm int) {
 func (r *RPMLimiter) AddCredentialWithTPM(name string, rpm int, tpm int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	r.limiters[name] = &limiter{
-		rpm:      rpm,
-		tpm:      tpm,
-		requests: make([]time.Time, 0),
-		tokens:   make([]tokenUsage, 0),
-	}
+	r.limits[name] = &limiterConfig{rpm: rpm, tpm: tpm}
 }
 
-// AddModel adds a model with RPM limit for a specific credential
 func (r *RPMLimiter) AddModel(credentialName, modelName string, rpm int) {
 	r.AddModelWithTPM(credentialName, modelName, rpm, -1)
 }
 
-// AddModelWithTPM adds a model with both RPM and TPM limits for a specific credential
 func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, tpm int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	key := makeModelKey(credentialName, modelName)
-	r.modelLimiters[key] = &limiter{
-		rpm:      rpm,
-		tpm:      tpm,
-		requests: make([]time.Time, 0),
-		tokens:   make([]tokenUsage, 0),
-	}
+	r.modelLimits[key] = &limiterConfig{rpm: rpm, tpm: tpm}
 }
 
-// setCurrentUsage fills request and token arrays to simulate current usage
-// Must be called with limiter.mu locked
-func setCurrentUsage(limiter *limiter, currentRPM, currentTPM int) {
-	now := utils.NowUTC()
-	// Use 59s ago (not 60s) as the start time so all entries are strictly
-	// within the 1-minute sliding window. cleanOldRequests/cleanOldTokens use
-	// After(oneMinuteAgo) which excludes entries exactly at the boundary.
-	windowStart := now.Add(-59 * time.Second)
-
-	// Fill requests array with dummy timestamps distributed over the window
-	if currentRPM > 0 {
-		limiter.requests = make([]time.Time, currentRPM)
-		for i := 0; i < currentRPM; i++ {
-			// Distribute requests evenly over the last 59 seconds
-			// Use int64 to prevent integer overflow for large RPM values
-			offset := time.Duration(int64(i)*59000/int64(currentRPM)) * time.Millisecond
-			limiter.requests[i] = windowStart.Add(offset)
-		}
-	} else {
-		limiter.requests = make([]time.Time, 0)
-	}
-
-	// Fill tokens array with a small number of entries that sum to currentTPM.
-	// Instead of allocating one entry per token (which would be millions of entries
-	// for large TPM values), we distribute the total across a fixed number of buckets.
-	if currentTPM > 0 {
-		const maxBuckets = 60 // one bucket per second over the window
-		numBuckets := currentTPM
-		if numBuckets > maxBuckets {
-			numBuckets = maxBuckets
-		}
-		limiter.tokens = make([]tokenUsage, numBuckets)
-		tokensPerBucket := currentTPM / numBuckets
-		remainder := currentTPM % numBuckets
-		for i := 0; i < numBuckets; i++ {
-			offset := time.Duration(int64(i)*59000/int64(numBuckets)) * time.Millisecond
-			count := tokensPerBucket
-			if i < remainder {
-				count++ // distribute remainder across first buckets
-			}
-			limiter.tokens[i] = tokenUsage{
-				timestamp: windowStart.Add(offset),
-				count:     count,
-			}
-		}
-	} else {
-		limiter.tokens = make([]tokenUsage, 0)
-	}
-}
-
-// SetCredentialCurrentUsage sets the current RPM/TPM usage for a credential
-// Used to synchronize usage from remote proxies
-func (r *RPMLimiter) SetCredentialCurrentUsage(credentialName string, currentRPM, currentTPM int) {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	setCurrentUsage(limiter, currentRPM, currentTPM)
-}
-
-// SetModelCurrentUsage sets the current RPM/TPM usage for a model
-// Used to synchronize usage from remote proxies
-func (r *RPMLimiter) SetModelCurrentUsage(credentialName, modelName string, currentRPM, currentTPM int) {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		return
-	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	setCurrentUsage(modelLimiter, currentRPM, currentTPM)
-}
-
-// checkRPMLimit checks if RPM limit allows request and optionally records it
-// Must be called with limiter.mu locked
-func checkRPMLimit(l *limiter, record bool) bool {
-	cleanOldRequests(l)
-
-	// Check limit only if RPM is not unlimited (-1)
-	if l.rpm != -1 && len(l.requests) >= l.rpm {
-		return false
-	}
-
-	// Record the request if requested
-	if record {
-		// Always record - but clean old requests first if buffer is full
-		if len(l.requests) >= MaxRequestsBufferSize {
-			cleanOldRequests(l)
-		}
-		// Only skip if still at capacity after cleaning (extremely rare edge case)
-		if len(l.requests) < MaxRequestsBufferSize {
-			l.requests = append(l.requests, utils.NowUTC())
-		}
-	}
-
-	return true
-}
-
+// Allow checks if a request for credentialName is allowed (RPM) and records it.
 func (r *RPMLimiter) Allow(credentialName string) bool {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return false
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	return checkRPMLimit(limiter, true)
+	return r.AllowCtx(context.Background(), credentialName)
 }
 
-// CanAllow checks if a request would be allowed without recording it
+// AllowCtx checks if a request for credentialName is allowed (RPM) and records it.
+// It uses the provided context for timeout/cancellation.
+func (r *RPMLimiter) AllowCtx(ctx context.Context, credentialName string) bool {
+	cfg := r.getCredentialConfig(credentialName)
+	if cfg == nil {
+		return false
+	}
+	// Use default timeout if context has no deadline
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.tryAllowRPM(ctx, credKey(credentialName), cfg.rpm)
+}
+
+// CanAllow checks whether a request would be allowed without recording it.
 func (r *RPMLimiter) CanAllow(credentialName string) bool {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
+	return r.CanAllowCtx(context.Background(), credentialName)
+}
+
+// CanAllowCtx checks whether a request would be allowed without recording it.
+func (r *RPMLimiter) CanAllowCtx(ctx context.Context, credentialName string) bool {
+	cfg := r.getCredentialConfig(credentialName)
+	if cfg == nil {
+		return false
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowRPM(ctx, credKey(credentialName), cfg.rpm)
+}
+
+// AllowModel checks model-level RPM and records if allowed.
+// Returns true if the model is not tracked (no limit configured).
+func (r *RPMLimiter) AllowModel(credentialName, modelName string) bool {
+	return r.AllowModelCtx(context.Background(), credentialName, modelName)
+}
+
+// AllowModelCtx checks model-level RPM and records if allowed.
+func (r *RPMLimiter) AllowModelCtx(ctx context.Context, credentialName, modelName string) bool {
+	cfg := r.getModelConfig(credentialName, modelName)
+	if cfg == nil {
+		return true
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.tryAllowRPM(ctx, modelCounterKey(credentialName, modelName), cfg.rpm)
+}
+
+// CanAllowModel checks model-level RPM without recording.
+// Returns true if the model is not tracked.
+func (r *RPMLimiter) CanAllowModel(credentialName, modelName string) bool {
+	return r.CanAllowModelCtx(context.Background(), credentialName, modelName)
+}
+
+// CanAllowModelCtx checks model-level RPM without recording.
+func (r *RPMLimiter) CanAllowModelCtx(ctx context.Context, credentialName, modelName string) bool {
+	cfg := r.getModelConfig(credentialName, modelName)
+	if cfg == nil {
+		return true
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowRPM(ctx, modelCounterKey(credentialName, modelName), cfg.rpm)
+}
+
+// AllowTokens checks whether the credential TPM limit permits further requests.
+func (r *RPMLimiter) AllowTokens(credentialName string) bool {
+	return r.AllowTokensCtx(context.Background(), credentialName)
+}
+
+// AllowTokensCtx checks whether the credential TPM limit permits further requests.
+func (r *RPMLimiter) AllowTokensCtx(ctx context.Context, credentialName string) bool {
+	cfg := r.getCredentialConfig(credentialName)
+	if cfg == nil {
+		return false
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowTPM(ctx, credKey(credentialName), cfg.tpm)
+}
+
+// AllowModelTokens checks whether the model TPM limit permits further requests.
+func (r *RPMLimiter) AllowModelTokens(credentialName, modelName string) bool {
+	return r.AllowModelTokensCtx(context.Background(), credentialName, modelName)
+}
+
+// AllowModelTokensCtx checks whether the model TPM limit permits further requests.
+func (r *RPMLimiter) AllowModelTokensCtx(ctx context.Context, credentialName, modelName string) bool {
+	cfg := r.getModelConfig(credentialName, modelName)
+	if cfg == nil {
+		return true
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowTPM(ctx, modelCounterKey(credentialName, modelName), cfg.tpm)
+}
+
+// ConsumeTokens records token usage for a credential.
+func (r *RPMLimiter) ConsumeTokens(credentialName string, tokenCount int) {
+	r.ConsumeTokensCtx(context.Background(), credentialName, tokenCount)
+}
+
+// ConsumeTokensCtx records token usage for a credential.
+func (r *RPMLimiter) ConsumeTokensCtx(ctx context.Context, credentialName string, tokenCount int) {
+	if r.getCredentialConfig(credentialName) == nil {
+		return
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.consumeTokens(ctx, credKey(credentialName), tokenCount)
+}
+
+// ConsumeModelTokens records token usage for a model within a credential.
+func (r *RPMLimiter) ConsumeModelTokens(credentialName, modelName string, tokenCount int) {
+	r.ConsumeModelTokensCtx(context.Background(), credentialName, modelName, tokenCount)
+}
+
+// ConsumeModelTokensCtx records token usage for a model within a credential.
+func (r *RPMLimiter) ConsumeModelTokensCtx(ctx context.Context, credentialName, modelName string, tokenCount int) {
+	if r.getModelConfig(credentialName, modelName) == nil {
+		return
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.consumeTokens(ctx, modelCounterKey(credentialName, modelName), tokenCount)
+}
+
+// GetCurrentRPM returns the number of requests in the last 60 seconds for a credential.
+func (r *RPMLimiter) GetCurrentRPM(credentialName string) int {
+	return r.GetCurrentRPMCtx(context.Background(), credentialName)
+}
+
+// GetCurrentRPMCtx returns the number of requests in the last 60 seconds for a credential.
+func (r *RPMLimiter) GetCurrentRPMCtx(ctx context.Context, credentialName string) int {
+	if r.getCredentialConfig(credentialName) == nil {
+		return 0
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentRPM(ctx, credKey(credentialName))
+}
+
+// GetCurrentTPM returns the sum of tokens in the last 60 seconds for a credential.
+func (r *RPMLimiter) GetCurrentTPM(credentialName string) int {
+	return r.GetCurrentTPMCtx(context.Background(), credentialName)
+}
+
+// GetCurrentTPMCtx returns the sum of tokens in the last 60 seconds for a credential.
+func (r *RPMLimiter) GetCurrentTPMCtx(ctx context.Context, credentialName string) int {
+	if r.getCredentialConfig(credentialName) == nil {
+		return 0
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentTPM(ctx, credKey(credentialName))
+}
+
+// GetCurrentModelRPM returns the RPM for a (credential, model) pair.
+func (r *RPMLimiter) GetCurrentModelRPM(credentialName, modelName string) int {
+	return r.GetCurrentModelRPMCtx(context.Background(), credentialName, modelName)
+}
+
+// GetCurrentModelRPMCtx returns the RPM for a (credential, model) pair.
+func (r *RPMLimiter) GetCurrentModelRPMCtx(ctx context.Context, credentialName, modelName string) int {
+	if r.getModelConfig(credentialName, modelName) == nil {
+		return 0
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentRPM(ctx, modelCounterKey(credentialName, modelName))
+}
+
+// GetCurrentModelTPM returns the TPM for a (credential, model) pair.
+func (r *RPMLimiter) GetCurrentModelTPM(credentialName, modelName string) int {
+	return r.GetCurrentModelTPMCtx(context.Background(), credentialName, modelName)
+}
+
+// GetCurrentModelTPMCtx returns the TPM for a (credential, model) pair.
+func (r *RPMLimiter) GetCurrentModelTPMCtx(ctx context.Context, credentialName, modelName string) int {
+	if r.getModelConfig(credentialName, modelName) == nil {
+		return 0
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentTPM(ctx, modelCounterKey(credentialName, modelName))
+}
+
+// TryAllowAll atomically checks credential RPM, credential TPM, model RPM, and model TPM.
+// Records credential and model RPM if all checks pass. Returns true if allowed.
+// modelName may be empty to skip model-level checks.
+func (r *RPMLimiter) TryAllowAll(credentialName, modelName string) bool {
+	return r.TryAllowAllCtx(context.Background(), credentialName, modelName)
+}
+
+// TryAllowAllCtx atomically checks credential RPM, credential TPM, model RPM, and model TPM.
+func (r *RPMLimiter) TryAllowAllCtx(ctx context.Context, credentialName, modelName string) bool {
+	credCfg := r.getCredentialConfig(credentialName)
+	if credCfg == nil {
 		return false
 	}
 
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
+	modelRPM := -1
+	modelTPM := -1
+	mKey := ""
 
-	return checkRPMLimit(limiter, false)
-}
-
-// cleanOldRequests removes requests older than 1 minute and returns count of valid ones
-// Must be called with limiter.mu locked
-func cleanOldRequests(l *limiter) int {
-	now := utils.NowUTC()
-	oneMinuteAgo := now.Add(-time.Minute)
-
-	// Pre-allocate with original capacity to avoid excessive allocations
-	validRequests := make([]time.Time, 0, len(l.requests))
-	for _, reqTime := range l.requests {
-		if reqTime.After(oneMinuteAgo) {
-			validRequests = append(validRequests, reqTime)
+	if modelName != "" {
+		modCfg := r.getModelConfig(credentialName, modelName)
+		if modCfg != nil {
+			modelRPM = modCfg.rpm
+			modelTPM = modCfg.tpm
+			mKey = modelCounterKey(credentialName, modelName)
 		}
 	}
-	l.requests = validRequests
 
-	return len(validRequests)
-}
-
-// cleanOldTokens removes tokens older than 1 minute and returns total count
-// Must be called with limiter.mu locked
-func cleanOldTokens(l *limiter) int {
-	now := utils.NowUTC()
-	oneMinuteAgo := now.Add(-time.Minute)
-
-	// Pre-allocate with original capacity to avoid excessive allocations
-	validTokens := make([]tokenUsage, 0, len(l.tokens))
-	count := 0
-	for _, tu := range l.tokens {
-		if tu.timestamp.After(oneMinuteAgo) {
-			validTokens = append(validTokens, tu)
-			count += tu.count
-		}
-	}
-	l.tokens = validTokens
-
-	return count
-}
-
-func (r *RPMLimiter) GetCurrentRPM(credentialName string) int {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return 0
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
 	}
 
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	return cleanOldRequests(limiter)
+	return r.backend.tryAllowAll(
+		ctx,
+		credKey(credentialName), credCfg.rpm, credCfg.tpm,
+		mKey, modelRPM, modelTPM,
+	)
 }
 
-// AllowModel checks if request to a specific model for a credential is allowed based on RPM limit
-func (r *RPMLimiter) AllowModel(credentialName, modelName string) bool {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		// Model not tracked for this credential, allow request
-		return true
+// SetCredentialCurrentUsage overwrites the sliding-window counters for a credential.
+// Used to synchronize usage from remote proxies. No-op for Redis backend.
+func (r *RPMLimiter) SetCredentialCurrentUsage(credentialName string, currentRPM, currentTPM int) {
+	r.SetCredentialCurrentUsageCtx(context.Background(), credentialName, currentRPM, currentTPM)
+}
+
+// SetCredentialCurrentUsageCtx overwrites the sliding-window counters for a credential.
+func (r *RPMLimiter) SetCredentialCurrentUsageCtx(ctx context.Context, credentialName string, currentRPM, currentTPM int) {
+	if r.getCredentialConfig(credentialName) == nil {
+		return
 	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return checkRPMLimit(modelLimiter, true)
-}
-
-// CanAllowModel checks if a model request would be allowed without recording it
-func (r *RPMLimiter) CanAllowModel(credentialName, modelName string) bool {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		// Model not tracked for this credential, allow request
-		return true
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
 	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return checkRPMLimit(modelLimiter, false)
+	r.backend.setCurrentUsage(ctx, credKey(credentialName), currentRPM, currentTPM)
 }
 
-// GetCurrentModelRPM returns current RPM for a model within a credential
-func (r *RPMLimiter) GetCurrentModelRPM(credentialName, modelName string) int {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		return 0
+// SetModelCurrentUsage overwrites the sliding-window counters for a (credential, model) pair.
+// No-op for Redis backend.
+func (r *RPMLimiter) SetModelCurrentUsage(credentialName, modelName string, currentRPM, currentTPM int) {
+	r.SetModelCurrentUsageCtx(context.Background(), credentialName, modelName, currentRPM, currentTPM)
+}
+
+// SetModelCurrentUsageCtx overwrites the sliding-window counters for a (credential, model) pair.
+func (r *RPMLimiter) SetModelCurrentUsageCtx(ctx context.Context, credentialName, modelName string, currentRPM, currentTPM int) {
+	if r.getModelConfig(credentialName, modelName) == nil {
+		return
 	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return cleanOldRequests(modelLimiter)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.setCurrentUsage(ctx, modelCounterKey(credentialName, modelName), currentRPM, currentTPM)
 }
 
-// GetAllModels returns list of all tracked (credential:model) keys
+// GetLimitRPM returns the configured RPM limit for a credential (-1 = not tracked).
+func (r *RPMLimiter) GetLimitRPM(credentialName string) int {
+	cfg := r.getCredentialConfig(credentialName)
+	if cfg == nil {
+		return -1
+	}
+	return cfg.rpm
+}
+
+// GetLimitTPM returns the configured TPM limit for a credential (-1 = not tracked).
+func (r *RPMLimiter) GetLimitTPM(credentialName string) int {
+	cfg := r.getCredentialConfig(credentialName)
+	if cfg == nil {
+		return -1
+	}
+	return cfg.tpm
+}
+
+// GetModelLimitRPM returns the configured RPM limit for a model (-1 = not tracked).
+func (r *RPMLimiter) GetModelLimitRPM(credentialName, modelName string) int {
+	cfg := r.getModelConfig(credentialName, modelName)
+	if cfg == nil {
+		return -1
+	}
+	return cfg.rpm
+}
+
+// GetModelLimitTPM returns the configured TPM limit for a model (-1 = not tracked).
+func (r *RPMLimiter) GetModelLimitTPM(credentialName, modelName string) int {
+	cfg := r.getModelConfig(credentialName, modelName)
+	if cfg == nil {
+		return -1
+	}
+	return cfg.tpm
+}
+
+// GetAllModels returns all tracked "credential:model" keys.
 func (r *RPMLimiter) GetAllModels() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	keys := make([]string, 0, len(r.modelLimiters))
-	for key := range r.modelLimiters {
-		keys = append(keys, key)
+	keys := make([]string, 0, len(r.modelLimits))
+	for k := range r.modelLimits {
+		keys = append(keys, k)
 	}
 	return keys
 }
 
-// ModelPair represents a parsed credential:model pair
+// ModelPair represents a parsed credential:model pair.
 type ModelPair struct {
 	Credential string
 	Model      string
 }
 
-// GetAllModelPairs returns list of all tracked (credential:model) pairs pre-parsed
+// GetAllModelPairs returns all tracked (credential, model) pairs pre-parsed.
 func (r *RPMLimiter) GetAllModelPairs() []ModelPair {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	pairs := make([]ModelPair, 0, len(r.modelLimiters))
-	for key := range r.modelLimiters {
-		// key format is always "credential:model" since we control the key creation
+	pairs := make([]ModelPair, 0, len(r.modelLimits))
+	for key := range r.modelLimits {
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) == 2 {
 			pairs = append(pairs, ModelPair{Credential: parts[0], Model: parts[1]})
 		}
 	}
 	return pairs
-}
-
-// ConsumeTokens records token usage for a credential
-func (r *RPMLimiter) ConsumeTokens(credentialName string, tokenCount int) {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	// Always record - but clean old tokens first if buffer is full
-	if len(limiter.tokens) >= MaxTokensBufferSize {
-		cleanOldTokens(limiter)
-	}
-	// Only skip if still at capacity after cleaning (extremely rare edge case)
-	if len(limiter.tokens) < MaxTokensBufferSize {
-		limiter.tokens = append(limiter.tokens, tokenUsage{
-			timestamp: utils.NowUTC(),
-			count:     tokenCount,
-		})
-	}
-}
-
-// checkTPMLimit checks if TPM limit allows request
-// Must be called with limiter.mu locked
-func checkTPMLimit(l *limiter) bool {
-	// -1 means unlimited TPM
-	if l.tpm == -1 {
-		return true
-	}
-
-	currentTPM := cleanOldTokens(l)
-
-	// Check if we're at or over the limit
-	return currentTPM < l.tpm
-}
-
-// AllowTokens checks if the given number of tokens can be consumed without exceeding TPM limit
-// This is a pre-check before making a request, but actual token count will be updated after response
-func (r *RPMLimiter) AllowTokens(credentialName string) bool {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return false
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	return checkTPMLimit(limiter)
-}
-
-// GetCurrentTPM returns current token usage per minute for a credential
-func (r *RPMLimiter) GetCurrentTPM(credentialName string) int {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return 0
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	return cleanOldTokens(limiter)
-}
-
-// ConsumeModelTokens records token usage for a model within a credential
-func (r *RPMLimiter) ConsumeModelTokens(credentialName, modelName string, tokenCount int) {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		return
-	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	// Always record - but clean old tokens first if buffer is full
-	if len(modelLimiter.tokens) >= MaxTokensBufferSize {
-		cleanOldTokens(modelLimiter)
-	}
-	// Only skip if still at capacity after cleaning (extremely rare edge case)
-	if len(modelLimiter.tokens) < MaxTokensBufferSize {
-		modelLimiter.tokens = append(modelLimiter.tokens, tokenUsage{
-			timestamp: utils.NowUTC(),
-			count:     tokenCount,
-		})
-	}
-}
-
-// AllowModelTokens checks if request to a specific model for a credential is allowed based on TPM limit
-func (r *RPMLimiter) AllowModelTokens(credentialName, modelName string) bool {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		// Model not tracked for this credential, allow request
-		return true
-	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return checkTPMLimit(modelLimiter)
-}
-
-// GetCurrentModelTPM returns current token usage per minute for a model within a credential
-func (r *RPMLimiter) GetCurrentModelTPM(credentialName, modelName string) int {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		return 0
-	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return cleanOldTokens(modelLimiter)
-}
-
-// GetLimitRPM returns the RPM limit for a credential
-func (r *RPMLimiter) GetLimitRPM(credentialName string) int {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return -1 // Not tracked
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	return limiter.rpm
-}
-
-// GetLimitTPM returns the TPM limit for a credential
-func (r *RPMLimiter) GetLimitTPM(credentialName string) int {
-	limiter := r.getCredentialLimiter(credentialName)
-	if limiter == nil {
-		return -1 // Not tracked
-	}
-
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-
-	return limiter.tpm
-}
-
-// GetModelLimitRPM returns the RPM limit for a model within a credential
-func (r *RPMLimiter) GetModelLimitRPM(credentialName, modelName string) int {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		return -1 // Not tracked
-	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return modelLimiter.rpm
-}
-
-// TryAllowAll atomically checks credential RPM, credential TPM, model RPM, and model TPM limits.
-// If all checks pass, it records the credential and model RPM usage. Returns true if allowed.
-// This prevents TOCTOU races where separate CanAllow+Allow calls could exceed limits.
-// modelName can be empty if no model-level limiting is needed.
-func (r *RPMLimiter) TryAllowAll(credentialName, modelName string) bool {
-	credLimiter := r.getCredentialLimiter(credentialName)
-	if credLimiter == nil {
-		return false
-	}
-
-	var modLimiter *limiter
-	if modelName != "" {
-		modLimiter = r.getModelLimiter(credentialName, modelName)
-		// nil modLimiter means model not tracked — no model-level limit to enforce
-	}
-
-	// Lock credential limiter first, then model limiter (consistent ordering)
-	credLimiter.mu.Lock()
-	defer credLimiter.mu.Unlock()
-
-	// Check credential RPM
-	if !checkRPMLimit(credLimiter, false) {
-		return false
-	}
-
-	// Check credential TPM
-	if !checkTPMLimit(credLimiter) {
-		return false
-	}
-
-	// Check model limits if model limiter exists
-	if modLimiter != nil {
-		modLimiter.mu.Lock()
-		defer modLimiter.mu.Unlock()
-
-		if !checkRPMLimit(modLimiter, false) {
-			return false
-		}
-		if !checkTPMLimit(modLimiter) {
-			return false
-		}
-	}
-
-	// All checks passed — now record RPM for both credential and model
-	recordRequest(credLimiter)
-	if modLimiter != nil {
-		recordRequest(modLimiter)
-	}
-
-	return true
-}
-
-// recordRequest appends a request timestamp to the limiter.
-// Must be called with limiter.mu locked.
-func recordRequest(l *limiter) {
-	if len(l.requests) >= MaxRequestsBufferSize {
-		cleanOldRequests(l)
-	}
-	if len(l.requests) < MaxRequestsBufferSize {
-		l.requests = append(l.requests, utils.NowUTC())
-	}
-}
-
-// GetModelLimitTPM returns the TPM limit for a model within a credential
-func (r *RPMLimiter) GetModelLimitTPM(credentialName, modelName string) int {
-	modelLimiter := r.getModelLimiter(credentialName, modelName)
-	if modelLimiter == nil {
-		return -1 // Not tracked
-	}
-
-	modelLimiter.mu.Lock()
-	defer modelLimiter.mu.Unlock()
-
-	return modelLimiter.tpm
 }

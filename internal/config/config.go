@@ -53,6 +53,132 @@ type Config struct {
 	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
 	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
+	Redis       RedisConfig        `yaml:"redis,omitempty"`
+}
+
+// RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
+// When Enabled=false the rate limiter falls back to in-process counters.
+type RedisConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// InitAddress is the list of Redis/Valkey node addresses (host:port).
+	// If a single address is given and it is not a cluster node, the client
+	// falls back to standalone mode automatically.
+	InitAddresses []string `yaml:"addresses"`
+
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
+
+	// SelectDB is the Redis database index (default: 0).
+	SelectDB int `yaml:"select_db,omitempty"`
+
+	// KeyPrefix is prepended to every rate-limit key (default: "rl:").
+	KeyPrefix string `yaml:"key_prefix,omitempty"`
+
+	TLSEnabled bool `yaml:"tls_enabled,omitempty"`
+
+	ConnectTimeout   time.Duration `yaml:"connect_timeout,omitempty"`    // default: 5s
+	ConnWriteTimeout time.Duration `yaml:"conn_write_timeout,omitempty"` // default: 10s
+
+	// ForceSingleClient disables cluster detection (useful for single-node / Valkey).
+	ForceSingleClient bool `yaml:"force_single_client,omitempty"`
+
+	// Pool settings
+	MinIdleConns    int           `yaml:"min_idle_conns,omitempty"`    // default: 10
+	MaxIdleConns    int           `yaml:"max_idle_conns,omitempty"`    // default: 100
+	MaxConnLifetime time.Duration `yaml:"max_conn_lifetime,omitempty"` // default: 30m
+
+	// KeyTTL is the TTL for rate limit keys in seconds (default: 120).
+	KeyTTL int `yaml:"key_ttl,omitempty"`
+
+	// CommandTimeout is the timeout for individual Redis commands (default: 3s).
+	CommandTimeout time.Duration `yaml:"command_timeout,omitempty"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
+func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled           string   `yaml:"enabled"`
+		InitAddresses     []string `yaml:"addresses"`
+		Username          string   `yaml:"username,omitempty"`
+		Password          string   `yaml:"password,omitempty"`
+		SelectDB          string   `yaml:"select_db,omitempty"`
+		KeyPrefix         string   `yaml:"key_prefix,omitempty"`
+		TLSEnabled        string   `yaml:"tls_enabled,omitempty"`
+		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
+		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
+		ForceSingleClient string   `yaml:"force_single_client,omitempty"`
+		MinIdleConns      string   `yaml:"min_idle_conns,omitempty"`
+		MaxIdleConns      string   `yaml:"max_idle_conns,omitempty"`
+		MaxConnLifetime   string   `yaml:"max_conn_lifetime,omitempty"`
+		KeyTTL            string   `yaml:"key_ttl,omitempty"`
+		CommandTimeout    string   `yaml:"command_timeout,omitempty"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	var err error
+
+	if r.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "redis.enabled"); err != nil {
+		return err
+	}
+
+	// Resolve env variables in each address
+	r.InitAddresses = make([]string, 0, len(temp.InitAddresses))
+	for _, addr := range temp.InitAddresses {
+		r.InitAddresses = append(r.InitAddresses, resolveEnvString(addr))
+	}
+
+	r.Username = resolveEnvString(temp.Username)
+	r.Password = resolveEnvString(temp.Password)
+	r.KeyPrefix = resolveEnvString(temp.KeyPrefix)
+
+	if r.SelectDB, err = parseField(temp.SelectDB, 0, strconv.Atoi, "redis.select_db"); err != nil {
+		return err
+	}
+	if r.TLSEnabled, err = parseField(temp.TLSEnabled, false, strconv.ParseBool, "redis.tls_enabled"); err != nil {
+		return err
+	}
+	if r.ForceSingleClient, err = parseField(temp.ForceSingleClient, false, strconv.ParseBool, "redis.force_single_client"); err != nil {
+		return err
+	}
+	if r.ConnectTimeout, err = parseField(temp.ConnectTimeout, 5*time.Second, time.ParseDuration, "redis.connect_timeout"); err != nil {
+		return err
+	}
+	if r.ConnWriteTimeout, err = parseField(temp.ConnWriteTimeout, 10*time.Second, time.ParseDuration, "redis.conn_write_timeout"); err != nil {
+		return err
+	}
+
+	// Pool settings
+	if r.MinIdleConns, err = parseField(temp.MinIdleConns, 10, strconv.Atoi, "redis.min_idle_conns"); err != nil {
+		return err
+	}
+	if r.MaxIdleConns, err = parseField(temp.MaxIdleConns, 100, strconv.Atoi, "redis.max_idle_conns"); err != nil {
+		return err
+	}
+	if r.MaxConnLifetime, err = parseField(temp.MaxConnLifetime, 30*time.Minute, time.ParseDuration, "redis.max_conn_lifetime"); err != nil {
+		return err
+	}
+
+	// Key TTL
+	if r.KeyTTL, err = parseField(temp.KeyTTL, 120, strconv.Atoi, "redis.key_ttl"); err != nil {
+		return err
+	}
+
+	// Command timeout
+	if r.CommandTimeout, err = parseField(temp.CommandTimeout, 3*time.Second, time.ParseDuration, "redis.command_timeout"); err != nil {
+		return err
+	}
+
+	// Apply default key prefix
+	if r.KeyPrefix == "" {
+		r.KeyPrefix = "rl:"
+	}
+
+	return nil
 }
 
 type ServerConfig struct {
@@ -627,6 +753,13 @@ func (c *Config) Validate() error {
 		// TPM: 0 or -1 means unlimited, positive means limited
 		if cred.TPM < -1 {
 			return fmt.Errorf("credential %s: invalid tpm: %d (must be -1 or 0 for unlimited, or positive number)", cred.Name, cred.TPM)
+		}
+	}
+
+	// Validate Redis config
+	if c.Redis.Enabled {
+		if len(c.Redis.InitAddresses) == 0 {
+			return fmt.Errorf("redis.addresses is required when redis is enabled")
 		}
 	}
 

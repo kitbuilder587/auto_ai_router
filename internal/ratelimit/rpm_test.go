@@ -12,8 +12,8 @@ func TestNew(t *testing.T) {
 	rl := New()
 
 	assert.NotNil(t, rl)
-	assert.NotNil(t, rl.limiters)
-	assert.NotNil(t, rl.modelLimiters)
+	assert.NotNil(t, rl.limits)
+	assert.NotNil(t, rl.modelLimits)
 }
 
 func TestAddCredential(t *testing.T) {
@@ -195,16 +195,14 @@ func TestSlidingWindow_Cleanup(t *testing.T) {
 	assert.Equal(t, 3, rl.GetCurrentRPM("cred1"))
 
 	// Manually manipulate request times to simulate old requests
-	rl.mu.Lock()
-	limiter := rl.limiters["cred1"]
-	limiter.mu.Lock()
-	// Set all requests to 2 minutes ago
+	lb := rl.backend.(*localBackend)
+	c := lb.getOrCreate(credKey("cred1"))
+	c.mu.Lock()
 	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range limiter.requests {
-		limiter.requests[i] = oldTime
+	for i := range c.requests {
+		c.requests[i] = oldTime
 	}
-	limiter.mu.Unlock()
-	rl.mu.Unlock()
+	c.mu.Unlock()
 
 	// Make a new request - should clean up old ones
 	rl.Allow("cred1")
@@ -487,15 +485,14 @@ func TestGetCurrentTPM_Cleanup(t *testing.T) {
 	assert.Equal(t, 1000, rl.GetCurrentTPM("cred1"))
 
 	// Manually set old timestamps
-	rl.mu.Lock()
-	limiter := rl.limiters["cred1"]
-	limiter.mu.Lock()
+	lb := rl.backend.(*localBackend)
+	c := lb.getOrCreate(credKey("cred1"))
+	c.mu.Lock()
 	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range limiter.tokens {
-		limiter.tokens[i].timestamp = oldTime
+	for i := range c.tokens {
+		c.tokens[i].timestamp = oldTime
 	}
-	limiter.mu.Unlock()
-	rl.mu.Unlock()
+	c.mu.Unlock()
 
 	// Current TPM should be 0 (old tokens cleaned up)
 	assert.Equal(t, 0, rl.GetCurrentTPM("cred1"))
@@ -780,15 +777,14 @@ func TestConsumeTokens_TokenCleanup(t *testing.T) {
 	assert.Equal(t, 5000, rl.GetCurrentTPM("cred1"))
 
 	// Manually set old timestamps
-	rl.mu.Lock()
-	limiter := rl.limiters["cred1"]
-	limiter.mu.Lock()
+	lb := rl.backend.(*localBackend)
+	c := lb.getOrCreate(credKey("cred1"))
+	c.mu.Lock()
 	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range limiter.tokens {
-		limiter.tokens[i].timestamp = oldTime
+	for i := range c.tokens {
+		c.tokens[i].timestamp = oldTime
 	}
-	limiter.mu.Unlock()
-	rl.mu.Unlock()
+	c.mu.Unlock()
 
 	// After cleanup, should be 0
 	assert.Equal(t, 0, rl.GetCurrentTPM("cred1"))
@@ -807,16 +803,14 @@ func TestConsumeModelTokens_TokenCleanup(t *testing.T) {
 	assert.Equal(t, 5000, rl.GetCurrentModelTPM("cred1", "gpt-4o"))
 
 	// Manually set old timestamps
-	rl.mu.Lock()
-	key := "cred1:gpt-4o"
-	limiter := rl.modelLimiters[key]
-	limiter.mu.Lock()
-	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range limiter.tokens {
-		limiter.tokens[i].timestamp = oldTime
+	lb2 := rl.backend.(*localBackend)
+	c2 := lb2.getOrCreate(modelCounterKey("cred1", "gpt-4o"))
+	c2.mu.Lock()
+	oldTime2 := time.Now().UTC().Add(-2 * time.Minute)
+	for i := range c2.tokens {
+		c2.tokens[i].timestamp = oldTime2
 	}
-	limiter.mu.Unlock()
-	rl.mu.Unlock()
+	c2.mu.Unlock()
 
 	// After cleanup, should be 0
 	assert.Equal(t, 0, rl.GetCurrentModelTPM("cred1", "gpt-4o"))

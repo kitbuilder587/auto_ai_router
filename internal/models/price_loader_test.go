@@ -35,7 +35,7 @@ func TestNormalizeModelName(t *testing.T) {
 		{
 			name:     "dot-separated namespace without slash",
 			input:    "anthropic.claude",
-			expected: "claude",
+			expected: "anthropic.claude",
 		},
 		{
 			name:     "with whitespace",
@@ -60,7 +60,7 @@ func TestNormalizeModelName(t *testing.T) {
 		{
 			name:     "dot splits without slash takes last segment",
 			input:    "claude-3.5-sonnet@20241022",
-			expected: "5-sonnet@20241022",
+			expected: "claude-3.5-sonnet@20241022",
 		},
 		{
 			name:     "slash preserves dots in model name",

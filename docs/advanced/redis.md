@@ -1,0 +1,153 @@
+# Redis / Valkey Integration
+
+Auto AI Router supports an optional Redis (or [Valkey](https://valkey.io/)) backend that enables two features when running multiple replicas:
+
+| Feature                              | Without Redis                                                 | With Redis                                                 |
+| ------------------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Rate limiting** (RPM/TPM)          | Per-pod counters — each replica enforces limits independently | Global counters — limits enforced across the whole cluster |
+| **Response storage** (`store: true`) | Local bbolt file — not accessible from other pods             | Shared Redis — any replica can retrieve stored responses   |
+
+If Redis is not configured, both features fall back to their original in-process implementations automatically.
+
+## When to use Redis
+
+Enable Redis if you run **two or more replicas** of auto-ai-router. Without it:
+
+- A credential with `rpm: 100` effectively allows `100 × N` requests per minute (where N is the number of pods).
+- Responses stored with `store: true` are only accessible from the pod that created them.
+
+Single-replica deployments do not need Redis.
+
+## Configuration
+
+Add a `redis` section to `config.yaml`:
+
+```yaml
+redis:
+  enabled: true
+  addresses:
+    - "redis:6379"            # host:port of your Redis/Valkey instance
+  password: "os.environ/REDIS_PASSWORD"   # optional; supports env variable syntax
+  key_prefix: "rl:"           # namespace prefix for all keys (default: "rl:")
+  force_single_client: true   # set false only for Redis Cluster
+  connect_timeout: 5s
+  conn_write_timeout: 10s
+  command_timeout: 3s         # per-command deadline cap (default: 3s)
+  key_ttl: 120                # rate-limit key TTL in seconds (default: 120)
+```
+
+### All Parameters
+
+| Parameter             | Type     | Default | Description                                           |
+| --------------------- | -------- | ------- | ----------------------------------------------------- |
+| `enabled`             | bool     | `false` | Enable Redis backend                                  |
+| `addresses`           | []string | —       | One or more `host:port` addresses                     |
+| `username`            | string   | —       | Redis ACL username (optional)                         |
+| `password`            | string   | —       | Redis AUTH password (optional)                        |
+| `select_db`           | int      | `0`     | Redis database index                                  |
+| `key_prefix`          | string   | `"rl:"` | Prefix prepended to every key                         |
+| `tls_enabled`         | bool     | `false` | Enable TLS                                            |
+| `connect_timeout`     | duration | `5s`    | TCP dial timeout                                      |
+| `conn_write_timeout`  | duration | `10s`   | Per-connection write/pipeline timeout                 |
+| `force_single_client` | bool     | `false` | Skip cluster detection (use for single-node)          |
+| `command_timeout`     | duration | `3s`    | Maximum duration for a single Redis command           |
+| `key_ttl`             | int      | `120`   | Rate-limit key TTL in seconds                         |
+| `min_idle_conns`      | int      | `10`    | Minimum idle connections (reserved for future use)    |
+| `max_idle_conns`      | int      | `100`   | Maximum idle connections (reserved for future use)    |
+| `max_conn_lifetime`   | duration | `30m`   | Maximum connection lifetime (reserved for future use) |
+
+All string values support the `os.environ/VAR_NAME` syntax for environment variable substitution.
+
+### Minimal config for single-node Valkey
+
+```yaml
+redis:
+  enabled: true
+  addresses:
+    - "valkey:6379"
+  force_single_client: true
+```
+
+### Config with password via environment variable
+
+```yaml
+redis:
+  enabled: true
+  addresses:
+    - "os.environ/REDIS_ADDRESS"
+  password: "os.environ/REDIS_PASSWORD"
+  force_single_client: true
+```
+
+## Startup Health Check
+
+On startup, the router connects to Redis and immediately performs a `PING` health check:
+
+- If Redis is **reachable** → rate limiter and response store use Redis.
+- If Redis is **unreachable** (connection error or ping timeout) → both features silently fall back to their in-process implementations. The server starts normally.
+
+## Key Layout
+
+All keys are namespaced under `key_prefix` (default `rl:`):
+
+| Key pattern            | Used for                                |
+| ---------------------- | --------------------------------------- |
+| `rl:rpm:{type}:{name}` | Request count ZSET (sliding 60s window) |
+| `rl:tpm:{type}:{name}` | Token count ZSET (sliding 60s window)   |
+| `rl:response:{id}`     | Stored Responses API entry              |
+
+Rate-limit keys expire after `key_ttl` seconds of inactivity (default **120 seconds**) via Redis `EXPIRE`. Response keys use the TTL from the `ttl` field of the request, or persist indefinitely when `ttl: 0`.
+
+## How Rate Limiting Works in Redis
+
+Each request is recorded atomically using a **Lua script** that runs entirely on the Redis server:
+
+1. Remove entries older than 60 seconds from the sorted set (`ZREMRANGEBYSCORE`)
+2. Count remaining entries (`ZCARD`)
+3. If count ≥ limit → reject (return 0)
+4. Add new entry with current timestamp as score and a UUID as member (`ZADD`)
+5. Reset key TTL (`EXPIRE`)
+
+The `TryAllowAll` check (credential RPM + credential TPM + model RPM + model TPM) is a single Lua script that validates all four counters atomically before recording anything — no TOCTOU race conditions across replicas.
+
+Token consumption (`ConsumeTokens`) stores entries as `uuid:count` members so the TPM check can sum token counts with `ZRANGE` inside a Lua script.
+
+## Timeouts
+
+Two independent timeout layers protect against slow Redis:
+
+| Layer             | Config field      | Default | Scope                                                                |
+| ----------------- | ----------------- | ------- | -------------------------------------------------------------------- |
+| Operation timeout | —                 | `30s`   | Applied by the rate limiter when the request context has no deadline |
+| Command timeout   | `command_timeout` | `3s`    | Applied per Redis command inside the backend                         |
+
+The command timeout is applied only when the parent context deadline is farther away than `command_timeout`. This ensures a single slow Redis call does not block a request for the full operation timeout.
+
+## Retry Behavior
+
+Redis operations are automatically retried on **transient network errors** (connection reset, broken pipe, `io.EOF`). Up to **2 retries** are attempted with a short exponential backoff (20 ms, 40 ms).
+
+Retries are **not** performed on:
+
+- Context cancellation or deadline exceeded (the caller already gave up)
+- Network timeouts during command execution (the command may have already been committed on the server)
+- Redis protocol errors (e.g., `WRONGTYPE`, script errors)
+
+**Idempotency of write operations:** Each rate-limit entry uses a UUID as the ZSET member. If a retry sends the same command after a silent success, Redis `ZADD` updates the score (timestamp) of the existing member rather than inserting a duplicate — so requests are never double-counted.
+
+## Memory Sizing
+
+A rough guide for the rate-limit keyspace:
+
+- Each request adds one entry to the RPM sorted set (UUID string ≈ 50 bytes + overhead ≈ ~100 bytes per entry).
+- At 1000 RPM sustained across 10 credentials × 20 models = 200 keys, each holding up to 60 000 entries ≈ **~1.2 GB** in the worst case. In practice, entries expire within 60 seconds so live memory is much lower.
+
+For the response store, size depends on average response payload. A typical 2 KB response at 10 000 stored responses ≈ **~20 MB**.
+
+Start with `--maxmemory 256mb` and adjust based on observed usage.
+
+## Limitations
+
+- **Redis Cluster**: only standalone and basic single-node deployments are supported. Cluster mode is not supported (keys in multi-key Lua scripts must share a hash slot).
+- **Sentinel**: not supported. Use a load-balancer in front of Redis for HA.
+- **Pool settings** (`min_idle_conns`, `max_idle_conns`, `max_conn_lifetime`): parsed and reserved for future use; the valkey-go client manages its own connection pool internally.

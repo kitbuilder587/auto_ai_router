@@ -91,7 +91,7 @@ type Config struct {
 	HealthChecker          HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry          *models.ModelPriceRegistry // Model pricing information (optional)
 	MaxProviderRetries     int                        // Max same-type credential retries (default: 2)
-	ResponseStore          *responsestore.Store       // Optional: bbolt-backed Responses API store
+	ResponseStore          responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 }
 
 type Proxy struct {
@@ -111,7 +111,7 @@ type Proxy struct {
 	healthChecker       HealthChecker              // Cached DB health status (optional)
 	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
-	responseStore       *responsestore.Store       // Optional: bbolt-backed Responses API store
+	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 }
 
 var (

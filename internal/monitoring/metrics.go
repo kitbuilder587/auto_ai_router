@@ -129,6 +129,22 @@ var (
 		},
 		[]string{"credential", "model"},
 	)
+
+	// Redis-specific metrics
+	RedisConnectionErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_redis_connection_errors_total",
+			Help: "Total number of Redis connection errors",
+		},
+		[]string{"operation"},
+	)
+
+	RedisFallbackEventsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_redis_fallback_events_total",
+			Help: "Total number of times fallback to local backend occurred due to Redis errors",
+		},
+	)
 )
 
 type Metrics struct {
@@ -218,4 +234,20 @@ func (m *Metrics) RecordTokenUsage(credential, model string, inputTokens, output
 	if cachedTokens > 0 {
 		CachedTokensTotal.WithLabelValues(credential, model).Add(float64(cachedTokens))
 	}
+}
+
+// RecordRedisConnectionError records a Redis connection error.
+func (m *Metrics) RecordRedisConnectionError(operation string) {
+	if !m.isEnabled() {
+		return
+	}
+	RedisConnectionErrorsTotal.WithLabelValues(operation).Inc()
+}
+
+// RecordRedisFallback records a fallback event from Redis to local backend.
+func (m *Metrics) RecordRedisFallback() {
+	if !m.isEnabled() {
+		return
+	}
+	RedisFallbackEventsTotal.Inc()
 }

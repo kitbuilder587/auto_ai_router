@@ -347,7 +347,7 @@ Usage (`input_tokens`, `output_tokens`, `total_tokens`) is available in the `res
 
 ## Response Storage
 
-When `store: true` is set, the completed response is saved in a local [bbolt](https://github.com/etcd-io/bbolt) database.
+When `store: true` is set, the completed response is persisted and can later be retrieved or referenced via `previous_response_id`.
 
 ```python
 response = client.responses.create(
@@ -366,14 +366,28 @@ Stored responses can be retrieved with `GET /v1/responses/{id}`:
 stored = client.get("https://your-proxy/v1/responses/resp_abc123")
 ```
 
-The stored record includes `store`, `metadata`, and `previous_response_id` echoed back from the original request.
+### Storage Backends
 
-Database location:
+Auto AI Router supports two storage backends selected automatically based on configuration:
 
-- `/data/auto_ai_router/responses.db` if `/data/auto_ai_router` exists
-- `/tmp/auto_ai_router/responses.db` otherwise
+| Backend                | When used                       | Key format                                                                |
+| ---------------------- | ------------------------------- | ------------------------------------------------------------------------- |
+| **bbolt** (local file) | Redis not configured            | `/data/auto_ai_router/responses.db` or `/tmp/auto_ai_router/responses.db` |
+| **Redis / Valkey**     | `redis.enabled: true` in config | `{key_prefix}response:{id}` (e.g. `rl:response:resp_abc123`)              |
 
-Expired entries (when `ttl` is set) are cleaned up automatically by an hourly background worker.
+With the **Redis backend**:
+
+- Responses are shared across all replicas — any pod can retrieve a response stored by another.
+- TTL is enforced natively by Redis (`EX` on `SET`); no background cleanup worker is needed.
+- Responses with `ttl: 0` persist until Redis evicts them under memory pressure (depends on `maxmemory-policy`).
+
+With the **bbolt backend**:
+
+- Responses are local to the pod that stored them.
+- Expired entries are cleaned up by an hourly background worker.
+- Location: `/data/auto_ai_router/responses.db` if `/data/auto_ai_router` exists, otherwise `/tmp/auto_ai_router/responses.db`.
+
+See [Redis Integration](./redis.md) for setup instructions.
 
 ### Multi-Turn with previous_response_id
 
