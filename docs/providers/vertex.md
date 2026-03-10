@@ -94,13 +94,14 @@ The router accepts requests in **OpenAI Chat Completion format** and automatical
 
 Additional parameters can be passed via `extra_body` for Vertex-specific features:
 
-| Parameter                                        | Description                                                            |
-| ------------------------------------------------ | ---------------------------------------------------------------------- |
-| `extra_body.generation_config.top_k`             | Top-K sampling                                                         |
-| extra_body.generation_config.response_modalities | Output modalities (`["TEXT"]`, `["IMAGE"]`, `["AUDIO"]`)               |
-| `extra_body.generation_config.temperature`       | Override temperature                                                   |
-| `extra_body.audio`                               | Audio output config (see [Audio Output](#audio-output))                |
-| `extra_body.thinking`                            | Anthropic-style thinking config (see [Thinking](#reasoning--thinking)) |
+| Parameter                                          | Description                                                            |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `extra_body.generation_config.top_k`               | Top-K sampling                                                         |
+| `extra_body.generation_config.response_modalities` | Output modalities (`["TEXT"]`, `["IMAGE"]`, `["AUDIO"]`)               |
+| `extra_body.generation_config.temperature`         | Override temperature                                                   |
+| `extra_body.audio`                                 | Audio output config (see [Audio Output](#audio-output))                |
+| `extra_body.thinking_config`                       | Gemini-native thinking config (see [Thinking](#reasoning--thinking))   |
+| `extra_body.thinking`                              | Anthropic-style thinking config (see [Thinking](#reasoning--thinking)) |
 
 #### Unsupported Parameters
 
@@ -160,37 +161,95 @@ response = client.chat.completions.create(
 
 ### Reasoning / Thinking
 
-The router supports reasoning configuration for Gemini models with thinking capabilities.
+Gemini 2.5 and Gemini 3+ models support configurable reasoning. The router supports three ways to configure it, applied in priority order:
 
-#### Via reasoning_effort (OpenAI format)
+1. `extra_body.thinking_config` — Gemini-native format (highest priority)
+2. `extra_body.thinking` — Anthropic-style format
+3. `reasoning_effort` — OpenAI format
+
+If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency** (except for `gemini-2.5-pro`, which always thinks).
+
+#### reasoning_effort mapping
+
+**Gemini 2.5** models use a token budget:
+
+| `reasoning_effort` | `ThinkingBudget` | Notes                                                             |
+| ------------------ | ---------------- | ----------------------------------------------------------------- |
+| `minimal`          | 1,024 tokens     |                                                                   |
+| `low`              | 1,024 tokens     |                                                                   |
+| `medium`           | 8,192 tokens     |                                                                   |
+| `high`             | 24,576 tokens    |                                                                   |
+| `none` / `disable` | 0 (disabled)     | Not supported on `gemini-2.5-pro` — thinking cannot be turned off |
+
+**Gemini 3+** models use a thinking level enum:
+
+| `reasoning_effort` | Flash / Flash-Lite | Pro (non-flash) |
+| ------------------ | ------------------ | --------------- |
+| `minimal`          | `Minimal`          | `Low`           |
+| `low`              | `Low`              | `Low`           |
+| `medium`           | `Medium`           | `Medium`        |
+| `high`             | `High`             | `High`          |
+| `none` / `disable` | `Minimal` (lowest) | `Low` (lowest)  |
+
+!!! note "gemini-2.5-pro always thinks"
+`gemini-2.5-pro` does not support disabling thinking (`budget=0` is invalid).
+Sending `reasoning_effort: "none"` or `"disable"` for this model is silently ignored
+and the model uses its default thinking behavior.
 
 ```python
 response = client.chat.completions.create(
-    model="gemini-2.5-flash-thinking",
+    model="gemini-2.5-flash",
     messages=[{"role": "user", "content": "Solve this step by step..."}],
-    reasoning_effort="high",  # minimal, low, medium, high
+    reasoning_effort="high",
 )
 ```
 
-**Gemini 2.5** models use token budget:
+#### Via extra_body.thinking_config (Gemini-native format)
 
-| reasoning_effort   | ThinkingBudget                 |
-| ------------------ | ------------------------------ |
-| `minimal`          | 1K-5K tokens (model-dependent) |
-| `low`              | 5K tokens                      |
-| `medium`           | 15K tokens                     |
-| `high`             | 30K tokens                     |
-| `none` / `disable` | Disabled (budget = 0)          |
+Pass `ThinkingConfig` directly in Gemini's native format. This has the **highest priority**
+and overrides both `extra_body.thinking` and `reasoning_effort`.
 
-**Gemini 3+** models use thinking level:
+For **Gemini 2.5** use `thinking_budget` (token count):
 
-| reasoning_effort   | Flash    | Pro      |
-| ------------------ | -------- | -------- |
-| `minimal`          | Minimal  | Low      |
-| `low`              | Low      | Low      |
-| `medium`           | Medium   | High     |
-| `high`             | High     | High     |
-| `none` / `disable` | Disabled | Disabled |
+```python
+response = client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "Complex reasoning task"}],
+    extra_body={
+        "thinking_config": {
+            "thinking_budget": 8192,
+            "include_thoughts": True,
+        }
+    },
+)
+```
+
+For **Gemini 3+** use `thinking_level` (enum string):
+
+```python
+response = client.chat.completions.create(
+    model="gemini-3.1-pro-preview",
+    messages=[{"role": "user", "content": "Complex reasoning task"}],
+    extra_body={
+        "thinking_config": {
+            "thinking_level": "medium",  # minimal | low | medium | high
+            "include_thoughts": True,
+        }
+    },
+)
+```
+
+`thinking_level` values for Gemini 3+:
+
+| `thinking_level` | Flash / Flash-Lite | Pro (non-flash) |
+| ---------------- | ------------------ | --------------- |
+| `"minimal"`      | `Minimal`          | `Low` (clamped) |
+| `"low"`          | `Low`              | `Low`           |
+| `"medium"`       | `Medium`           | `Medium`        |
+| `"high"`         | `High`             | `High`          |
+
+!!! note
+`"minimal"` is not supported on pro variants and is automatically clamped to `"low"`.
 
 #### Via extra_body.thinking (Anthropic format)
 
@@ -202,7 +261,15 @@ response = client.chat.completions.create(
 )
 ```
 
-For Gemini 2.5 the budget is used directly. For Gemini 3+ it is mapped to the nearest ThinkingLevel.
+For Gemini 2.5, `budget_tokens` is passed directly as `ThinkingBudget`. For Gemini 3+,
+`budget_tokens` is mapped to the nearest `ThinkingLevel`:
+
+| `budget_tokens`                          | Gemini 3 Flash | Gemini 3 Pro |
+| ---------------------------------------- | -------------- | ------------ |
+| ≥ 15,000                                 | `High`         | `High`       |
+| ≥ 5,000                                  | `Medium`       | `Medium`     |
+| < 5,000                                  | `Minimal`      | `Low`        |
+| `type: "disabled"` or `budget_tokens: 0` | `Minimal`      | `Low`        |
 
 ### Content Types
 
