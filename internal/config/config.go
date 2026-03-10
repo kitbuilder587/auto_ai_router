@@ -82,6 +82,17 @@ type RedisConfig struct {
 
 	// ForceSingleClient disables cluster detection (useful for single-node / Valkey).
 	ForceSingleClient bool `yaml:"force_single_client,omitempty"`
+
+	// Pool settings
+	MinIdleConns    int           `yaml:"min_idle_conns,omitempty"`    // default: 10
+	MaxIdleConns    int           `yaml:"max_idle_conns,omitempty"`    // default: 100
+	MaxConnLifetime time.Duration `yaml:"max_conn_lifetime,omitempty"` // default: 30m
+
+	// KeyTTL is the TTL for rate limit keys in seconds (default: 120).
+	KeyTTL int `yaml:"key_ttl,omitempty"`
+
+	// CommandTimeout is the timeout for individual Redis commands (default: 3s).
+	CommandTimeout time.Duration `yaml:"command_timeout,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
@@ -97,6 +108,11 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
 		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
 		ForceSingleClient string   `yaml:"force_single_client,omitempty"`
+		MinIdleConns      string   `yaml:"min_idle_conns,omitempty"`
+		MaxIdleConns      string   `yaml:"max_idle_conns,omitempty"`
+		MaxConnLifetime   string   `yaml:"max_conn_lifetime,omitempty"`
+		KeyTTL            string   `yaml:"key_ttl,omitempty"`
+		CommandTimeout    string   `yaml:"command_timeout,omitempty"`
 	}
 
 	var temp tempConfig
@@ -133,6 +149,27 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if r.ConnWriteTimeout, err = parseField(temp.ConnWriteTimeout, 10*time.Second, time.ParseDuration, "redis.conn_write_timeout"); err != nil {
+		return err
+	}
+
+	// Pool settings
+	if r.MinIdleConns, err = parseField(temp.MinIdleConns, 10, strconv.Atoi, "redis.min_idle_conns"); err != nil {
+		return err
+	}
+	if r.MaxIdleConns, err = parseField(temp.MaxIdleConns, 100, strconv.Atoi, "redis.max_idle_conns"); err != nil {
+		return err
+	}
+	if r.MaxConnLifetime, err = parseField(temp.MaxConnLifetime, 30*time.Minute, time.ParseDuration, "redis.max_conn_lifetime"); err != nil {
+		return err
+	}
+
+	// Key TTL
+	if r.KeyTTL, err = parseField(temp.KeyTTL, 120, strconv.Atoi, "redis.key_ttl"); err != nil {
+		return err
+	}
+
+	// Command timeout
+	if r.CommandTimeout, err = parseField(temp.CommandTimeout, 3*time.Second, time.ParseDuration, "redis.command_timeout"); err != nil {
 		return err
 	}
 

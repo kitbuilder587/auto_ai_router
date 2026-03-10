@@ -1,11 +1,15 @@
 package ratelimit
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// defaultContextTimeout is used when no context is provided
+const defaultContextTimeout = 30 * time.Second
 
 // RPMLimiter tracks and enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) limits.
 // Use this for API rate limiting where you need to track usage against configurable limits.
@@ -112,112 +116,239 @@ func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, 
 
 // Allow checks if a request for credentialName is allowed (RPM) and records it.
 func (r *RPMLimiter) Allow(credentialName string) bool {
+	return r.AllowCtx(context.Background(), credentialName)
+}
+
+// AllowCtx checks if a request for credentialName is allowed (RPM) and records it.
+// It uses the provided context for timeout/cancellation.
+func (r *RPMLimiter) AllowCtx(ctx context.Context, credentialName string) bool {
 	cfg := r.getCredentialConfig(credentialName)
 	if cfg == nil {
 		return false
 	}
-	return r.backend.tryAllowRPM(credKey(credentialName), cfg.rpm)
+	// Use default timeout if context has no deadline
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.tryAllowRPM(ctx, credKey(credentialName), cfg.rpm)
 }
 
 // CanAllow checks whether a request would be allowed without recording it.
 func (r *RPMLimiter) CanAllow(credentialName string) bool {
+	return r.CanAllowCtx(context.Background(), credentialName)
+}
+
+// CanAllowCtx checks whether a request would be allowed without recording it.
+func (r *RPMLimiter) CanAllowCtx(ctx context.Context, credentialName string) bool {
 	cfg := r.getCredentialConfig(credentialName)
 	if cfg == nil {
 		return false
 	}
-	return r.backend.canAllowRPM(credKey(credentialName), cfg.rpm)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowRPM(ctx, credKey(credentialName), cfg.rpm)
 }
 
 // AllowModel checks model-level RPM and records if allowed.
 // Returns true if the model is not tracked (no limit configured).
 func (r *RPMLimiter) AllowModel(credentialName, modelName string) bool {
+	return r.AllowModelCtx(context.Background(), credentialName, modelName)
+}
+
+// AllowModelCtx checks model-level RPM and records if allowed.
+func (r *RPMLimiter) AllowModelCtx(ctx context.Context, credentialName, modelName string) bool {
 	cfg := r.getModelConfig(credentialName, modelName)
 	if cfg == nil {
 		return true
 	}
-	return r.backend.tryAllowRPM(modelCounterKey(credentialName, modelName), cfg.rpm)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.tryAllowRPM(ctx, modelCounterKey(credentialName, modelName), cfg.rpm)
 }
 
 // CanAllowModel checks model-level RPM without recording.
 // Returns true if the model is not tracked.
 func (r *RPMLimiter) CanAllowModel(credentialName, modelName string) bool {
+	return r.CanAllowModelCtx(context.Background(), credentialName, modelName)
+}
+
+// CanAllowModelCtx checks model-level RPM without recording.
+func (r *RPMLimiter) CanAllowModelCtx(ctx context.Context, credentialName, modelName string) bool {
 	cfg := r.getModelConfig(credentialName, modelName)
 	if cfg == nil {
 		return true
 	}
-	return r.backend.canAllowRPM(modelCounterKey(credentialName, modelName), cfg.rpm)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowRPM(ctx, modelCounterKey(credentialName, modelName), cfg.rpm)
 }
 
 // AllowTokens checks whether the credential TPM limit permits further requests.
 func (r *RPMLimiter) AllowTokens(credentialName string) bool {
+	return r.AllowTokensCtx(context.Background(), credentialName)
+}
+
+// AllowTokensCtx checks whether the credential TPM limit permits further requests.
+func (r *RPMLimiter) AllowTokensCtx(ctx context.Context, credentialName string) bool {
 	cfg := r.getCredentialConfig(credentialName)
 	if cfg == nil {
 		return false
 	}
-	return r.backend.canAllowTPM(credKey(credentialName), cfg.tpm)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowTPM(ctx, credKey(credentialName), cfg.tpm)
 }
 
 // AllowModelTokens checks whether the model TPM limit permits further requests.
 func (r *RPMLimiter) AllowModelTokens(credentialName, modelName string) bool {
+	return r.AllowModelTokensCtx(context.Background(), credentialName, modelName)
+}
+
+// AllowModelTokensCtx checks whether the model TPM limit permits further requests.
+func (r *RPMLimiter) AllowModelTokensCtx(ctx context.Context, credentialName, modelName string) bool {
 	cfg := r.getModelConfig(credentialName, modelName)
 	if cfg == nil {
 		return true
 	}
-	return r.backend.canAllowTPM(modelCounterKey(credentialName, modelName), cfg.tpm)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.canAllowTPM(ctx, modelCounterKey(credentialName, modelName), cfg.tpm)
 }
 
 // ConsumeTokens records token usage for a credential.
 func (r *RPMLimiter) ConsumeTokens(credentialName string, tokenCount int) {
+	r.ConsumeTokensCtx(context.Background(), credentialName, tokenCount)
+}
+
+// ConsumeTokensCtx records token usage for a credential.
+func (r *RPMLimiter) ConsumeTokensCtx(ctx context.Context, credentialName string, tokenCount int) {
 	if r.getCredentialConfig(credentialName) == nil {
 		return
 	}
-	r.backend.consumeTokens(credKey(credentialName), tokenCount)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.consumeTokens(ctx, credKey(credentialName), tokenCount)
 }
 
 // ConsumeModelTokens records token usage for a model within a credential.
 func (r *RPMLimiter) ConsumeModelTokens(credentialName, modelName string, tokenCount int) {
+	r.ConsumeModelTokensCtx(context.Background(), credentialName, modelName, tokenCount)
+}
+
+// ConsumeModelTokensCtx records token usage for a model within a credential.
+func (r *RPMLimiter) ConsumeModelTokensCtx(ctx context.Context, credentialName, modelName string, tokenCount int) {
 	if r.getModelConfig(credentialName, modelName) == nil {
 		return
 	}
-	r.backend.consumeTokens(modelCounterKey(credentialName, modelName), tokenCount)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.consumeTokens(ctx, modelCounterKey(credentialName, modelName), tokenCount)
 }
 
 // GetCurrentRPM returns the number of requests in the last 60 seconds for a credential.
 func (r *RPMLimiter) GetCurrentRPM(credentialName string) int {
+	return r.GetCurrentRPMCtx(context.Background(), credentialName)
+}
+
+// GetCurrentRPMCtx returns the number of requests in the last 60 seconds for a credential.
+func (r *RPMLimiter) GetCurrentRPMCtx(ctx context.Context, credentialName string) int {
 	if r.getCredentialConfig(credentialName) == nil {
 		return 0
 	}
-	return r.backend.currentRPM(credKey(credentialName))
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentRPM(ctx, credKey(credentialName))
 }
 
 // GetCurrentTPM returns the sum of tokens in the last 60 seconds for a credential.
 func (r *RPMLimiter) GetCurrentTPM(credentialName string) int {
+	return r.GetCurrentTPMCtx(context.Background(), credentialName)
+}
+
+// GetCurrentTPMCtx returns the sum of tokens in the last 60 seconds for a credential.
+func (r *RPMLimiter) GetCurrentTPMCtx(ctx context.Context, credentialName string) int {
 	if r.getCredentialConfig(credentialName) == nil {
 		return 0
 	}
-	return r.backend.currentTPM(credKey(credentialName))
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentTPM(ctx, credKey(credentialName))
 }
 
 // GetCurrentModelRPM returns the RPM for a (credential, model) pair.
 func (r *RPMLimiter) GetCurrentModelRPM(credentialName, modelName string) int {
+	return r.GetCurrentModelRPMCtx(context.Background(), credentialName, modelName)
+}
+
+// GetCurrentModelRPMCtx returns the RPM for a (credential, model) pair.
+func (r *RPMLimiter) GetCurrentModelRPMCtx(ctx context.Context, credentialName, modelName string) int {
 	if r.getModelConfig(credentialName, modelName) == nil {
 		return 0
 	}
-	return r.backend.currentRPM(modelCounterKey(credentialName, modelName))
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentRPM(ctx, modelCounterKey(credentialName, modelName))
 }
 
 // GetCurrentModelTPM returns the TPM for a (credential, model) pair.
 func (r *RPMLimiter) GetCurrentModelTPM(credentialName, modelName string) int {
+	return r.GetCurrentModelTPMCtx(context.Background(), credentialName, modelName)
+}
+
+// GetCurrentModelTPMCtx returns the TPM for a (credential, model) pair.
+func (r *RPMLimiter) GetCurrentModelTPMCtx(ctx context.Context, credentialName, modelName string) int {
 	if r.getModelConfig(credentialName, modelName) == nil {
 		return 0
 	}
-	return r.backend.currentTPM(modelCounterKey(credentialName, modelName))
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	return r.backend.currentTPM(ctx, modelCounterKey(credentialName, modelName))
 }
 
 // TryAllowAll atomically checks credential RPM, credential TPM, model RPM, and model TPM.
 // Records credential and model RPM if all checks pass. Returns true if allowed.
 // modelName may be empty to skip model-level checks.
 func (r *RPMLimiter) TryAllowAll(credentialName, modelName string) bool {
+	return r.TryAllowAllCtx(context.Background(), credentialName, modelName)
+}
+
+// TryAllowAllCtx atomically checks credential RPM, credential TPM, model RPM, and model TPM.
+func (r *RPMLimiter) TryAllowAllCtx(ctx context.Context, credentialName, modelName string) bool {
 	credCfg := r.getCredentialConfig(credentialName)
 	if credCfg == nil {
 		return false
@@ -236,7 +367,14 @@ func (r *RPMLimiter) TryAllowAll(credentialName, modelName string) bool {
 		}
 	}
 
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+
 	return r.backend.tryAllowAll(
+		ctx,
 		credKey(credentialName), credCfg.rpm, credCfg.tpm,
 		mKey, modelRPM, modelTPM,
 	)
@@ -245,19 +383,39 @@ func (r *RPMLimiter) TryAllowAll(credentialName, modelName string) bool {
 // SetCredentialCurrentUsage overwrites the sliding-window counters for a credential.
 // Used to synchronize usage from remote proxies. No-op for Redis backend.
 func (r *RPMLimiter) SetCredentialCurrentUsage(credentialName string, currentRPM, currentTPM int) {
+	r.SetCredentialCurrentUsageCtx(context.Background(), credentialName, currentRPM, currentTPM)
+}
+
+// SetCredentialCurrentUsageCtx overwrites the sliding-window counters for a credential.
+func (r *RPMLimiter) SetCredentialCurrentUsageCtx(ctx context.Context, credentialName string, currentRPM, currentTPM int) {
 	if r.getCredentialConfig(credentialName) == nil {
 		return
 	}
-	r.backend.setCurrentUsage(credKey(credentialName), currentRPM, currentTPM)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.setCurrentUsage(ctx, credKey(credentialName), currentRPM, currentTPM)
 }
 
 // SetModelCurrentUsage overwrites the sliding-window counters for a (credential, model) pair.
 // No-op for Redis backend.
 func (r *RPMLimiter) SetModelCurrentUsage(credentialName, modelName string, currentRPM, currentTPM int) {
+	r.SetModelCurrentUsageCtx(context.Background(), credentialName, modelName, currentRPM, currentTPM)
+}
+
+// SetModelCurrentUsageCtx overwrites the sliding-window counters for a (credential, model) pair.
+func (r *RPMLimiter) SetModelCurrentUsageCtx(ctx context.Context, credentialName, modelName string, currentRPM, currentTPM int) {
 	if r.getModelConfig(credentialName, modelName) == nil {
 		return
 	}
-	r.backend.setCurrentUsage(modelCounterKey(credentialName, modelName), currentRPM, currentTPM)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.setCurrentUsage(ctx, modelCounterKey(credentialName, modelName), currentRPM, currentTPM)
 }
 
 // GetLimitRPM returns the configured RPM limit for a credential (-1 = not tracked).

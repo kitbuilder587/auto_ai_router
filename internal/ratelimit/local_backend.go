@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -111,28 +112,31 @@ func localCheckTPM(c *localCounter, limit int) bool {
 
 // --- counterBackend implementation ---
 
-func (b *localBackend) tryAllowRPM(key string, limit int) bool {
+// Note: localBackend methods accept context but don't use it since
+// in-memory operations are fast and not cancellable.
+
+func (b *localBackend) tryAllowRPM(_ context.Context, key string, limit int) bool {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return localCheckRPM(c, limit, true)
 }
 
-func (b *localBackend) canAllowRPM(key string, limit int) bool {
+func (b *localBackend) canAllowRPM(_ context.Context, key string, limit int) bool {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return localCheckRPM(c, limit, false)
 }
 
-func (b *localBackend) canAllowTPM(key string, limit int) bool {
+func (b *localBackend) canAllowTPM(_ context.Context, key string, limit int) bool {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return localCheckTPM(c, limit)
 }
 
-func (b *localBackend) consumeTokens(key string, tokenCount int) {
+func (b *localBackend) consumeTokens(_ context.Context, key string, tokenCount int) {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -144,21 +148,21 @@ func (b *localBackend) consumeTokens(key string, tokenCount int) {
 	}
 }
 
-func (b *localBackend) currentRPM(key string) int {
+func (b *localBackend) currentRPM(_ context.Context, key string) int {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return localCleanOldRequests(c)
 }
 
-func (b *localBackend) currentTPM(key string) int {
+func (b *localBackend) currentTPM(_ context.Context, key string) int {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return localCleanOldTokens(c)
 }
 
-func (b *localBackend) tryAllowAll(credKey string, credRPM, credTPM int, modelKey string, modelRPM, modelTPM int) bool {
+func (b *localBackend) tryAllowAll(_ context.Context, credKey string, credRPM, credTPM int, modelKey string, modelRPM, modelTPM int) bool {
 	cred := b.getOrCreate(credKey)
 
 	var mod *localCounter
@@ -197,7 +201,7 @@ func (b *localBackend) tryAllowAll(credKey string, credRPM, credTPM int, modelKe
 	return true
 }
 
-func (b *localBackend) setCurrentUsage(key string, currentRPM, currentTPM int) {
+func (b *localBackend) setCurrentUsage(_ context.Context, key string, currentRPM, currentTPM int) {
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()

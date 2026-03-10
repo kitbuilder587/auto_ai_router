@@ -72,9 +72,19 @@ func main() {
 		if err != nil {
 			log.Error("Failed to connect to Redis, falling back to local backends", "error", err)
 		} else {
-			log.Info("Connected to Redis/Valkey", "addresses", cfg.Redis.InitAddresses)
-			redisBackend = rb
-			defer rb.Close()
+			// Verify Redis is responsive with a health check ping.
+			// Use explicit cancel (not defer) so the context is released immediately.
+			pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			pingErr := rb.Ping(pingCtx)
+			pingCancel()
+			if pingErr != nil {
+				log.Warn("Redis health check failed, falling back to local backends", "error", pingErr)
+				rb.Close()
+			} else {
+				log.Info("Connected to Redis/Valkey", "addresses", cfg.Redis.InitAddresses)
+				redisBackend = rb
+				defer rb.Close()
+			}
 		}
 	}
 

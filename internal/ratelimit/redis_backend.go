@@ -3,7 +3,9 @@ package ratelimit
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -15,7 +17,13 @@ import (
 const (
 	rpmWindow = 60 * time.Second
 	tpmWindow = 60 * time.Second
-	keyTTL    = 120 // seconds — auto-expire idle keys
+
+	// maxRetries is the maximum number of extra attempts on transient network errors.
+	maxRetries = 2
+
+	// defaultCommandTimeout caps the duration of a single Redis command when no
+	// tighter deadline already exists on the context.
+	defaultCommandTimeout = 3 * time.Second
 )
 
 // Lua script: atomically check+record RPM in a ZSET sliding window.
@@ -186,8 +194,10 @@ return 1
 // It is exported so that the underlying valkey.Client can be reused by other
 // packages (e.g. responsestore) via Client().
 type RedisBackend struct {
-	client    valkey.Client
-	keyPrefix string
+	client         valkey.Client
+	keyPrefix      string
+	keyTTL         int           // seconds
+	commandTimeout time.Duration // per-command deadline cap
 }
 
 // NewValkeyClient creates a valkey.Client from RedisConfig.
@@ -219,13 +229,33 @@ func NewRedisBackend(cfg config.RedisConfig) (*RedisBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewRedisBackendFromClient(client, cfg.KeyPrefix), nil
+	keyTTL := cfg.KeyTTL
+	if keyTTL == 0 {
+		keyTTL = 120
+	}
+	cmdTimeout := cfg.CommandTimeout
+	if cmdTimeout == 0 {
+		cmdTimeout = defaultCommandTimeout
+	}
+	b := NewRedisBackendFromClientWithTTL(client, cfg.KeyPrefix, keyTTL)
+	b.commandTimeout = cmdTimeout
+	return b, nil
 }
 
-// NewRedisBackendFromClient wraps an existing valkey.Client.
+// NewRedisBackendFromClient wraps an existing valkey.Client with default TTL and command timeout.
 // Useful when a single client is shared between rate limiting and other stores.
 func NewRedisBackendFromClient(client valkey.Client, keyPrefix string) *RedisBackend {
-	return &RedisBackend{client: client, keyPrefix: keyPrefix}
+	return NewRedisBackendFromClientWithTTL(client, keyPrefix, 120)
+}
+
+// NewRedisBackendFromClientWithTTL wraps an existing valkey.Client with custom TTL.
+func NewRedisBackendFromClientWithTTL(client valkey.Client, keyPrefix string, keyTTL int) *RedisBackend {
+	return &RedisBackend{
+		client:         client,
+		keyPrefix:      keyPrefix,
+		keyTTL:         keyTTL,
+		commandTimeout: defaultCommandTimeout,
+	}
 }
 
 // Client returns the underlying valkey.Client so it can be shared with other components.
@@ -234,109 +264,190 @@ func (b *RedisBackend) Client() valkey.Client { return b.client }
 // Close shuts down the underlying Valkey client.
 func (b *RedisBackend) Close() { b.client.Close() }
 
+// Ping performs a health check on the Redis connection.
+func (b *RedisBackend) Ping(ctx context.Context) error {
+	return b.client.Do(ctx, b.client.B().Ping().Build()).Error()
+}
+
 func (b *RedisBackend) rpmKey(key string) string { return b.keyPrefix + "rpm:" + key }
 func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpm:" + key }
 
 func nowMS() int64 { return time.Now().UTC().UnixMilli() }
 
-func (b *RedisBackend) tryAllowRPM(key string, limit int) bool {
-	ctx := context.Background()
+// cmdCtx returns a context bounded by b.commandTimeout when the parent has no
+// tighter deadline. Always call the returned cancel function.
+func (b *RedisBackend) cmdCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	if b.commandTimeout <= 0 {
+		return parent, func() {}
+	}
+	if d, ok := parent.Deadline(); ok && time.Until(d) <= b.commandTimeout {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, b.commandTimeout)
+}
+
+// isTransientError returns true when the error indicates a recoverable network
+// condition and retrying the operation is safe.
+//
+// Timeouts are NOT retried: a timed-out write may have already been committed
+// on the server, so retrying could cause double-counting. Context cancellation
+// means the caller has given up and should not be retried either.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// io.EOF: server closed the connection; safe to reconnect and retry.
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	// net.Error with Timeout() == true: read timed out, command may have executed.
+	// net.Error with Timeout() == false: connection setup failed; safe to retry.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return !netErr.Timeout()
+	}
+	return false
+}
+
+// doWithRetry executes fn, retrying up to maxRetries times on transient errors.
+// Each attempt uses a per-command timeout via cmdCtx.
+//
+// The uuid member used by write operations (tryAllowRPM, tryAllowAll) is
+// captured by the caller before invoking doWithRetry. Because Redis ZADD
+// with the same member only updates its score, a retry after a silent success
+// does not double-count the entry — the net effect is a single recorded event
+// with the latest timestamp.
+func (b *RedisBackend) doWithRetry(ctx context.Context, fn func(context.Context) (int64, error)) (int64, error) {
+	var (
+		res int64
+		err error
+	)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt) * 20 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+		cmdCtx, cancel := b.cmdCtx(ctx)
+		res, err = fn(cmdCtx)
+		cancel()
+		if err == nil || !isTransientError(err) {
+			return res, err
+		}
+	}
+	return res, err
+}
+
+func (b *RedisBackend) tryAllowRPM(ctx context.Context, key string, limit int) bool {
 	now := nowMS()
 	member := uuid.New().String()
-	res, err := b.client.Do(ctx, b.client.B().Eval().
-		Script(luaTryAllowRPM).
-		Numkeys(1).
-		Key(b.rpmKey(key)).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-		Arg(fmt.Sprintf("%d", limit)).
-		Arg(member).
-		Arg(fmt.Sprintf("%d", keyTTL)).
-		Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return b.client.Do(ctx, b.client.B().Eval().
+			Script(luaTryAllowRPM).
+			Numkeys(1).
+			Key(b.rpmKey(key)).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+			Arg(fmt.Sprintf("%d", limit)).
+			Arg(member).
+			Arg(fmt.Sprintf("%d", b.keyTTL)).
+			Build()).AsInt64()
+	})
 	if err != nil {
 		return false
 	}
 	return res == 1
 }
 
-func (b *RedisBackend) canAllowRPM(key string, limit int) bool {
-	ctx := context.Background()
+func (b *RedisBackend) canAllowRPM(ctx context.Context, key string, limit int) bool {
 	now := nowMS()
-	res, err := b.client.Do(ctx, b.client.B().Eval().
-		Script(luaCanAllowRPM).
-		Numkeys(1).
-		Key(b.rpmKey(key)).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-		Arg(fmt.Sprintf("%d", limit)).
-		Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return b.client.Do(ctx, b.client.B().Eval().
+			Script(luaCanAllowRPM).
+			Numkeys(1).
+			Key(b.rpmKey(key)).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+			Arg(fmt.Sprintf("%d", limit)).
+			Build()).AsInt64()
+	})
 	if err != nil {
 		return false
 	}
 	return res == 1
 }
 
-func (b *RedisBackend) canAllowTPM(key string, limit int) bool {
+func (b *RedisBackend) canAllowTPM(ctx context.Context, key string, limit int) bool {
 	if limit == -1 {
 		return true
 	}
-	ctx := context.Background()
 	now := nowMS()
-	res, err := b.client.Do(ctx, b.client.B().Eval().
-		Script(luaCanAllowTPM).
-		Numkeys(1).
-		Key(b.tpmKey(key)).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-		Arg(fmt.Sprintf("%d", limit)).
-		Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return b.client.Do(ctx, b.client.B().Eval().
+			Script(luaCanAllowTPM).
+			Numkeys(1).
+			Key(b.tpmKey(key)).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
+			Arg(fmt.Sprintf("%d", limit)).
+			Build()).AsInt64()
+	})
 	if err != nil {
 		return false
 	}
 	return res == 1
 }
 
-func (b *RedisBackend) consumeTokens(key string, tokenCount int) {
-	ctx := context.Background()
+func (b *RedisBackend) consumeTokens(ctx context.Context, key string, tokenCount int) {
 	now := nowMS()
 	member := fmt.Sprintf("%s:%d", uuid.New().String(), tokenCount)
-	_ = b.client.Do(ctx, b.client.B().Eval().
-		Script(luaConsumeTokens).
-		Numkeys(1).
-		Key(b.tpmKey(key)).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-		Arg(member).
-		Arg(fmt.Sprintf("%d", keyTTL)).
-		Build()).Error()
+	_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return 0, b.client.Do(ctx, b.client.B().Eval().
+			Script(luaConsumeTokens).
+			Numkeys(1).
+			Key(b.tpmKey(key)).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
+			Arg(member).
+			Arg(fmt.Sprintf("%d", b.keyTTL)).
+			Build()).Error()
+	})
 }
 
-func (b *RedisBackend) currentRPM(key string) int {
-	ctx := context.Background()
+func (b *RedisBackend) currentRPM(ctx context.Context, key string) int {
 	now := nowMS()
-	res, err := b.client.Do(ctx, b.client.B().Eval().
-		Script(luaCurrentRPM).
-		Numkeys(1).
-		Key(b.rpmKey(key)).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-		Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return b.client.Do(ctx, b.client.B().Eval().
+			Script(luaCurrentRPM).
+			Numkeys(1).
+			Key(b.rpmKey(key)).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+			Build()).AsInt64()
+	})
 	if err != nil {
 		return 0
 	}
 	return int(res)
 }
 
-func (b *RedisBackend) currentTPM(key string) int {
-	ctx := context.Background()
+func (b *RedisBackend) currentTPM(ctx context.Context, key string) int {
 	now := nowMS()
-	res, err := b.client.Do(ctx, b.client.B().Eval().
-		Script(luaCurrentTPM).
-		Numkeys(1).
-		Key(b.tpmKey(key)).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
-		Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return b.client.Do(ctx, b.client.B().Eval().
+			Script(luaCurrentTPM).
+			Numkeys(1).
+			Key(b.tpmKey(key)).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", tpmWindow.Milliseconds())).
+			Build()).AsInt64()
+	})
 	if err != nil {
 		return 0
 	}
@@ -344,10 +455,10 @@ func (b *RedisBackend) currentTPM(key string) int {
 }
 
 func (b *RedisBackend) tryAllowAll(
+	ctx context.Context,
 	credKey string, credRPM, credTPM int,
 	modelKey string, modelRPM, modelTPM int,
 ) bool {
-	ctx := context.Background()
 	now := nowMS()
 	credMember := uuid.New().String()
 	modelMember := uuid.New().String()
@@ -362,23 +473,25 @@ func (b *RedisBackend) tryAllowAll(
 		modTPMKey = b.tpmKey(modelKey)
 	}
 
-	res, err := b.client.Do(ctx, b.client.B().Eval().
-		Script(luaTryAllowAll).
-		Numkeys(4).
-		Key(credRPMKey).
-		Key(credTPMKey).
-		Key(modRPMKey).
-		Key(modTPMKey).
-		Arg(fmt.Sprintf("%d", now)).
-		Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
-		Arg(fmt.Sprintf("%d", credRPM)).
-		Arg(fmt.Sprintf("%d", credTPM)).
-		Arg(fmt.Sprintf("%d", modelRPM)).
-		Arg(fmt.Sprintf("%d", modelTPM)).
-		Arg(credMember).
-		Arg(modelMember).
-		Arg(fmt.Sprintf("%d", keyTTL)).
-		Build()).AsInt64()
+	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+		return b.client.Do(ctx, b.client.B().Eval().
+			Script(luaTryAllowAll).
+			Numkeys(4).
+			Key(credRPMKey).
+			Key(credTPMKey).
+			Key(modRPMKey).
+			Key(modTPMKey).
+			Arg(fmt.Sprintf("%d", now)).
+			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+			Arg(fmt.Sprintf("%d", credRPM)).
+			Arg(fmt.Sprintf("%d", credTPM)).
+			Arg(fmt.Sprintf("%d", modelRPM)).
+			Arg(fmt.Sprintf("%d", modelTPM)).
+			Arg(credMember).
+			Arg(modelMember).
+			Arg(fmt.Sprintf("%d", b.keyTTL)).
+			Build()).AsInt64()
+	})
 	if err != nil {
 		return false
 	}
@@ -387,4 +500,4 @@ func (b *RedisBackend) tryAllowAll(
 
 // setCurrentUsage is a no-op for the Redis backend: all replicas write to the
 // shared Redis instance directly, so remote-sync is unnecessary.
-func (b *RedisBackend) setCurrentUsage(_ string, _, _ int) {}
+func (b *RedisBackend) setCurrentUsage(_ context.Context, _ string, _, _ int) {}
