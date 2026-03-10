@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +41,7 @@ func TestProxyFallbackOn429(t *testing.T) {
 	// Create fallback server mock that returns 200 OK
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
-		_ = NewResponseBuilder().
+		_ = testhelpers.NewResponseBuilder().
 			WithStatus(http.StatusOK).
 			WithJSONBody(createMockChatCompletionResponse(
 				"chatcmpl-test-429-fallback",
@@ -77,7 +78,7 @@ func TestProxyFallbackOn429(t *testing.T) {
 	)
 
 	// Set required headers
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 
 	// Execute proxy request
@@ -150,7 +151,7 @@ func TestProxyFallbackOn429_NonRetryableBody(t *testing.T) {
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -202,7 +203,7 @@ func TestProxyFallbackOn429_RequestBodyPreserved(t *testing.T) {
 	testRequestBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "temperature": 0.7, "max_tokens": 100}`
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(testRequestBody))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -264,7 +265,7 @@ func TestProxyFallbackOn429_CredentialAPIKeysPreserved(t *testing.T) {
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -321,7 +322,7 @@ func TestProxyFallbackOn429_MultipleRetries(t *testing.T) {
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 

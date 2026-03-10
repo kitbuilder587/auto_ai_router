@@ -26,22 +26,13 @@ package proxy
 import (
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/auth"
-	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
-	"github.com/mixaill76/auto_ai_router/internal/models"
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
-	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,46 +74,28 @@ func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	// Setup logger and balancer
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	// Create credentials: primary (normal proxy) and fallback (proxy with IsFallback=true)
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	// Add credentials to rate limiter
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	// Create balancer
-	bal := balancer.New(credentials, f2b, rl)
-
-	// Create proxy
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	// Make request
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
@@ -169,40 +142,28 @@ func TestFallbackPath_PrimaryReturns500(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -231,32 +192,19 @@ func TestFallbackPath_NoFallbackAvailable(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	// Only primary credential, no fallback
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+		).
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -291,40 +239,28 @@ func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -359,40 +295,28 @@ func TestFallbackPath_NonRetryableError(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -435,40 +359,28 @@ func TestFallbackPath_Streaming_NotSupported(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}], "stream": true}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -518,40 +430,28 @@ func TestFallbackPath_RequestBodyIntegrity(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	testBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "temperature": 0.7}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(testBody))
@@ -590,40 +490,28 @@ func TestFallbackPath_HeadersPreserved(t *testing.T) {
 	}))
 	defer fallbackServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "primary-key",
-			BaseURL:    primaryServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
-		},
-		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "fallback-key",
-			BaseURL:    fallbackServer.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
-		},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "primary-key",
+				BaseURL:    primaryServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "fallback",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "fallback-key",
+				BaseURL:    fallbackServer.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": []}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))

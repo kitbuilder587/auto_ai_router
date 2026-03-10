@@ -128,17 +128,33 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 	}
 
 	// Phase 3: Thinking / Reasoning
-	var thinkingParam interface{}
+	// Priority (highest first):
+	//   1. extra_body.thinking_config (Gemini-native format)
+	//   2. extra_body.thinking (Anthropic-style)
+	//   3. reasoning_effort
+	//   4. Default: disable autonomous thinking for predictable latency
+	var thinkingResolved bool
 	if req.ExtraBody != nil {
-		thinkingParam = req.ExtraBody["thinking"]
+		if tcRaw, ok := req.ExtraBody["thinking_config"]; ok {
+			if tcMap, ok := tcRaw.(map[string]interface{}); ok {
+				cfg.ThinkingConfig = mapNativeThinkingConfig(tcMap, model)
+				thinkingResolved = true
+			}
+		}
 	}
-	if tc := mapReasoningToThinkingConfig(thinkingParam, req.ReasoningEffort, model); tc != nil {
-		cfg.ThinkingConfig = tc
-	} else if isThinkingCapableModel(model) {
-		// No thinking params specified: explicitly disable dynamic thinking for
-		// predictable latency. Without this, Gemini 2.5/3 models autonomously
-		// decide whether to reason, causing unpredictable latency spikes.
-		cfg.ThinkingConfig = disableThinkingConfig(model)
+	if !thinkingResolved {
+		var thinkingParam interface{}
+		if req.ExtraBody != nil {
+			thinkingParam = req.ExtraBody["thinking"]
+		}
+		if tc := mapReasoningToThinkingConfig(thinkingParam, req.ReasoningEffort, model); tc != nil {
+			cfg.ThinkingConfig = tc
+		} else if isThinkingCapableModel(model) {
+			// No thinking params specified: explicitly disable dynamic thinking for
+			// predictable latency. Without this, Gemini 2.5/3 models autonomously
+			// decide whether to reason, causing unpredictable latency spikes.
+			cfg.ThinkingConfig = disableThinkingConfig(model)
+		}
 	}
 
 	// Phase 4: Audio output (SpeechConfig)

@@ -53,7 +53,54 @@ func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
 		require.NotNil(t, cfg.ThinkingConfig)
 		assert.True(t, cfg.ThinkingConfig.IncludeThoughts)
 		require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
-		assert.Equal(t, int32(30000), *cfg.ThinkingConfig.ThinkingBudget)
+		assert.Equal(t, int32(24576), *cfg.ThinkingConfig.ThinkingBudget)
+	})
+
+	t.Run("gemini25pro_no_params_no_thinking_config", func(t *testing.T) {
+		// gemini-2.5-pro cannot have thinking disabled; no ThinkingConfig should be set
+		req := &openai.OpenAIRequest{Model: "gemini-2.5-pro"}
+		temp := float64(0.7)
+		req.Temperature = &temp
+		cfg := buildGenerationConfig(req, "gemini-2.5-pro")
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.ThinkingConfig, "gemini-2.5-pro: must not set ThinkingConfig when no params given")
+	})
+
+	t.Run("extra_body_thinking_config_takes_priority", func(t *testing.T) {
+		// extra_body.thinking_config has highest priority over reasoning_effort
+		req := &openai.OpenAIRequest{
+			Model:           "gemini-2.5-flash",
+			ReasoningEffort: "low",
+			ExtraBody: map[string]interface{}{
+				"thinking_config": map[string]interface{}{
+					"thinking_budget":  float64(20000),
+					"include_thoughts": true,
+				},
+			},
+		}
+		cfg := buildGenerationConfig(req, "gemini-2.5-flash")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ThinkingConfig)
+		assert.True(t, cfg.ThinkingConfig.IncludeThoughts)
+		require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
+		assert.Equal(t, int32(20000), *cfg.ThinkingConfig.ThinkingBudget)
+	})
+
+	t.Run("extra_body_thinking_config_gemini3_level", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model: "gemini-3.1-pro-preview",
+			ExtraBody: map[string]interface{}{
+				"thinking_config": map[string]interface{}{
+					"thinking_level":   "high",
+					"include_thoughts": true,
+				},
+			},
+		}
+		cfg := buildGenerationConfig(req, "gemini-3.1-pro-preview")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ThinkingConfig)
+		assert.True(t, cfg.ThinkingConfig.IncludeThoughts)
+		assert.Equal(t, genai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
 	})
 }
 

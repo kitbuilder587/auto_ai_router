@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -249,7 +250,7 @@ func TestTryFallbackProxy_Success(t *testing.T) {
 	// Create fallback server mock that returns 200 OK
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
-		_ = NewResponseBuilder().
+		_ = testhelpers.NewResponseBuilder().
 			WithStatus(http.StatusOK).
 			WithJSONBody(createMockChatCompletionResponse(
 				"chatcmpl-test-fallback",
@@ -286,7 +287,7 @@ func TestTryFallbackProxy_Success(t *testing.T) {
 	)
 
 	// Set required headers
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 
 	// Create response recorder
@@ -343,7 +344,7 @@ func TestTryFallbackProxy_NoFallbackAvailable(t *testing.T) {
 
 	// Create HTTP request
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
-	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Authorization", "Bearer master-key")
 
 	// Create response recorder
 	w := httptest.NewRecorder()

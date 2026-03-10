@@ -19,18 +19,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
-	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNew(t *testing.T) {
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer("http://test.com")
-	metrics := createTestProxyMetrics()
-
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithMasterKey("test-master-key").
+		WithSingleCredential("test", config.ProviderTypeProxy, "http://test.com", "upstream-key-1").
+		Build()
 
 	assert.NotNil(t, prx)
 	assert.Equal(t, "test-master-key", prx.masterKey)
@@ -40,11 +36,10 @@ func TestNew(t *testing.T) {
 }
 
 func TestProxyRequest_MissingAuthorization(t *testing.T) {
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer("http://test.com")
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithMasterKey("test-key").
+		WithSingleCredential("test", config.ProviderTypeProxy, "http://test.com", "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
@@ -56,11 +51,10 @@ func TestProxyRequest_MissingAuthorization(t *testing.T) {
 }
 
 func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer("http://test.com")
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithMasterKey("test-key").
+		WithSingleCredential("test", config.ProviderTypeProxy, "http://test.com", "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "InvalidFormat")
@@ -73,11 +67,10 @@ func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 }
 
 func TestProxyRequest_InvalidMasterKey(t *testing.T) {
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer("http://test.com")
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithMasterKey("correct-key").
+		WithSingleCredential("test", config.ProviderTypeProxy, "http://test.com", "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer wrong-key")
@@ -101,11 +94,9 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -127,11 +118,9 @@ func TestProxyRequest_WithModel(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -214,11 +203,9 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -245,11 +232,9 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4", "stream": true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -263,11 +248,12 @@ func TestProxyRequest_Streaming(t *testing.T) {
 }
 
 func TestHealthCheck_Healthy(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal, rl := createTestBalancer("http://test.com")
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "test", Type: config.ProviderTypeProxy, BaseURL: "http://test.com", APIKey: "upstream-key-1", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "test2", Type: config.ProviderTypeProxy, BaseURL: "http://test.com", APIKey: "upstream-key-2", RPM: 100, TPM: 10000},
+		).
+		Build()
 
 	healthy, status := prx.HealthCheck()
 
@@ -640,11 +626,9 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -667,11 +651,9 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -688,11 +670,9 @@ func TestVisualHealthCheck(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()

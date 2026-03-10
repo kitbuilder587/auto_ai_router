@@ -2,16 +2,13 @@ package proxy
 
 import (
 	"bytes"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -49,13 +46,6 @@ func TestForwardToProxy_Headers(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	// Создаем Proxy с маленьким requestTimeout
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
 	// Создаем credentials для proxy типа с APIKey
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
@@ -64,11 +54,10 @@ func TestForwardToProxy_Headers(t *testing.T) {
 		APIKey:  "remote-key",
 	}
 
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	// Создаем upstream request с заголовками для проксирования
 	upstreamReq := httptest.NewRequest("POST", "/v1/test", strings.NewReader("request body"))
@@ -144,12 +133,6 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	defer upstreamServer.Close()
 
 	// Credentials БЕЗ APIKey
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
 		Type:    config.ProviderTypeProxy,
@@ -157,11 +140,10 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 		APIKey:  "", // Пусто!
 	}
 
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	upstreamReq := httptest.NewRequest("POST", "/v1/test", strings.NewReader("body"))
 	upstreamReq.Header.Set("Authorization", "Bearer custom-token")
@@ -191,8 +173,6 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
 		Type:    config.ProviderTypeProxy,
@@ -200,16 +180,10 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	// Создаем request со всеми hop-by-hop заголовками
 	upstreamReq := httptest.NewRequest("POST", "/v1/test", strings.NewReader("body"))
@@ -249,8 +223,6 @@ func TestForwardToProxy_ContentLengthCorrect(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
 		Type:    config.ProviderTypeProxy,
@@ -258,16 +230,10 @@ func TestForwardToProxy_ContentLengthCorrect(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	upstreamReq := httptest.NewRequest("POST", "/v1/test", strings.NewReader("body"))
 	upstreamReq.Header.Set("Authorization", "Bearer key")
@@ -303,8 +269,6 @@ func TestForwardToProxy_QueryParameters(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
 		Type:    config.ProviderTypeProxy,
@@ -312,16 +276,10 @@ func TestForwardToProxy_QueryParameters(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	// Request с query параметрами
 	upstreamReq := httptest.NewRequest("POST", "/v1/test?param1=value1&param2=value2", strings.NewReader("body"))
@@ -352,8 +310,6 @@ func TestForwardToProxy_LargeResponseBody(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
 		Type:    config.ProviderTypeProxy,
@@ -361,16 +317,10 @@ func TestForwardToProxy_LargeResponseBody(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	upstreamReq := httptest.NewRequest("POST", "/v1/test", strings.NewReader("body"))
 	upstreamReq.Header.Set("Authorization", "Bearer key")
@@ -400,8 +350,6 @@ func TestForwardToProxy_UpstreamError(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-
 	cred := &config.CredentialConfig{
 		Name:    "gateway",
 		Type:    config.ProviderTypeProxy,
@@ -409,16 +357,10 @@ func TestForwardToProxy_UpstreamError(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	upstreamReq := httptest.NewRequest("POST", "/v1/test", strings.NewReader("body"))
 	upstreamReq.Header.Set("Authorization", "Bearer key")

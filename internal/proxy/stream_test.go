@@ -324,17 +324,10 @@ func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	resp, err := http.Get(upstreamServer.URL)
 	require.NoError(t, err)
@@ -584,16 +577,10 @@ func TestHandleResponsesAPIStreaming_Passthrough(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	resp, err := http.Get(upstreamServer.URL)
 	require.NoError(t, err)
@@ -800,17 +787,10 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := testhelpers.NewTestLogger()
-	bal, rl := createTestBalancer(upstreamServer.URL)
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 5*time.Second, metrics,
-		"master-key", rl, tm, mm,
-		"test-version", "test-commit",
-	)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
 
 	resp, err := http.Get(upstreamServer.URL)
 	require.NoError(t, err)

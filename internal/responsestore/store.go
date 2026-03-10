@@ -169,7 +169,7 @@ func (s *bboltStore) getEntry(responseID string) (*StoredEntry, error) {
 	}); err != nil {
 		return nil, err
 	}
-	if entry.ExpiresAt > 0 && time.Now().Unix() > entry.ExpiresAt {
+	if entry.ExpiresAt > 0 && time.Now().Unix() >= entry.ExpiresAt {
 		return nil, fmt.Errorf("responsestore: expired: %s", responseID)
 	}
 	return &entry, nil
@@ -182,7 +182,7 @@ func (s *bboltStore) CleanupExpired(_ context.Context) error {
 		var toDelete [][]byte
 		_ = b.ForEach(func(k, v []byte) error {
 			var entry StoredEntry
-			if json.Unmarshal(v, &entry) == nil && entry.ExpiresAt > 0 && now > entry.ExpiresAt {
+			if json.Unmarshal(v, &entry) == nil && entry.ExpiresAt > 0 && now >= entry.ExpiresAt {
 				toDelete = append(toDelete, append([]byte(nil), k...))
 			}
 			return nil
