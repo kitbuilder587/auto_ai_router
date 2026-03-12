@@ -44,11 +44,13 @@ func isGemini25ProModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "gemini-2.5-pro")
 }
 
-// disableThinkingConfig returns a ThinkingConfig that minimizes thinking computation,
-// or nil if the model does not support disabling thinking.
+// disableThinkingConfig returns a ThinkingConfig that minimizes thinking computation.
 //
 // Gemini 2.5 flash: ThinkingBudget=0 (full disable supported).
-// Gemini 2.5 pro: returns nil — thinking cannot be disabled for this model.
+// Gemini 2.5 pro: ThinkingBudget=-1 (dynamic) — budget=0 is not supported by this model,
+//
+//	so we use dynamic mode which lets the model decide the budget.
+//
 // Gemini 3 flash: ThinkingLevel=Minimal (lowest level supported).
 // Gemini 3 non-flash: ThinkingLevel=Low (Minimal is not supported on pro variants).
 func disableThinkingConfig(model string) *genai.ThinkingConfig {
@@ -65,9 +67,13 @@ func disableThinkingConfig(model string) *genai.ThinkingConfig {
 			ThinkingLevel:   genai.ThinkingLevelLow,
 		}
 	}
-	// Gemini 2.5 pro: thinking cannot be disabled.
+	// Gemini 2.5 pro: budget=0 is not supported; use dynamic (-1) instead.
 	if isGemini25ProModel(model) {
-		return nil
+		dynamic := int32(-1)
+		return &genai.ThinkingConfig{
+			IncludeThoughts: false,
+			ThinkingBudget:  &dynamic,
+		}
 	}
 	// Gemini 2.5 flash: budget=0 fully disables thinking.
 	zero := int32(0)
@@ -84,10 +90,8 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 
 	if isGemini3Model(model) {
 		// Gemini 3+: ThinkingLevel enum.
-		// "minimal" uses Minimal only on flash; pro minimum is Low.
-		// "low" maps to Low for all variants (not Minimal).
-		// "medium" maps to Medium for all variants.
-		// "high" maps to High for all variants.
+		// Flash supports MINIMAL/LOW/MEDIUM/HIGH.
+		// Pro supports LOW/HIGH only (MINIMAL and MEDIUM are unsupported).
 		switch effort {
 		case "minimal":
 			if isFlashModel(model) {
@@ -98,7 +102,12 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 		case "low":
 			config.ThinkingLevel = genai.ThinkingLevelLow
 		case "medium":
-			config.ThinkingLevel = genai.ThinkingLevelMedium
+			if isFlashModel(model) {
+				config.ThinkingLevel = genai.ThinkingLevelMedium
+			} else {
+				// Pro variants don't support MEDIUM; use HIGH.
+				config.ThinkingLevel = genai.ThinkingLevelHigh
+			}
 		case "high":
 			config.ThinkingLevel = genai.ThinkingLevelHigh
 		case "disable", "none":
@@ -149,7 +158,12 @@ func mapNativeThinkingConfig(tcMap map[string]interface{}, model string) *genai.
 			case "low":
 				config.ThinkingLevel = genai.ThinkingLevelLow
 			case "medium":
-				config.ThinkingLevel = genai.ThinkingLevelMedium
+				if isFlashModel(model) {
+					config.ThinkingLevel = genai.ThinkingLevelMedium
+				} else {
+					// Pro variants don't support MEDIUM; use HIGH.
+					config.ThinkingLevel = genai.ThinkingLevelHigh
+				}
 			case "high":
 				config.ThinkingLevel = genai.ThinkingLevelHigh
 			default:
@@ -165,13 +179,35 @@ func mapNativeThinkingConfig(tcMap map[string]interface{}, model string) *genai.
 		}
 	} else {
 		// Gemini 2.5: use thinking_budget if provided.
-		if budget, ok := tcMap["thinking_budget"].(float64); ok {
-			if budget == 0 && isGemini25ProModel(model) {
-				// 2.5-pro cannot disable thinking; ignore budget=0.
-				return nil
+		if budgetRaw, ok := tcMap["thinking_budget"]; ok {
+			var budget float64
+			budgetSet := false
+			switch b := budgetRaw.(type) {
+			case float64:
+				budget, budgetSet = b, true
+			case int32:
+				budget, budgetSet = float64(b), true
+			case int64:
+				budget, budgetSet = float64(b), true
+			case int:
+				budget, budgetSet = float64(b), true
+				// Non-numeric (e.g. string "high"/"auto") — skip.
 			}
-			v := int32(budget)
-			config.ThinkingBudget = &v
+			if budgetSet {
+				if budget == 0 && isGemini25ProModel(model) {
+					// 2.5-pro cannot disable thinking; use dynamic (-1) instead.
+					dynamic := int32(-1)
+					config.ThinkingBudget = &dynamic
+				} else {
+					v := int32(budget)
+					config.ThinkingBudget = &v
+					if budget == 0 {
+						// include_thoughts requires thinking to be enabled.
+						// When disabling thinking (budget=0), force false.
+						config.IncludeThoughts = false
+					}
+				}
+			}
 		}
 	}
 
@@ -194,12 +230,18 @@ func mapAnthropicThinking(thinking map[string]interface{}, model string) *genai.
 
 	if isGemini3Model(model) {
 		// Map Anthropic budget_tokens to Gemini 3 ThinkingLevel.
-		// Thresholds align with official budget values: high≥24576, medium≥8192, low≥1024.
+		// Flash supports MINIMAL/LOW/MEDIUM/HIGH.
+		// Pro supports LOW/HIGH only (MEDIUM is unsupported on pro variants).
 		switch {
 		case budgetTokens >= 15000:
 			config.ThinkingLevel = genai.ThinkingLevelHigh
 		case budgetTokens >= 5000:
-			config.ThinkingLevel = genai.ThinkingLevelMedium
+			if isFlashModel(model) {
+				config.ThinkingLevel = genai.ThinkingLevelMedium
+			} else {
+				// Pro variants don't support MEDIUM; use HIGH.
+				config.ThinkingLevel = genai.ThinkingLevelHigh
+			}
 		default:
 			// Flash supports Minimal; pro minimum is Low.
 			if isFlashModel(model) {

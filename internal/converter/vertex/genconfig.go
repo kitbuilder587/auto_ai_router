@@ -15,7 +15,8 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 		req.TopP != nil || req.ExtraBody != nil || req.N != nil || req.Seed != nil ||
 		req.FrequencyPenalty != nil || req.PresencePenalty != nil || req.Stop != nil ||
 		len(req.Modalities) > 0 || req.ReasoningEffort != "" || req.ResponseFormat != nil ||
-		req.Logprobs != nil || req.TopLogprobs != nil
+		req.Logprobs != nil || req.TopLogprobs != nil ||
+		req.Thinking != nil || req.ThinkingBudget != nil || req.ThinkingLevel != ""
 
 	if !hasParams {
 		return nil
@@ -130,9 +131,10 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 	// Phase 3: Thinking / Reasoning
 	// Priority (highest first):
 	//   1. extra_body.thinking_config (Gemini-native format)
-	//   2. extra_body.thinking (Anthropic-style)
-	//   3. reasoning_effort
-	//   4. Default: disable autonomous thinking for predictable latency
+	//   2. top-level thinking_budget / thinking_level (Gemini-style top-level fields)
+	//   3. top-level thinking (Anthropic-style) or extra_body.thinking
+	//   4. reasoning_effort
+	//   5. Default: disable autonomous thinking for predictable latency
 	var thinkingResolved bool
 	if req.ExtraBody != nil {
 		if tcRaw, ok := req.ExtraBody["thinking_config"]; ok {
@@ -142,9 +144,24 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 			}
 		}
 	}
+	if !thinkingResolved && (req.ThinkingBudget != nil || req.ThinkingLevel != "") {
+		// Top-level thinking_budget / thinking_level (Gemini-style)
+		tcMap := make(map[string]interface{})
+		if req.ThinkingBudget != nil {
+			tcMap["thinking_budget"] = req.ThinkingBudget
+		}
+		if req.ThinkingLevel != "" {
+			tcMap["thinking_level"] = req.ThinkingLevel
+		}
+		cfg.ThinkingConfig = mapNativeThinkingConfig(tcMap, model)
+		thinkingResolved = true
+	}
 	if !thinkingResolved {
+		// Use top-level thinking field first, then extra_body.thinking
 		var thinkingParam interface{}
-		if req.ExtraBody != nil {
+		if req.Thinking != nil {
+			thinkingParam = req.Thinking
+		} else if req.ExtraBody != nil {
 			thinkingParam = req.ExtraBody["thinking"]
 		}
 		if tc := mapReasoningToThinkingConfig(thinkingParam, req.ReasoningEffort, model); tc != nil {
