@@ -59,9 +59,12 @@ func TestDisableThinkingConfig(t *testing.T) {
 		assert.Equal(t, int32(0), *cfg.ThinkingBudget)
 	})
 
-	t.Run("gemini25_pro_returns_nil", func(t *testing.T) {
+	t.Run("gemini25_pro_returns_dynamic_budget", func(t *testing.T) {
 		cfg := disableThinkingConfig("gemini-2.5-pro")
-		assert.Nil(t, cfg, "gemini-2.5-pro cannot disable thinking")
+		require.NotNil(t, cfg, "gemini-2.5-pro must return dynamic config, not nil")
+		assert.False(t, cfg.IncludeThoughts)
+		require.NotNil(t, cfg.ThinkingBudget)
+		assert.Equal(t, int32(-1), *cfg.ThinkingBudget, "must use dynamic (-1) budget")
 	})
 
 	t.Run("gemini3_flash_sets_level_minimal", func(t *testing.T) {
@@ -128,14 +131,16 @@ func TestMapReasoningEffort_Gemini25(t *testing.T) {
 }
 
 func TestMapReasoningEffort_Gemini25Pro_Disable(t *testing.T) {
-	// gemini-2.5-pro cannot disable thinking → returns nil
-	t.Run("disable_returns_nil", func(t *testing.T) {
+	// gemini-2.5-pro cannot disable thinking → returns dynamic budget (-1)
+	t.Run("disable_returns_dynamic", func(t *testing.T) {
 		result := mapReasoningEffort("disable", "gemini-2.5-pro")
-		assert.Nil(t, result, "gemini-2.5-pro: thinking cannot be disabled")
+		require.NotNil(t, result, "gemini-2.5-pro: must return dynamic config, not nil")
+		assert.Equal(t, int32(-1), *result.ThinkingBudget, "must use dynamic (-1) budget")
 	})
-	t.Run("none_returns_nil", func(t *testing.T) {
+	t.Run("none_returns_dynamic", func(t *testing.T) {
 		result := mapReasoningEffort("none", "gemini-2.5-pro")
-		assert.Nil(t, result, "gemini-2.5-pro: thinking cannot be disabled")
+		require.NotNil(t, result, "gemini-2.5-pro: must return dynamic config, not nil")
+		assert.Equal(t, int32(-1), *result.ThinkingBudget, "must use dynamic (-1) budget")
 	})
 }
 
@@ -153,9 +158,9 @@ func TestMapReasoningEffort_Gemini3(t *testing.T) {
 		// "low": all variants → Low (not Minimal, even for flash)
 		{"low_flash", "low", "gemini-3-flash", genai.ThinkingLevelLow, true},
 		{"low_pro", "low", "gemini-3-pro", genai.ThinkingLevelLow, true},
-		// "medium": all variants → Medium
+		// "medium": flash→Medium, pro→High (pro doesn't support MEDIUM)
 		{"medium_flash", "medium", "gemini-3-flash", genai.ThinkingLevelMedium, true},
-		{"medium_pro", "medium", "gemini-3-pro", genai.ThinkingLevelMedium, true},
+		{"medium_pro", "medium", "gemini-3-pro", genai.ThinkingLevelHigh, true},
 		{"high_any", "high", "gemini-3-pro", genai.ThinkingLevelHigh, true},
 		// disable/none: flash→Minimal, pro→Low (minimum supported)
 		{"disable_pro", "disable", "gemini-3-pro", genai.ThinkingLevelLow, false},
@@ -225,15 +230,26 @@ func TestMapAnthropicThinking(t *testing.T) {
 		assert.Equal(t, genai.ThinkingLevelHigh, result.ThinkingLevel)
 	})
 
-	t.Run("enabled_gemini3_medium", func(t *testing.T) {
-		// budget >= 5000 → Medium (not Low as before)
+	t.Run("enabled_gemini3_medium_flash", func(t *testing.T) {
+		// budget >= 5000 on flash → Medium
+		thinking := map[string]interface{}{
+			"type":          "enabled",
+			"budget_tokens": float64(5000),
+		}
+		result := mapAnthropicThinking(thinking, "gemini-3-flash")
+		assert.True(t, result.IncludeThoughts)
+		assert.Equal(t, genai.ThinkingLevelMedium, result.ThinkingLevel)
+	})
+
+	t.Run("enabled_gemini3_medium_pro_uses_high", func(t *testing.T) {
+		// budget >= 5000 on pro → High (pro doesn't support MEDIUM)
 		thinking := map[string]interface{}{
 			"type":          "enabled",
 			"budget_tokens": float64(5000),
 		}
 		result := mapAnthropicThinking(thinking, "gemini-3-pro")
 		assert.True(t, result.IncludeThoughts)
-		assert.Equal(t, genai.ThinkingLevelMedium, result.ThinkingLevel)
+		assert.Equal(t, genai.ThinkingLevelHigh, result.ThinkingLevel)
 	})
 
 	t.Run("enabled_gemini3_low_pro", func(t *testing.T) {
@@ -324,18 +340,21 @@ func TestMapNativeThinkingConfig(t *testing.T) {
 	})
 
 	t.Run("gemini25_budget_zero_flash_allowed", func(t *testing.T) {
-		tc := map[string]interface{}{"thinking_budget": float64(0), "include_thoughts": false}
+		// budget=0 disables thinking on flash; include_thoughts must be false
+		tc := map[string]interface{}{"thinking_budget": float64(0)}
 		result := mapNativeThinkingConfig(tc, "gemini-2.5-flash")
 		require.NotNil(t, result)
-		assert.False(t, result.IncludeThoughts)
+		assert.False(t, result.IncludeThoughts, "include_thoughts must be false when budget=0")
 		require.NotNil(t, result.ThinkingBudget)
 		assert.Equal(t, int32(0), *result.ThinkingBudget)
 	})
 
-	t.Run("gemini25pro_budget_zero_returns_nil", func(t *testing.T) {
+	t.Run("gemini25pro_budget_zero_uses_dynamic", func(t *testing.T) {
 		tc := map[string]interface{}{"thinking_budget": float64(0)}
 		result := mapNativeThinkingConfig(tc, "gemini-2.5-pro")
-		assert.Nil(t, result, "gemini-2.5-pro: budget=0 must return nil")
+		require.NotNil(t, result, "gemini-2.5-pro: budget=0 must use dynamic (-1), not nil")
+		require.NotNil(t, result.ThinkingBudget)
+		assert.Equal(t, int32(-1), *result.ThinkingBudget, "must use dynamic (-1) budget")
 	})
 
 	t.Run("gemini3_flash_with_level_minimal", func(t *testing.T) {
@@ -354,9 +373,19 @@ func TestMapNativeThinkingConfig(t *testing.T) {
 		assert.Equal(t, genai.ThinkingLevelLow, result.ThinkingLevel)
 	})
 
-	t.Run("gemini3_pro_with_level_medium", func(t *testing.T) {
+	t.Run("gemini3_pro_with_level_medium_uses_high", func(t *testing.T) {
+		// Pro variants don't support MEDIUM; falls back to High
 		tc := map[string]interface{}{"thinking_level": "medium", "include_thoughts": true}
 		result := mapNativeThinkingConfig(tc, "gemini-3.1-pro-preview")
+		require.NotNil(t, result)
+		assert.True(t, result.IncludeThoughts)
+		assert.Equal(t, genai.ThinkingLevelHigh, result.ThinkingLevel)
+	})
+
+	t.Run("gemini3_flash_with_level_medium", func(t *testing.T) {
+		// Flash supports MEDIUM
+		tc := map[string]interface{}{"thinking_level": "medium", "include_thoughts": true}
+		result := mapNativeThinkingConfig(tc, "gemini-3-flash")
 		require.NotNil(t, result)
 		assert.True(t, result.IncludeThoughts)
 		assert.Equal(t, genai.ThinkingLevelMedium, result.ThinkingLevel)

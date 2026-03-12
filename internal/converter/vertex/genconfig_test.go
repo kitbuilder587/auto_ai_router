@@ -56,14 +56,16 @@ func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
 		assert.Equal(t, int32(24576), *cfg.ThinkingConfig.ThinkingBudget)
 	})
 
-	t.Run("gemini25pro_no_params_no_thinking_config", func(t *testing.T) {
-		// gemini-2.5-pro cannot have thinking disabled; no ThinkingConfig should be set
+	t.Run("gemini25pro_no_params_uses_dynamic_thinking", func(t *testing.T) {
+		// gemini-2.5-pro cannot have budget=0; uses dynamic (-1) as default
 		req := &openai.OpenAIRequest{Model: "gemini-2.5-pro"}
 		temp := float64(0.7)
 		req.Temperature = &temp
 		cfg := buildGenerationConfig(req, "gemini-2.5-pro")
 		require.NotNil(t, cfg)
-		assert.Nil(t, cfg.ThinkingConfig, "gemini-2.5-pro: must not set ThinkingConfig when no params given")
+		require.NotNil(t, cfg.ThinkingConfig, "gemini-2.5-pro: must set dynamic ThinkingConfig")
+		require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
+		assert.Equal(t, int32(-1), *cfg.ThinkingConfig.ThinkingBudget, "must use dynamic (-1) budget")
 	})
 
 	t.Run("extra_body_thinking_config_takes_priority", func(t *testing.T) {

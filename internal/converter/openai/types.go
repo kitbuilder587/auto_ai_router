@@ -31,7 +31,9 @@ type OpenAIRequest struct {
 	Modalities           []string               `json:"modalities,omitempty"`
 	PromptCacheRetention string                 `json:"prompt_cache_retention,omitempty"`
 	ReasoningEffort      string                 `json:"reasoning_effort,omitempty"`
-	Thinking             interface{}            `json:"thinking,omitempty"` // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
+	Thinking             interface{}            `json:"thinking,omitempty"`        // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
+	ThinkingBudget       interface{}            `json:"thinking_budget,omitempty"` // Gemini-style thinking budget: int (tokens) or -1 (dynamic)
+	ThinkingLevel        string                 `json:"thinking_level,omitempty"`  // Gemini-style thinking level: "low"/"medium"/"high"
 	ServiceTier          string                 `json:"service_tier,omitempty"`
 	StreamOptions        interface{}            `json:"stream_options,omitempty"`
 	Verbosity            string                 `json:"verbosity,omitempty"`

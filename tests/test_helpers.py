@@ -29,6 +29,26 @@ class TestModels:
         "gemini-2.5-flash",
     ]
 
+    # Vertex AI models that support dynamic thinking (Gemini 2.5+, Gemini 3+)
+    VERTEX_MODELS_THINKING = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+    ]
+
+    # Gemini 2.5 thinking models (ThinkingBudget-based)
+    VERTEX_MODELS_THINKING_25 = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ]
+
+    # Gemini 3+ thinking models (ThinkingLevel-based)
+    VERTEX_MODELS_THINKING_3 = [
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+    ]
+
     # Vertex AI Image models
     VERTEX_IMAGE_MODELS = [
         "imagen-4.0-fast-generate-001",
