@@ -8,6 +8,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
 )
 
 func TestOpenAIEmbeddingToVertex_SingleString(t *testing.T) {
@@ -156,17 +157,19 @@ func TestVertexEmbeddingToOpenAI(t *testing.T) {
 	assert.Equal(t, 8, openaiResp.Usage.TotalTokens)
 }
 
-func TestGeminiEmbeddingToOpenAI(t *testing.T) {
-	resp := GeminiEmbeddingResponse{
-		Embeddings: []GeminiContentEmbedding{
-			{Values: []float64{0.1, 0.2, 0.3}},
-			{Values: []float64{0.4, 0.5, 0.6}},
+func TestGeminiEmbeddingToOpenAI_NoInputTexts(t *testing.T) {
+	// Simulates Gemini API batchEmbedContents response (no statistics).
+	// Without inputTexts, token counts fall back to 0.
+	resp := genai.EmbedContentResponse{
+		Embeddings: []*genai.ContentEmbedding{
+			{Values: []float32{0.1, 0.2, 0.3}},
+			{Values: []float32{0.4, 0.5, 0.6}},
 		},
 	}
 	body, err := json.Marshal(resp)
 	require.NoError(t, err)
 
-	result, err := GeminiEmbeddingToOpenAI(body, "text-embedding-004")
+	result, err := GeminiEmbeddingToOpenAI(body, "text-embedding-004", nil)
 	require.NoError(t, err)
 
 	var openaiResp openai.OpenAIEmbeddingResponse
@@ -176,24 +179,49 @@ func TestGeminiEmbeddingToOpenAI(t *testing.T) {
 	assert.Equal(t, "text-embedding-004", openaiResp.Model)
 	assert.Len(t, openaiResp.Data, 2)
 	assert.Equal(t, "embedding", openaiResp.Data[0].Object)
-	assert.Equal(t, []float64{0.1, 0.2, 0.3}, openaiResp.Data[0].Embedding)
-	assert.Equal(t, 0, openaiResp.Usage.PromptTokens) // Gemini doesn't return token counts by default
+	// float32→float64 conversion; values are approximate
+	assert.InDelta(t, 0.1, openaiResp.Data[0].Embedding[0], 1e-5)
+	assert.Equal(t, 0, openaiResp.Usage.PromptTokens)
 }
 
-func TestGeminiEmbeddingToOpenAI_WithUsageMetadata(t *testing.T) {
-	resp := GeminiEmbeddingResponse{
-		Embeddings: []GeminiContentEmbedding{
-			{Values: []float64{0.1, 0.2, 0.3}},
-		},
-		UsageMetadata: &GeminiEmbeddingUsage{
-			PromptTokenCount: 5,
-			TotalTokenCount:  5,
+func TestGeminiEmbeddingToOpenAI_TokenEstimation(t *testing.T) {
+	// Gemini API omits statistics; tokens must be estimated from inputTexts.
+	resp := genai.EmbedContentResponse{
+		Embeddings: []*genai.ContentEmbedding{
+			{Values: []float32{0.1, 0.2, 0.3}},
 		},
 	}
 	body, err := json.Marshal(resp)
 	require.NoError(t, err)
 
-	result, err := GeminiEmbeddingToOpenAI(body, "text-embedding-004")
+	inputTexts := []string{"Hello world"}
+	result, err := GeminiEmbeddingToOpenAI(body, "gemini-embedding-001", inputTexts)
+	require.NoError(t, err)
+
+	var openaiResp openai.OpenAIEmbeddingResponse
+	require.NoError(t, json.Unmarshal(result, &openaiResp))
+
+	assert.Greater(t, openaiResp.Usage.PromptTokens, 0, "expected estimated token count > 0")
+	assert.Equal(t, openaiResp.Usage.PromptTokens, openaiResp.Usage.TotalTokens)
+}
+
+func TestGeminiEmbeddingToOpenAI_WithStatistics(t *testing.T) {
+	// Simulates Vertex embedContent response that does include statistics.
+	tokenCount := float32(5)
+	resp := genai.EmbedContentResponse{
+		Embeddings: []*genai.ContentEmbedding{
+			{
+				Values: []float32{0.1, 0.2, 0.3},
+				Statistics: &genai.ContentEmbeddingStatistics{
+					TokenCount: tokenCount,
+				},
+			},
+		},
+	}
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	result, err := GeminiEmbeddingToOpenAI(body, "gemini-embedding-001", nil)
 	require.NoError(t, err)
 
 	var openaiResp openai.OpenAIEmbeddingResponse
@@ -201,6 +229,36 @@ func TestGeminiEmbeddingToOpenAI_WithUsageMetadata(t *testing.T) {
 
 	assert.Equal(t, 5, openaiResp.Usage.PromptTokens)
 	assert.Equal(t, 5, openaiResp.Usage.TotalTokens)
+}
+
+func TestGeminiEmbeddingToOpenAI_BatchTokenEstimation(t *testing.T) {
+	// Batch estimation: tokens for each text are summed.
+	resp := genai.EmbedContentResponse{
+		Embeddings: []*genai.ContentEmbedding{
+			{Values: []float32{0.1}},
+			{Values: []float32{0.2}},
+		},
+	}
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	inputTexts := []string{"Hello world", "Another sentence here"}
+	result, err := GeminiEmbeddingToOpenAI(body, "gemini-embedding-001", inputTexts)
+	require.NoError(t, err)
+
+	var openaiResp openai.OpenAIEmbeddingResponse
+	require.NoError(t, json.Unmarshal(result, &openaiResp))
+
+	singleResp := genai.EmbedContentResponse{
+		Embeddings: []*genai.ContentEmbedding{{Values: []float32{0.1}}},
+	}
+	singleBody, _ := json.Marshal(singleResp)
+	singleResult, _ := GeminiEmbeddingToOpenAI(singleBody, "gemini-embedding-001", []string{"Hello world"})
+	var singleOpenAI openai.OpenAIEmbeddingResponse
+	require.NoError(t, json.Unmarshal(singleResult, &singleOpenAI))
+
+	assert.Greater(t, openaiResp.Usage.PromptTokens, singleOpenAI.Usage.PromptTokens,
+		"batch tokens should be greater than single-text tokens")
 }
 
 func TestBuildVertexEmbeddingURL(t *testing.T) {

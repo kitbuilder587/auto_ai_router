@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_InfoLevel(t *testing.T) {
@@ -244,6 +245,56 @@ func TestTruncateLongFields_EmbeddingLessThan50(t *testing.T) {
 
 	embedding := data["embedding"].(string)
 	assert.True(t, strings.Contains(embedding, "truncated"))
+}
+
+func TestTruncateLongFields_EmbeddingFloatArray(t *testing.T) {
+	// Real-world case: embedding vector with many float values
+	input := `{"model":"gemini-embedding-001","data":[{"embedding":[-0.023,0.016,0.009,-0.063,-0.002,0.001,-0.011,0.013,0.008,0.001]}]}`
+
+	result := TruncateLongFields(input, 500)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(result), &data))
+
+	items := data["data"].([]interface{})
+	item := items[0].(map[string]interface{})
+	arr := item["embedding"].([]interface{})
+
+	// Should be truncated to [first, "... [N more]", last]
+	assert.Len(t, arr, 3)
+	assert.Equal(t, -0.023, arr[0])
+	assert.Equal(t, 0.001, arr[2])
+	assert.Contains(t, arr[1].(string), "more")
+}
+
+func TestTruncateLongFields_ValuesFloatArray(t *testing.T) {
+	// Vertex AI / Gemini response: "values" field with embedding vector
+	input := `{"embeddings":[{"values":[-0.023,0.016,0.009,-0.063,-0.002,0.001,-0.011,0.013,0.008,0.001]}]}`
+
+	result := TruncateLongFields(input, 500)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(result), &data))
+
+	embeddings := data["embeddings"].([]interface{})
+	emb := embeddings[0].(map[string]interface{})
+	arr := emb["values"].([]interface{})
+
+	assert.Len(t, arr, 3)
+	assert.Contains(t, arr[1].(string), "more")
+}
+
+func TestTruncateLongFields_ShortFloatArray(t *testing.T) {
+	// Arrays with 3 or fewer elements should NOT be truncated
+	input := `{"embedding":[0.1,0.2,0.3]}`
+
+	result := TruncateLongFields(input, 500)
+
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(result), &data))
+
+	arr := data["embedding"].([]interface{})
+	assert.Len(t, arr, 3, "short arrays should not be truncated")
 }
 
 func TestGetLevelColor(t *testing.T) {

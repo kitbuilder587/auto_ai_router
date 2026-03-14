@@ -8,6 +8,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"google.golang.org/genai"
 )
 
 // Vertex AI embedding types (models/{model}:predict)
@@ -58,32 +59,15 @@ type GeminiEmbeddingRequest struct {
 
 type GeminiEmbedRequest struct {
 	Model                string         `json:"model"`
-	Content              *GeminiContent `json:"content"`
+	Content              *genai.Content `json:"content"`
 	TaskType             string         `json:"taskType,omitempty"`
 	OutputDimensionality *int32         `json:"outputDimensionality,omitempty"`
 }
 
-type GeminiContent struct {
-	Parts []GeminiPart `json:"parts"`
-}
-
-type GeminiPart struct {
-	Text string `json:"text"`
-}
-
-type GeminiEmbeddingResponse struct {
-	Embeddings    []GeminiContentEmbedding `json:"embeddings"`
-	UsageMetadata *GeminiEmbeddingUsage    `json:"usageMetadata,omitempty"`
-}
-
-type GeminiContentEmbedding struct {
-	Values []float64 `json:"values"`
-}
-
-type GeminiEmbeddingUsage struct {
-	PromptTokenCount int `json:"promptTokenCount"`
-	TotalTokenCount  int `json:"totalTokenCount"`
-}
+// GeminiEmbeddingResponse is the raw batchEmbedContents response.
+// It matches genai.EmbedContentResponse layout; we use the SDK type directly in
+// GeminiEmbeddingToOpenAI so that future SDK additions (e.g. statistics) are
+// picked up automatically.
 
 // extractInputTexts parses the OpenAI input field into a slice of strings.
 // Handles string, []string, and []interface{} (JSON arrays decode as []interface{}).
@@ -156,8 +140,8 @@ func OpenAIEmbeddingToGemini(body []byte, model string) ([]byte, error) {
 	for i, text := range texts {
 		gr := GeminiEmbedRequest{
 			Model: modelRef,
-			Content: &GeminiContent{
-				Parts: []GeminiPart{{Text: text}},
+			Content: &genai.Content{
+				Parts: []*genai.Part{{Text: text}},
 			},
 		}
 		if req.Dimensions != nil {
@@ -208,26 +192,64 @@ func VertexEmbeddingToOpenAI(body []byte, model string) ([]byte, error) {
 	return json.Marshal(openaiResp)
 }
 
-// GeminiEmbeddingToOpenAI converts a Gemini API embedding response to OpenAI format.
-func GeminiEmbeddingToOpenAI(body []byte, model string) ([]byte, error) {
-	var resp GeminiEmbeddingResponse
+// estimateTokens returns a rough token count for text using the ~4 chars/token heuristic.
+func estimateTokens(text string) int {
+	n := len([]rune(text))
+	if n == 0 {
+		return 1
+	}
+	t := (n + 3) / 4
+	if t < 1 {
+		t = 1
+	}
+	return t
+}
+
+// ExtractEmbeddingTexts parses an OpenAI embedding request body and returns the input texts.
+// Used to cache texts so GeminiEmbeddingToOpenAI can estimate prompt_tokens when
+// batchEmbedContents omits statistics (Gemini API does not return token counts).
+func ExtractEmbeddingTexts(body []byte) ([]string, error) {
+	var req openai.OpenAIEmbeddingRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse embedding request: %w", err)
+	}
+	return extractInputTexts(req.Input)
+}
+
+// GeminiEmbeddingToOpenAI converts a Gemini API batchEmbedContents response to OpenAI format.
+// It uses genai.EmbedContentResponse so that SDK-level statistics (Vertex embedContent path)
+// are handled automatically. For Gemini API responses that omit statistics, token counts are
+// estimated from inputTexts using a ~4 chars/token heuristic.
+func GeminiEmbeddingToOpenAI(body []byte, model string, inputTexts []string) ([]byte, error) {
+	var resp genai.EmbedContentResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse gemini embedding response: %w", err)
 	}
 
 	data := make([]openai.OpenAIEmbeddingData, len(resp.Embeddings))
+	var promptTokens int
 	for i, emb := range resp.Embeddings {
+		// genai uses float32; OpenAI expects float64.
+		embedding := make([]float64, len(emb.Values))
+		for j, v := range emb.Values {
+			embedding[j] = float64(v)
+		}
 		data[i] = openai.OpenAIEmbeddingData{
 			Object:    "embedding",
 			Index:     i,
-			Embedding: emb.Values,
+			Embedding: embedding,
+		}
+		if emb.Statistics != nil && emb.Statistics.TokenCount > 0 {
+			promptTokens += int(math.Round(float64(emb.Statistics.TokenCount)))
 		}
 	}
 
-	var promptTokens, totalTokens int
-	if resp.UsageMetadata != nil {
-		promptTokens = resp.UsageMetadata.PromptTokenCount
-		totalTokens = resp.UsageMetadata.TotalTokenCount
+	// Fallback: Gemini API batchEmbedContents never returns statistics.
+	// Estimate from the original request texts (~4 chars per token).
+	if promptTokens == 0 {
+		for _, text := range inputTexts {
+			promptTokens += estimateTokens(text)
+		}
 	}
 
 	openaiResp := openai.OpenAIEmbeddingResponse{
@@ -236,7 +258,7 @@ func GeminiEmbeddingToOpenAI(body []byte, model string) ([]byte, error) {
 		Model:  model,
 		Usage: openai.OpenAIEmbeddingUsage{
 			PromptTokens: promptTokens,
-			TotalTokens:  totalTokens,
+			TotalTokens:  promptTokens,
 		},
 	}
 

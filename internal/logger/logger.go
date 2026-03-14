@@ -147,10 +147,13 @@ func truncateValue(v interface{}, maxLength int) {
 	case map[string]interface{}:
 		for key, value := range val {
 			switch key {
-			case "embedding", "b64_json", "content":
-				// Truncate known long fields more aggressively
+			case "embedding", "b64_json", "content", "values":
+				// Truncate known long fields more aggressively.
 				if str, ok := value.(string); ok && len(str) > 50 {
 					val[key] = fmt.Sprintf("%s... [truncated %d chars]", str[:50], len(str)-50)
+				} else if arr, ok := value.([]interface{}); ok && len(arr) > 3 {
+					// Arrays (e.g. embedding vectors): show first, ..., last
+					val[key] = []interface{}{arr[0], fmt.Sprintf("... [%d more]", len(arr)-2), arr[len(arr)-1]}
 				}
 			case "messages":
 				// For messages array, truncate each message content
