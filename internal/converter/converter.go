@@ -24,6 +24,10 @@ type RequestMode struct {
 type ProviderConverter struct {
 	providerType config.ProviderType
 	mode         RequestMode
+	// inputTexts caches the original embedding request texts so that
+	// GeminiEmbeddingToOpenAI can estimate prompt_tokens when the upstream
+	// API (Gemini batchEmbedContents) does not return token statistics.
+	inputTexts []string
 }
 
 // New creates a ProviderConverter for the given provider and request mode.
@@ -43,6 +47,10 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		case config.ProviderTypeVertexAI:
 			return vertex.OpenAIEmbeddingToVertex(body)
 		case config.ProviderTypeGemini:
+			// Cache input texts for token estimation in ResponseTo.
+			if texts, err := vertex.ExtractEmbeddingTexts(body); err == nil {
+				c.inputTexts = texts
+			}
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
 		case config.ProviderTypeAnthropic:
 			return nil, errors.New("anthropic does not support embeddings")
@@ -82,7 +90,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 		case config.ProviderTypeVertexAI:
 			return vertex.VertexEmbeddingToOpenAI(body, c.mode.ModelID)
 		case config.ProviderTypeGemini:
-			return vertex.GeminiEmbeddingToOpenAI(body, c.mode.ModelID)
+			return vertex.GeminiEmbeddingToOpenAI(body, c.mode.ModelID, c.inputTexts)
 		default:
 			return body, nil
 		}

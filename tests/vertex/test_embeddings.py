@@ -53,3 +53,40 @@ class TestVertexEmbeddings:
         assert embedding_dim > 0
         # OpenAI embeddings typically have 1536 dimensions
         assert embedding_dim > 100
+
+    @pytest.mark.parametrize("model", TestModels.VERTEX_EMBEDDING_MODELS)
+    def test_embedding_usage_tokens(self, openai_client, model):
+        """Response contains non-zero token counts in usage field."""
+        response = openai_client.embeddings.create(
+            model=model,
+            input="Hello world",
+        )
+
+        assert response.usage is not None, "Expected usage field in embeddings response"
+        assert response.usage.prompt_tokens > 0, (
+            f"Expected prompt_tokens > 0, got {response.usage.prompt_tokens}"
+        )
+        assert response.usage.total_tokens > 0, (
+            f"Expected total_tokens > 0, got {response.usage.total_tokens}"
+        )
+        assert response.usage.prompt_tokens == response.usage.total_tokens, (
+            "For embeddings, prompt_tokens should equal total_tokens"
+        )
+
+    @pytest.mark.parametrize("model", TestModels.VERTEX_EMBEDDING_MODELS)
+    def test_batch_embedding_usage_tokens_scale(self, openai_client, model):
+        """Batch embedding token count should exceed single-text token count."""
+        single_response = openai_client.embeddings.create(
+            model=model,
+            input="Hello world",
+        )
+
+        batch_response = openai_client.embeddings.create(
+            model=model,
+            input=["Hello world", "This is a longer second sentence for the batch."],
+        )
+
+        assert batch_response.usage.prompt_tokens > single_response.usage.prompt_tokens, (
+            f"Batch tokens ({batch_response.usage.prompt_tokens}) should exceed "
+            f"single tokens ({single_response.usage.prompt_tokens})"
+        )
