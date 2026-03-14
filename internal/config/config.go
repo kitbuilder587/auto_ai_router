@@ -54,6 +54,146 @@ type Config struct {
 	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 	Redis       RedisConfig        `yaml:"redis,omitempty"`
+	// ModelTemplates stores x-model-templates entries as raw interface{} so that
+	// both single-model mappings and lists of models can be defined as YAML anchors
+	// without type errors. The actual model data is extracted via anchor expansion.
+	ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for Config with YAML anchor/alias support.
+// This allows using YAML anchors (&) and aliases (*) for x-model-templates.
+func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+	// First, resolve all aliases in the YAML document
+	resolvedData, err := resolveYAMLAliases(value)
+	if err != nil {
+		return fmt.Errorf("failed to resolve YAML aliases: %w", err)
+	}
+
+	// Then unmarshal the resolved data into Config
+	type RawConfig struct {
+		Server         ServerConfig           `yaml:"server"`
+		Fail2Ban       Fail2BanConfig         `yaml:"fail2ban,omitempty"`
+		Credentials    []CredentialConfig     `yaml:"credentials"`
+		Monitoring     MonitoringConfig       `yaml:"monitoring"`
+		Models         []ModelRPMConfig       `yaml:"models,omitempty"`
+		ModelAlias     map[string]string      `yaml:"model_alias,omitempty"`
+		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
+		Redis          RedisConfig            `yaml:"redis,omitempty"`
+		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+	}
+
+	var raw RawConfig
+	if err := yaml.Unmarshal(resolvedData, &raw); err != nil {
+		return fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Copy values to actual config
+	c.Server = raw.Server
+	c.Fail2Ban = raw.Fail2Ban
+	c.Credentials = raw.Credentials
+	c.Monitoring = raw.Monitoring
+	c.Models = raw.Models
+	c.ModelAlias = raw.ModelAlias
+	c.LiteLLMDB = raw.LiteLLMDB
+	c.Redis = raw.Redis
+	c.ModelTemplates = raw.ModelTemplates
+
+	return nil
+}
+
+// resolveYAMLAliases takes raw YAML data, parses it, resolves aliases, and returns the resolved YAML.
+func resolveYAMLAliases(node *yaml.Node) ([]byte, error) {
+	// Collect all anchors from the document
+	anchors := make(map[string]*yaml.Node)
+	collectAnchors(node, anchors)
+
+	// Replace aliases with their anchor values
+	resolveAliasesInNode(node, anchors)
+
+	// Flatten nested sequences that result from list-anchor expansion.
+	// e.g. "- *list-anchor" in a sequence becomes a nested sequence after alias
+	// resolution; flattenSequences collapses those into the parent sequence so
+	// that model lists behave as expected.
+	flattenSequences(node)
+
+	// Marshal back to YAML
+	return yaml.Marshal(node)
+}
+
+// collectAnchors collects all anchor definitions from the YAML node tree
+func collectAnchors(node *yaml.Node, anchors map[string]*yaml.Node) {
+	if node == nil {
+		return
+	}
+
+	// If this node has an anchor, store it
+	if node.Anchor != "" {
+		anchors[node.Anchor] = node
+	}
+
+	for _, child := range node.Content {
+		collectAnchors(child, anchors)
+	}
+}
+
+// flattenSequences collapses nested sequences that arise when a list anchor is
+// used as an item inside another sequence:
+//
+//	models:
+//	  - *my-model-list   # after alias resolution this becomes a nested sequence
+//	  - name: other      # ordinary mapping item
+//
+// After flattening the nested sequence items are promoted to the parent level,
+// so the result is a flat list of model mappings.
+func flattenSequences(root *yaml.Node) {
+	if root == nil {
+		return
+	}
+	queue := make([]*yaml.Node, 0, 16)
+	queue = append(queue, root)
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		if node.Kind == yaml.SequenceNode {
+			flat := make([]*yaml.Node, 0, len(node.Content))
+			for _, child := range node.Content {
+				if child.Kind == yaml.SequenceNode {
+					flat = append(flat, child.Content...)
+				} else {
+					flat = append(flat, child)
+				}
+			}
+			node.Content = flat
+		}
+		queue = append(queue, node.Content...)
+	}
+}
+
+// resolveAliasesInNode replaces alias nodes with their anchor values
+func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
+	if node == nil {
+		return
+	}
+
+	if node.Kind == yaml.AliasNode {
+		// Replace the alias with the anchor's value
+		if anchor, ok := anchors[node.Value]; ok {
+			// Copy all fields from anchor to this node
+			node.Kind = anchor.Kind
+			node.Style = anchor.Style
+			node.Tag = anchor.Tag
+			node.Value = anchor.Value
+			node.Anchor = anchor.Anchor
+			node.Content = anchor.Content
+			node.HeadComment = anchor.HeadComment
+			node.LineComment = anchor.LineComment
+		}
+		return
+	}
+
+	for _, child := range node.Content {
+		resolveAliasesInNode(child, anchors)
+	}
 }
 
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
@@ -296,6 +436,9 @@ type CredentialConfig struct {
 	RPM     int          `yaml:"rpm"`
 	TPM     int          `yaml:"tpm"`
 
+	// Models associated with this credential (used for x-model-templates)
+	Models []ModelRPMConfig `yaml:"models,omitempty"`
+
 	// Vertex AI specific fields
 	ProjectID       string `yaml:"project_id,omitempty"`
 	Location        string `yaml:"location,omitempty"`
@@ -310,17 +453,18 @@ type CredentialConfig struct {
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name            string `yaml:"name"`
-		Type            string `yaml:"type"`
-		APIKey          string `yaml:"api_key"`
-		BaseURL         string `yaml:"base_url"`
-		RPM             string `yaml:"rpm"`
-		TPM             string `yaml:"tpm"`
-		ProjectID       string `yaml:"project_id,omitempty"`
-		Location        string `yaml:"location,omitempty"`
-		CredentialsFile string `yaml:"credentials_file,omitempty"`
-		CredentialsJSON string `yaml:"credentials_json,omitempty"`
-		IsFallback      string `yaml:"is_fallback,omitempty"`
+		Name            string           `yaml:"name"`
+		Type            string           `yaml:"type"`
+		APIKey          string           `yaml:"api_key"`
+		BaseURL         string           `yaml:"base_url"`
+		RPM             string           `yaml:"rpm"`
+		TPM             string           `yaml:"tpm"`
+		ProjectID       string           `yaml:"project_id,omitempty"`
+		Location        string           `yaml:"location,omitempty"`
+		CredentialsFile string           `yaml:"credentials_file,omitempty"`
+		CredentialsJSON string           `yaml:"credentials_json,omitempty"`
+		IsFallback      string           `yaml:"is_fallback,omitempty"`
+		Models          []ModelRPMConfig `yaml:"models,omitempty"`
 	}
 
 	var temp tempConfig
@@ -354,6 +498,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
+	// Copy models decoded via YAML anchors / inline definitions
+	c.Models = temp.Models
+
 	// Validate base_url for proxy and other provider types that require it
 	if c.BaseURL != "" {
 		if err := validateBaseURL(c.Name, c.BaseURL); err != nil {
@@ -379,6 +526,10 @@ type LiteLLMDBConfig struct {
 	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
 	// or optional (degrade to NoopManager with warning on error)
 	IsRequired bool `yaml:"is_required"` // default: false
+	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
+	// or optional (degrade to NoopManager with warning on error)
+	LoadLitellmDBModels   bool          `yaml:"load_db_models"`         // default: false
+	LitellmDBSyncInterval time.Duration `yaml:"db_model_sync_interval"` // default: 1m
 
 	// Database connection postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
 	DatabaseURL string `yaml:"database_url"` // os.environ/LITELLM_DATABASE_URL
@@ -432,18 +583,20 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 // UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
 func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled             string `yaml:"enabled"`
-		IsRequired          string `yaml:"is_required"`
-		DatabaseURL         string `yaml:"database_url"`
-		MaxConns            string `yaml:"max_conns"`
-		MinConns            string `yaml:"min_conns"`
-		HealthCheckInterval string `yaml:"health_check_interval"`
-		ConnectTimeout      string `yaml:"connect_timeout"`
-		AuthCacheTTL        string `yaml:"auth_cache_ttl"`
-		AuthCacheSize       string `yaml:"auth_cache_size"`
-		LogQueueSize        string `yaml:"log_queue_size"`
-		LogBatchSize        string `yaml:"log_batch_size"`
-		LogFlushInterval    string `yaml:"log_flush_interval"`
+		Enabled               string `yaml:"enabled"`
+		IsRequired            string `yaml:"is_required"`
+		LoadLitellmDBModels   string `yaml:"load_db_models"`
+		LitellmDBSyncInterval string `yaml:"db_model_sync_interval"`
+		DatabaseURL           string `yaml:"database_url"`
+		MaxConns              string `yaml:"max_conns"`
+		MinConns              string `yaml:"min_conns"`
+		HealthCheckInterval   string `yaml:"health_check_interval"`
+		ConnectTimeout        string `yaml:"connect_timeout"`
+		AuthCacheTTL          string `yaml:"auth_cache_ttl"`
+		AuthCacheSize         string `yaml:"auth_cache_size"`
+		LogQueueSize          string `yaml:"log_queue_size"`
+		LogBatchSize          string `yaml:"log_batch_size"`
+		LogFlushInterval      string `yaml:"log_flush_interval"`
 	}
 
 	var temp tempConfig
@@ -460,6 +613,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.IsRequired, err = parseField(temp.IsRequired, false, strconv.ParseBool, "litellm_db.is_required"); err != nil {
+		return err
+	}
+	if l.LoadLitellmDBModels, err = parseField(temp.LoadLitellmDBModels, false, strconv.ParseBool, "litellm_db.load_db_models"); err != nil {
 		return err
 	}
 
@@ -481,6 +637,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Duration fields
 	if l.HealthCheckInterval, err = parseField(temp.HealthCheckInterval, 10*time.Second, time.ParseDuration, "litellm_db.health_check_interval"); err != nil {
+		return err
+	}
+	if l.LitellmDBSyncInterval, err = parseField(temp.LitellmDBSyncInterval, 1*time.Minute, time.ParseDuration, "litellm_db.db_model_sync_interval"); err != nil {
 		return err
 	}
 	if l.ConnectTimeout, err = parseField(temp.ConnectTimeout, 5*time.Second, time.ParseDuration, "litellm_db.connect_timeout"); err != nil {
@@ -539,6 +698,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Resolve YAML aliases first (for x-model-templates anchors)
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -553,6 +713,22 @@ func Load(path string) (*Config, error) {
 		cfg.Fail2Ban = defaultFail2BanConfig()
 	}
 
+	if !hasMappingKey(&root, "monitoring") {
+		cfg.Monitoring = defaultMonitoringConfig()
+	}
+
+	if !hasMappingKey(&root, "redis") {
+		cfg.Redis = defaultRedisConfig()
+	}
+
+	if !hasMappingKey(&root, "litellm_db") {
+		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
+	}
+
+	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
+	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
+	cfg.Monitoring.HealthCheckPath = "/health"
+
 	// Resolve env variables in model_alias values
 	if cfg.ModelAlias != nil {
 		resolved := make(map[string]string, len(cfg.ModelAlias))
@@ -560,6 +736,39 @@ func Load(path string) (*Config, error) {
 			resolved[resolveEnvString(alias)] = resolveEnvString(target)
 		}
 		cfg.ModelAlias = resolved
+	}
+
+	if cfg.Credentials == nil {
+		cfg.Credentials = []CredentialConfig{}
+	}
+
+	if cfg.Models == nil {
+		cfg.Models = []ModelRPMConfig{}
+	}
+
+	if cfg.ModelAlias == nil {
+		cfg.ModelAlias = map[string]string{}
+	}
+
+	// Extract models from credentials and add to main Models list
+	// Models defined in credentials are "unpacked" to the main models list
+	for _, cred := range cfg.Credentials {
+		for _, model := range cred.Models {
+			// Create a copy of the model with the credential reference set
+			expandedModel := model
+			if expandedModel.Credential == "" {
+				expandedModel.Credential = cred.Name
+			}
+			if expandedModel.Name == "" {
+				continue
+			}
+			cfg.Models = append(cfg.Models, expandedModel)
+		}
+	}
+
+	// Clear models from credentials (they have been unpacked to main Models)
+	for i := range cfg.Credentials {
+		cfg.Credentials[i].Models = nil
 	}
 
 	// Normalize credentials
@@ -577,6 +786,54 @@ func defaultFail2BanConfig() Fail2BanConfig {
 		MaxAttempts: DefaultMaxAttempts,
 		BanDuration: DefaultBanDuration,
 		ErrorCodes:  append([]int(nil), DefaultErrorCodes...),
+	}
+}
+
+func defaultMonitoringConfig() MonitoringConfig {
+	return MonitoringConfig{
+		PrometheusEnabled: true,
+		HealthCheckPath:   "/health",
+		LogErrors:         false,
+		ErrorsLogPath:     "logs/logs.jsonl",
+	}
+}
+
+func defaultRedisConfig() RedisConfig {
+	return RedisConfig{
+		Enabled:           false,
+		InitAddresses:     nil,
+		Username:          "",
+		Password:          "",
+		SelectDB:          0,
+		KeyPrefix:         "rl:",
+		TLSEnabled:        false,
+		ConnectTimeout:    5 * time.Second,
+		ConnWriteTimeout:  10 * time.Second,
+		ForceSingleClient: false,
+		MinIdleConns:      10,
+		MaxIdleConns:      100,
+		MaxConnLifetime:   30 * time.Minute,
+		KeyTTL:            120,
+		CommandTimeout:    3 * time.Second,
+	}
+}
+
+func defaultLiteLLMDBConfig() LiteLLMDBConfig {
+	return LiteLLMDBConfig{
+		Enabled:               false,
+		IsRequired:            false,
+		LoadLitellmDBModels:   false,
+		LitellmDBSyncInterval: 1 * time.Minute,
+		DatabaseURL:           "",
+		MaxConns:              25,
+		MinConns:              5,
+		HealthCheckInterval:   10 * time.Second,
+		ConnectTimeout:        5 * time.Second,
+		AuthCacheTTL:          5 * time.Second,
+		AuthCacheSize:         10000,
+		LogQueueSize:          5000,
+		LogBatchSize:          100,
+		LogFlushInterval:      5 * time.Second,
 	}
 }
 
@@ -664,7 +921,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid max_attempts: %d", c.Fail2Ban.MaxAttempts)
 	}
 
-	if len(c.Credentials) == 0 {
+	if len(c.Credentials) == 0 && !c.LiteLLMDB.Enabled {
 		return fmt.Errorf("no credentials configured")
 	}
 
