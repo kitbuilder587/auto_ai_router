@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy
+.PHONY: build run clean test fmt vet lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -32,6 +32,7 @@ help:
 	@echo "  test-race            - Run tests with race detector"
 	@echo "  test-pkg PKG=<name>  - Run tests for specific package"
 	@echo "  test-check-coverage  - Check if coverage meets 80% threshold"
+	@echo "  test-clean           - Remove Go build cache"
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
@@ -112,6 +113,13 @@ test-pkg:
 	export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
 	COVERPKG="$$( $(GO) list ./internal/... | paste -sd "," - )"; \
 	$(GO) test -v -coverpkg="$$COVERPKG" -cover ./internal/$(PKG)/...
+
+## test-clean: Remove Go build cache
+test-clean:
+	@echo "Cleaning Go build cache..."
+	@export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
+	rm -rf $${GOCACHE}
+	@echo "Go build cache cleaned"
 
 ## test-check-coverage: Check if coverage meets threshold
 test-check-coverage:
