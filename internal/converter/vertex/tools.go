@@ -50,14 +50,25 @@ func mapToolChoice(toolChoice interface{}) *genai.ToolConfig {
 	return &genai.ToolConfig{FunctionCallingConfig: fcc}
 }
 
+// vertexToolsResult holds the converted tools and metadata about what was found.
+type vertexToolsResult struct {
+	Tools            []*genai.Tool
+	HasFunctionDecls bool // true when at least one function declaration is present
+	HasBuiltinTools  bool // true when GoogleSearch, CodeExecution, etc. are present
+}
+
 // convertOpenAIToolsToVertex converts OpenAI tools to genai.Tool slice.
 // Functions are grouped in one Tool; special tools each get their own Tool object.
-func convertOpenAIToolsToVertex(openAITools []interface{}) []*genai.Tool {
+// Gemini API does NOT allow combining built-in tools (GoogleSearch, CodeExecution, etc.)
+// with function declarations in the same request. When both are present, built-in tools
+// take priority and function declarations are dropped.
+func convertOpenAIToolsToVertex(openAITools []interface{}) vertexToolsResult {
+	result := vertexToolsResult{}
 	if len(openAITools) == 0 {
-		return nil
+		return result
 	}
 
-	var tools []*genai.Tool
+	var builtinTools []*genai.Tool
 	var functionDecls []*genai.FunctionDeclaration
 
 	for _, toolInterface := range openAITools {
@@ -75,38 +86,41 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) []*genai.Tool {
 				}
 			}
 		case "computer_use":
-			tools = append(tools, &genai.Tool{
+			builtinTools = append(builtinTools, &genai.Tool{
 				ComputerUse: &genai.ComputerUse{},
 			})
 		case "web_search", "web_search_preview":
-			tools = append(tools, &genai.Tool{
+			builtinTools = append(builtinTools, &genai.Tool{
 				GoogleSearch: &genai.GoogleSearch{},
 			})
 		case "google_search_retrieval":
 			retrieval := convertGoogleSearchRetrieval(toolMap)
-			tools = append(tools, &genai.Tool{
+			builtinTools = append(builtinTools, &genai.Tool{
 				GoogleSearchRetrieval: retrieval,
 			})
 		case "google_maps":
-			tools = append(tools, &genai.Tool{
+			builtinTools = append(builtinTools, &genai.Tool{
 				GoogleMaps: &genai.GoogleMaps{},
 			})
 		case "code_execution":
-			tools = append(tools, &genai.Tool{
+			builtinTools = append(builtinTools, &genai.Tool{
 				CodeExecution: &genai.ToolCodeExecution{},
 			})
 		}
 	}
 
-	// Functions go first, grouped in a single Tool
-	if len(functionDecls) > 0 {
-		tools = append([]*genai.Tool{{FunctionDeclarations: functionDecls}}, tools...)
+	result.HasBuiltinTools = len(builtinTools) > 0
+	result.HasFunctionDecls = len(functionDecls) > 0
+
+	// Gemini API constraint: built-in tools and function calling cannot be combined.
+	// When both are present, prefer built-in tools (GoogleSearch, etc.) and drop functions.
+	if result.HasBuiltinTools {
+		result.Tools = builtinTools
+	} else if result.HasFunctionDecls {
+		result.Tools = []*genai.Tool{{FunctionDeclarations: functionDecls}}
 	}
 
-	if len(tools) == 0 {
-		return nil
-	}
-	return tools
+	return result
 }
 
 // convertToFunctionDecl converts OpenAI function definition to genai.FunctionDeclaration

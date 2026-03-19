@@ -297,10 +297,16 @@ func TestRequestToChat_ToolChoiceString(t *testing.T) {
 	assert.Equal(t, "auto", parsed["tool_choice"])
 }
 
-func TestRequestToChat_ToolChoiceUnsupported(t *testing.T) {
+func TestRequestToChat_ToolChoiceNonFunctionPassthrough(t *testing.T) {
 	body := `{"model":"gpt-4o","input":"hi","tool_choice":{"type":"file_search"}}`
-	_, err := RequestToChat([]byte(body))
-	require.Error(t, err)
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	tc := parsed["tool_choice"].(map[string]interface{})
+	assert.Equal(t, "file_search", tc["type"])
 }
 
 func TestRequestToChat_FunctionCallOutput(t *testing.T) {
@@ -751,17 +757,39 @@ func TestRequestToChat_PreservesOtherFields(t *testing.T) {
 	assert.NotContains(t, parsed, "service_tier")
 }
 
-func TestRequestToChat_NonFunctionToolsRemoved(t *testing.T) {
+func TestRequestToChat_NonFunctionToolsPassthrough(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",
 		"input": "search the web",
 		"tools": [
 			{"type": "web_search", "name": "web_search"},
+			{"type": "web_search_preview"},
 			{"type": "function", "name": "my_func", "description": "My function", "parameters": {}}
 		]
 	}`
-	_, err := RequestToChat([]byte(body))
-	require.Error(t, err)
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	tools := parsed["tools"].([]interface{})
+	assert.Len(t, tools, 3)
+
+	// web_search passed through as-is
+	tool0 := tools[0].(map[string]interface{})
+	assert.Equal(t, "web_search", tool0["type"])
+	assert.Equal(t, "web_search", tool0["name"])
+
+	// web_search_preview passed through as-is
+	tool1 := tools[1].(map[string]interface{})
+	assert.Equal(t, "web_search_preview", tool1["type"])
+
+	// function tool converted to nested format
+	tool2 := tools[2].(map[string]interface{})
+	assert.Equal(t, "function", tool2["type"])
+	funcDef := tool2["function"].(map[string]interface{})
+	assert.Equal(t, "my_func", funcDef["name"])
 }
 
 func TestRequestToChat_MessageWithType(t *testing.T) {

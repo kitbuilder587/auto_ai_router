@@ -102,14 +102,18 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	}
 
 	// Tools
+	var hasUserFunctions bool
 	if len(req.Tools) > 0 {
-		if tools := convertOpenAIToolsToVertex(req.Tools); len(tools) > 0 {
-			vertexReq.Tools = tools
+		toolsResult := convertOpenAIToolsToVertex(req.Tools)
+		if len(toolsResult.Tools) > 0 {
+			vertexReq.Tools = toolsResult.Tools
 		}
+		hasUserFunctions = toolsResult.HasFunctionDecls && !toolsResult.HasBuiltinTools
 	}
 
-	// Tool choice (Phase 1)
-	if req.ToolChoice != nil {
+	// Tool choice — only set FunctionCallingConfig when function declarations are present.
+	// Gemini rejects FunctionCallingConfig without function_declarations.
+	if req.ToolChoice != nil && hasUserFunctions {
 		vertexReq.ToolConfig = mapToolChoice(req.ToolChoice)
 	}
 

@@ -212,26 +212,44 @@ func TestConvertOpenAIToolsToVertex_FunctionGrouping(t *testing.T) {
 		},
 	}
 
-	tools := convertOpenAIToolsToVertex(openAITools)
+	result := convertOpenAIToolsToVertex(openAITools)
 
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool (grouped functions), got %d", len(tools))
+	assert.True(t, result.HasFunctionDecls, "should have function declarations")
+	assert.False(t, result.HasBuiltinTools, "should not have builtin tools")
+
+	if len(result.Tools) != 1 {
+		t.Fatalf("expected 1 tool (grouped functions), got %d", len(result.Tools))
 	}
 
-	if len(tools[0].FunctionDeclarations) != 2 {
-		t.Fatalf("expected 2 function declarations, got %d", len(tools[0].FunctionDeclarations))
+	if len(result.Tools[0].FunctionDeclarations) != 2 {
+		t.Fatalf("expected 2 function declarations, got %d", len(result.Tools[0].FunctionDeclarations))
 	}
-	if tools[0].FunctionDeclarations[0].Name != "get_weather" {
-		t.Fatalf("expected first function = get_weather, got %q", tools[0].FunctionDeclarations[0].Name)
+	if result.Tools[0].FunctionDeclarations[0].Name != "get_weather" {
+		t.Fatalf("expected first function = get_weather, got %q", result.Tools[0].FunctionDeclarations[0].Name)
 	}
-	if tools[0].FunctionDeclarations[1].Name != "search_web" {
-		t.Fatalf("expected second function = search_web, got %q", tools[0].FunctionDeclarations[1].Name)
+	if result.Tools[0].FunctionDeclarations[1].Name != "search_web" {
+		t.Fatalf("expected second function = search_web, got %q", result.Tools[0].FunctionDeclarations[1].Name)
 	}
 }
 
-// TestConvertOpenAIToolsToVertex_SpecialToolsSeparate verifies that special tools
-// (web_search, code_execution, etc.) each get their own Tool object.
-func TestConvertOpenAIToolsToVertex_SpecialToolsSeparate(t *testing.T) {
+// TestConvertOpenAIToolsToVertex_BuiltinToolsOnly verifies that when only
+// built-in tools are present (no functions), only built-in tools are returned.
+func TestConvertOpenAIToolsToVertex_BuiltinToolsOnly(t *testing.T) {
+	openAITools := []interface{}{
+		map[string]interface{}{"type": "web_search"},
+	}
+
+	result := convertOpenAIToolsToVertex(openAITools)
+
+	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
+	assert.True(t, result.HasBuiltinTools, "should have builtin tools")
+	require.Len(t, result.Tools, 1)
+	assert.NotNil(t, result.Tools[0].GoogleSearch)
+}
+
+// TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions verifies that when
+// built-in tools and functions are mixed, functions are dropped (Gemini API limitation).
+func TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions(t *testing.T) {
 	openAITools := []interface{}{
 		map[string]interface{}{
 			"type": "function",
@@ -247,35 +265,27 @@ func TestConvertOpenAIToolsToVertex_SpecialToolsSeparate(t *testing.T) {
 		},
 	}
 
-	tools := convertOpenAIToolsToVertex(openAITools)
+	result := convertOpenAIToolsToVertex(openAITools)
 
-	// 1 grouped function tool + 1 web_search + 1 code_execution = 3
-	if len(tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(tools))
-	}
+	assert.True(t, result.HasFunctionDecls, "should detect function declarations")
+	assert.True(t, result.HasBuiltinTools, "should detect builtin tools")
 
-	// First tool should be the grouped functions
-	if tools[0].FunctionDeclarations == nil || len(tools[0].FunctionDeclarations) != 1 {
-		t.Fatalf("expected first tool to be function declarations, got %+v", tools[0])
-	}
+	// Built-in tools take priority; functions are dropped
+	require.Len(t, result.Tools, 2)
 
-	// One of the remaining should be GoogleSearch, one CodeExecution
 	hasSearch := false
 	hasCode := false
-	for _, tool := range tools[1:] {
+	for _, tool := range result.Tools {
 		if tool.GoogleSearch != nil {
 			hasSearch = true
 		}
 		if tool.CodeExecution != nil {
 			hasCode = true
 		}
+		assert.Nil(t, tool.FunctionDeclarations, "function declarations should be dropped when built-in tools present")
 	}
-	if !hasSearch {
-		t.Fatalf("expected GoogleSearch tool")
-	}
-	if !hasCode {
-		t.Fatalf("expected CodeExecution tool")
-	}
+	assert.True(t, hasSearch, "expected GoogleSearch tool")
+	assert.True(t, hasCode, "expected CodeExecution tool")
 }
 
 // TestMapToolChoice verifies mapping of OpenAI tool_choice to Vertex ToolConfig.

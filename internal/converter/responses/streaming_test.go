@@ -467,3 +467,50 @@ func TestStreamTransform_ContentFilterFinishReason(t *testing.T) {
 	assert.Contains(t, result, "\"status\":\"incomplete\"")
 	assert.Contains(t, result, "\"incomplete_details\":{\"reason\":\"content_filter\"}")
 }
+
+// TestStreamTransform_ContentAndFinishReasonSameChunk verifies that when content
+// and finish_reason arrive in the same chunk (common with Vertex GoogleSearch),
+// the content is still processed and emitted.
+// Regression: finish_reason was checked first with `continue`, skipping content.
+func TestStreamTransform_ContentAndFinishReasonSameChunk(t *testing.T) {
+	stopReason := "stop"
+
+	// Simulate Vertex GoogleSearch response: role-only chunk, then content+stop in one chunk
+	input := buildSSEChunk(buildChatChunkWithRole("assistant")) +
+		buildSSEChunk(buildChatChunk("Search result: Tokyo population is 14 million", &stopReason)) +
+		buildSSEChunk(buildUsageChunk(36, 67, 103)) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gemini-2.5-flash")
+	require.NoError(t, err)
+
+	result := output.String()
+	// Must contain the actual text content (not an empty response)
+	assert.Contains(t, result, "Search result: Tokyo population is 14 million",
+		"Content must be emitted even when finish_reason is in the same chunk")
+	assert.Contains(t, result, "response.output_text.delta")
+	assert.Contains(t, result, "response.output_text.done")
+	assert.Contains(t, result, "response.completed")
+	assert.Contains(t, result, "\"status\":\"completed\"")
+}
+
+// TestStreamTransform_ContentAndFinishReasonNoDone verifies the same scenario
+// but without [DONE] (Gemini API doesn't send [DONE], stream just closes).
+func TestStreamTransform_ContentAndFinishReasonNoDone(t *testing.T) {
+	stopReason := "stop"
+
+	// No [DONE] — stream ends when connection closes
+	input := buildSSEChunk(buildChatChunkWithRole("assistant")) +
+		buildSSEChunk(buildChatChunk("The answer is 42.", &stopReason)) +
+		buildSSEChunk(buildUsageChunk(10, 20, 30))
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gemini-2.5-flash")
+	require.NoError(t, err)
+
+	result := output.String()
+	assert.Contains(t, result, "The answer is 42.")
+	assert.Contains(t, result, "response.output_text.delta")
+	assert.Contains(t, result, "response.completed")
+}
