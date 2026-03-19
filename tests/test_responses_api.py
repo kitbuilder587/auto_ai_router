@@ -445,26 +445,29 @@ class TestResponsesAPIEdgeCases:
         assert has_tool_call, "expected at least one function_call output item"
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
-    def test_tool_choice_unsupported(self, openai_client, model):
-        """Test unsupported tool_choice types are rejected."""
-        with pytest.raises(Exception):
-            openai_client.responses.create(
-                model=model,
-                input="hi",
-                tool_choice={"type": "file_search"},
-                max_output_tokens=10,
-            )
+    def test_tool_choice_non_function_passthrough(self, openai_client, model):
+        """Non-function tool_choice types are passed through to the provider."""
+        # After the web_search fix, non-function tool_choice is no longer
+        # rejected by the proxy — provider decides whether to accept it.
+        response = openai_client.responses.create(
+            model=model,
+            input="hi",
+            tools=[{"type": "web_search_preview"}],
+            tool_choice="auto",
+            max_output_tokens=50,
+        )
+        validate_responses_api_response(response)
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
-    def test_tools_unsupported_type(self, openai_client, model):
-        """Test unsupported tool types are rejected."""
-        with pytest.raises(Exception):
-            openai_client.responses.create(
-                model=model,
-                input="hi",
-                tools=[{"type": "web_search", "name": "search"}],
-                max_output_tokens=10,
-            )
+    def test_web_search_tool_passthrough(self, openai_client, model):
+        """web_search tools are passed through (no longer rejected by proxy)."""
+        response = openai_client.responses.create(
+            model=model,
+            input="What year was Python created? Answer in one sentence.",
+            tools=[{"type": "web_search_preview"}],
+            max_output_tokens=100,
+        )
+        validate_responses_api_response(response)
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
     def test_special_characters(self, openai_client, model):

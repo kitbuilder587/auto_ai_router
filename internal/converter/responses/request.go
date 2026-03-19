@@ -527,8 +527,13 @@ func convertTools(raw map[string]interface{}) error {
 		}
 
 		toolType, _ := toolMap["type"].(string)
+
 		if toolType != "function" {
-			return fmt.Errorf("unsupported tool type for chat completions: %v", toolType)
+			// Non-function tools (web_search, web_search_preview, computer_use, etc.)
+			// are passed through as-is. Provider-specific converters downstream
+			// (Vertex, Anthropic, OpenAI) handle mapping them to the correct format.
+			converted = append(converted, toolMap)
+			continue
 		}
 
 		var funcDef map[string]interface{}
@@ -591,7 +596,10 @@ func convertToolChoice(raw map[string]interface{}) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("unsupported tool_choice type for chat completions: %v", tcType)
+
+	// Non-function tool_choice types (e.g. web_search, web_search_preview)
+	// are passed through as-is for provider-specific handling.
+	return nil
 }
 
 // convertReasoning extracts reasoning.effort and sets it as top-level reasoning_effort.

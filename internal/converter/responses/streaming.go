@@ -213,18 +213,10 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 
 		choice := chunk.Choices[0]
 
-		// Handle finish_reason
-		if choice.FinishReason != nil {
-			slog.Debug("[responses/streaming] finish_reason received",
-				"reason", *choice.FinishReason,
-				"accumulated_text_len", len(acc.fullText),
-				"tool_calls", len(acc.toolCalls))
-			acc.finishReason = choice.FinishReason
-			// The stream is ending; completion events will be emitted on [DONE]
-			continue
-		}
-
-		// Handle text content delta
+		// Handle text content delta BEFORE finish_reason.
+		// Some providers (Vertex with GoogleSearch, short responses) send both
+		// content and finish_reason in the same chunk. Processing finish_reason
+		// first with `continue` would skip the content entirely.
 		if choice.Delta.Content != "" {
 			slog.Debug("[responses/streaming] text delta",
 				"content_len", len(choice.Delta.Content),
@@ -331,6 +323,16 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 					return err
 				}
 			}
+		}
+
+		// Handle finish_reason AFTER content and tool_calls so that chunks
+		// carrying both content and finish_reason are fully processed.
+		if choice.FinishReason != nil {
+			slog.Debug("[responses/streaming] finish_reason received",
+				"reason", *choice.FinishReason,
+				"accumulated_text_len", len(acc.fullText),
+				"tool_calls", len(acc.toolCalls))
+			acc.finishReason = choice.FinishReason
 		}
 	}
 
