@@ -354,6 +354,12 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 		default:
 			// Flush any pending tool calls before a regular message
 			flushToolCalls()
+			// only convert items that have a "role" field (messages).
+			// Skip unrecognized input item types (e.g. item_reference) to avoid
+			// sending malformed messages to Chat Completions providers.
+			if _, hasRole := itemMap["role"]; !hasRole && itemType != "" && itemType != "message" {
+				continue
+			}
 			msg, err := convertMessage(itemMap)
 			if err != nil {
 				return nil, err
@@ -463,8 +469,9 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 			result = append(result, entry)
 
 		default:
-			// Pass through unknown types as-is
-			result = append(result, part)
+			// skip unknown content part types silently.
+			// Passing unknown types through would cause provider rejection.
+			continue
 		}
 	}
 	return result, nil
@@ -604,6 +611,8 @@ func convertToolChoice(raw map[string]interface{}) error {
 
 // convertReasoning extracts reasoning.effort and sets it as top-level reasoning_effort.
 // Skips "none" effort (equivalent to no reasoning) and empty values.
+// Note: reasoning.generate_summary is a Responses-API-only field with no Chat Completions
+// equivalent — it is intentionally not forwarded.
 func convertReasoning(raw map[string]interface{}) {
 	reasoning, ok := raw["reasoning"]
 	if !ok {
@@ -660,6 +669,8 @@ func convertTextFormat(raw map[string]interface{}) {
 }
 
 // deleteResponsesFields removes Responses-API-only fields from the request.
+// comprehensive list of Responses-only fields that must not
+// leak to Chat Completions providers.
 func deleteResponsesFields(raw map[string]interface{}) {
 	delete(raw, "input")
 	delete(raw, "instructions")
@@ -676,4 +687,6 @@ func deleteResponsesFields(raw map[string]interface{}) {
 	delete(raw, "truncation")
 	delete(raw, "safety_identifier")
 	delete(raw, "service_tier")
+	delete(raw, "background")
+	delete(raw, "prompt")
 }

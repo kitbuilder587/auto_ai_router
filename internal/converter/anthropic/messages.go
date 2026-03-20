@@ -96,6 +96,21 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 		anthropicReq.Temperature = &temp
 	}
 
+	// Anthropic has no native response_format; we inject a JSON instruction
+	// into the system prompt when the caller requests JSON output.
+	if req.ResponseFormat != nil {
+		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
+			if rfType, _ := rfMap["type"].(string); rfType == "json_object" || rfType == "json_schema" {
+				jsonInstruction := "\n\nYou must respond with valid JSON only. Do not include any text outside of the JSON object."
+				if systemContent, ok := anthropicReq.System.(string); ok {
+					anthropicReq.System = systemContent + jsonInstruction
+				} else if anthropicReq.System == nil {
+					anthropicReq.System = strings.TrimPrefix(jsonInstruction, "\n\n")
+				}
+			}
+		}
+	}
+
 	// user → metadata.user_id
 	if req.User != "" {
 		anthropicReq.Metadata = &AnthropicMetadata{UserID: req.User}
@@ -188,7 +203,50 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 		systemContent = strings.Join(systemTexts, "\n")
 	}
 
+	// Merge consecutive same-role messages into a single message.
+	messages = mergeConsecutiveSameRole(messages)
+
 	return systemContent, messages
+}
+
+// mergeConsecutiveSameRole merges consecutive messages with the same role
+// into a single message. Anthropic rejects requests with consecutive
+// same-role messages (e.g. two user messages in a row).
+func mergeConsecutiveSameRole(messages []AnthropicMessage) []AnthropicMessage {
+	if len(messages) <= 1 {
+		return messages
+	}
+	merged := make([]AnthropicMessage, 0, len(messages))
+	for _, msg := range messages {
+		blocks := toContentBlocks(msg.Content)
+		if len(merged) > 0 && merged[len(merged)-1].Role == msg.Role {
+			// Append blocks to previous message
+			prevBlocks := toContentBlocks(merged[len(merged)-1].Content)
+			prevBlocks = append(prevBlocks, blocks...)
+			merged[len(merged)-1].Content = prevBlocks
+		} else {
+			merged = append(merged, AnthropicMessage{
+				Role:    msg.Role,
+				Content: blocks,
+			})
+		}
+	}
+	return merged
+}
+
+// toContentBlocks normalises a message Content value (string or []ContentBlock)
+// into a []ContentBlock slice.
+func toContentBlocks(content interface{}) []ContentBlock {
+	switch c := content.(type) {
+	case []ContentBlock:
+		return c
+	case string:
+		if c == "" {
+			return nil
+		}
+		return []ContentBlock{{Type: "text", Text: c}}
+	}
+	return nil
 }
 
 // OpenAIToBedrock converts an OpenAI Chat Completions request body to AWS Bedrock Runtime

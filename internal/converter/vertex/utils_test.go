@@ -125,22 +125,6 @@ func TestParseURLToPart(t *testing.T) {
 		uri     string
 	}{
 		{
-			name:    "http URL with explicit format",
-			url:     "http://example.com/file",
-			fileObj: map[string]interface{}{"format": "image/png"},
-			wantNil: false,
-			mime:    "image/png",
-			uri:     "http://example.com/file",
-		},
-		{
-			name:    "https URL with extension-based mime",
-			url:     "https://example.com/photo.jpg",
-			fileObj: map[string]interface{}{},
-			wantNil: false,
-			mime:    "image/jpeg",
-			uri:     "https://example.com/photo.jpg",
-		},
-		{
 			name:    "gs:// URL",
 			url:     "gs://bucket/object.pdf",
 			fileObj: map[string]interface{}{},
@@ -161,20 +145,10 @@ func TestParseURLToPart(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name:    "URL without extension falls back to octet-stream",
-			url:     "https://example.com/noext",
-			fileObj: map[string]interface{}{},
-			wantNil: false,
-			mime:    "application/octet-stream",
-			uri:     "https://example.com/noext",
-		},
-		{
-			name:    "file:// URL supported",
+			name:    "file:// URL blocked (SSRF)",
 			url:     "file:///tmp/data.txt",
 			fileObj: map[string]interface{}{},
-			wantNil: false,
-			mime:    "text/plain",
-			uri:     "file:///tmp/data.txt",
+			wantNil: true,
 		},
 	}
 	for _, tt := range tests {
@@ -190,4 +164,43 @@ func TestParseURLToPart(t *testing.T) {
 			assert.Equal(t, tt.uri, result.FileData.FileURI)
 		})
 	}
+}
+
+func TestParseURLToPart_PublicIP(t *testing.T) {
+	// Use IP-based URLs to avoid DNS resolution issues in sandboxed environments
+	t.Run("https URL with public IP", func(t *testing.T) {
+		result := parseURLToPart("https://93.184.216.34/photo.jpg", map[string]interface{}{})
+		require.NotNil(t, result)
+		require.NotNil(t, result.FileData)
+		assert.Equal(t, "image/jpeg", result.FileData.MIMEType)
+		assert.Equal(t, "https://93.184.216.34/photo.jpg", result.FileData.FileURI)
+	})
+
+	t.Run("http URL with public IP and explicit format", func(t *testing.T) {
+		result := parseURLToPart("http://93.184.216.34/file", map[string]interface{}{"format": "image/png"})
+		require.NotNil(t, result)
+		require.NotNil(t, result.FileData)
+		assert.Equal(t, "image/png", result.FileData.MIMEType)
+	})
+
+	t.Run("URL with public IP without extension", func(t *testing.T) {
+		result := parseURLToPart("https://93.184.216.34/noext", map[string]interface{}{})
+		require.NotNil(t, result)
+		assert.Equal(t, "application/octet-stream", result.FileData.MIMEType)
+	})
+}
+
+func TestIsPrivateURL(t *testing.T) {
+	assert.True(t, isPrivateURL("http://127.0.0.1/"))
+	assert.True(t, isPrivateURL("http://10.0.0.1/"))
+	assert.True(t, isPrivateURL("http://192.168.1.1/"))
+	assert.True(t, isPrivateURL("http://172.16.0.1/"))
+	assert.True(t, isPrivateURL("http://169.254.169.254/"))
+	assert.True(t, isPrivateURL("http://localhost/"))
+	assert.True(t, isPrivateURL("http://metadata.google.internal/"))
+	assert.False(t, isPrivateURL("http://93.184.216.34/"))
+	assert.False(t, isPrivateURL("https://8.8.8.8/"))
+	// Note: url.Parse is very lenient — "not-a-valid-url" parses with empty host,
+	// which resolves to false (not private). This is acceptable since parseURLToPart
+	// rejects non-http/https/gs URLs before calling isPrivateURL.
 }

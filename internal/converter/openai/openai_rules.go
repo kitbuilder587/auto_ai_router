@@ -53,8 +53,8 @@ func UpdateJSONField(body []byte, mapping ModelParamsMapping) []byte {
 // ReplaceModelInBody replaces the "model" field value in a JSON body.
 // Uses byte-level replacement of `"model":"oldValue"` to avoid full re-serialization.
 func ReplaceModelInBody(body []byte, oldModel, newModel string) []byte {
-	oldToken, _ := json.Marshal(oldModel)
-	newToken, _ := json.Marshal(newModel)
+	oldToken, _ := json.Marshal(oldModel) //nolint:errcheck // json.Marshal on a plain string never fails //
+	newToken, _ := json.Marshal(newModel) //nolint:errcheck // json.Marshal on a plain string never fails //
 
 	// Replace "model":"oldModel" → "model":"newModel"
 	// Handles both with and without spaces after colon
@@ -95,18 +95,39 @@ var o1Mapping = ModelParamsMapping{
 }
 
 // o3Mapping: o3, o3-mini, o3-pro
-// Reasoning models that support reasoning_effort but reject temperature/top_p.
-var o3Mapping = ModelParamsMapping{
+// Reasoning models that support reasoning_effort but reject temperature/top_p/penalties/logprobs.
+var o3Mapping = ModelParamsMapping{ //  — added frequency_penalty, presence_penalty, logprobs, top_logprobs
 	KeysToReplace: map[string]string{
 		"max_tokens": "max_completion_tokens",
 	},
 	KeysToRemove: []string{
 		"temperature",
 		"top_p",
+		"frequency_penalty",
+		"presence_penalty",
+		"logprobs",
+		"top_logprobs",
+	},
+}
+
+// o4Mapping: o4-mini and future o4 models.
+// Reasoning models that reject sampling parameters
+var o4Mapping = ModelParamsMapping{
+	KeysToReplace: map[string]string{
+		"max_tokens": "max_completion_tokens",
+	},
+	KeysToRemove: []string{
+		"temperature",
+		"top_p",
+		"frequency_penalty",
+		"presence_penalty",
+		"logprobs",
+		"top_logprobs",
 	},
 }
 
 // gpt5Mapping: gpt-5, gpt-5-mini, gpt-5-nano, gpt-5.1, gpt-5.2, etc.
+// Reasoning models that reject sampling parameters. //
 var gpt5Mapping = ModelParamsMapping{
 	KeysToReplace: map[string]string{
 		"max_tokens": "max_completion_tokens",
@@ -114,6 +135,10 @@ var gpt5Mapping = ModelParamsMapping{
 	KeysToRemove: []string{
 		"temperature",
 		"top_p",
+		"frequency_penalty",
+		"presence_penalty",
+		"logprobs",
+		"top_logprobs",
 	},
 }
 
@@ -125,6 +150,7 @@ var modelMappings = []struct {
 }{
 	{"o1", o1Mapping},
 	{"o3", o3Mapping},
+	{"o4", o4Mapping},
 	{"gpt-5", gpt5Mapping},
 }
 

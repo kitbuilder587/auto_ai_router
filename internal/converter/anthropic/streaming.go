@@ -45,6 +45,7 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 
 	// Usage accumulated across message_start / message_delta events.
 	var promptTokens, completionTokens int
+	var cacheReadTokens, cacheCreationTokens int // track cache tokens in streaming
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -70,6 +71,8 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 					chatID = event.Message.ID
 				}
 				promptTokens = event.Message.Usage.InputTokens
+				cacheReadTokens = event.Message.Usage.CacheReadInputTokens
+				cacheCreationTokens = event.Message.Usage.CacheCreationInputTokens
 			}
 			// Emit the first (role-only) chunk so the client knows the stream has started.
 			if isFirstChunk {
@@ -136,6 +139,10 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 					}
 				}
 
+			case "signature_delta":
+				// Anthropic sends this for multi-turn thinking verification.
+				// No OpenAI equivalent; silently consumed to avoid unknown-delta errors.
+
 			case "input_json_delta":
 				// Stream partial tool arguments to the client.
 				if event.Delta.PartialJSON != "" {
@@ -178,6 +185,12 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 					CompletionTokens: completionTokens,
 					TotalTokens:      promptTokens + completionTokens,
 				}
+				// L1 — include cache token details in streaming usage
+				if cacheReadTokens > 0 || cacheCreationTokens > 0 {
+					usage.PromptTokensDetails = &openai.TokenDetails{
+						CachedTokens: cacheReadTokens,
+					}
+				}
 				chunk := buildStreamChunk(chatID, model, timestamp, openai.OpenAIStreamingDelta{}, &reason, usage)
 				if err := writeChunk(output, chunk); err != nil {
 					return err
@@ -186,6 +199,20 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 
 		case "message_stop":
 			// End of stream; [DONE] is written after the loop.
+
+		case "error": // handle Anthropic error events in stream
+			// Anthropic streams an error event on overload, rate-limit, etc.
+			// Error JSON: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+			errMsg := "anthropic stream error"
+			if event.Error != nil && event.Error.Message != "" {
+				errMsg = event.Error.Message
+			}
+			reason := "stop"
+			delta := openai.OpenAIStreamingDelta{Content: errMsg}
+			chunk := buildStreamChunk(chatID, model, timestamp, delta, &reason, nil)
+			if err := writeChunk(output, chunk); err != nil {
+				return err
+			}
 
 		default:
 			// Unknown event type — skip.

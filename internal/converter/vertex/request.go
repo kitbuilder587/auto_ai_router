@@ -40,10 +40,15 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case "system", "developer":
+			// concatenate multiple system messages instead of overwriting
 			content := extractTextContent(msg.Content)
-			vertexReq.SystemInstruction = &genai.Content{
-				Role:  "user",
-				Parts: []*genai.Part{{Text: content}},
+			if vertexReq.SystemInstruction != nil && len(vertexReq.SystemInstruction.Parts) > 0 {
+				vertexReq.SystemInstruction.Parts[0].Text += "\n" + content
+			} else {
+				vertexReq.SystemInstruction = &genai.Content{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: content}},
+				}
 			}
 		case "tool":
 			// OpenAI tool result: {role: "tool", tool_call_id: "call_xyz", name: "func_name", content: "..."}
@@ -93,6 +98,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			}
 			if len(msg.ToolCalls) > 0 && role == "model" {
 				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
+			}
+			if parts == nil {
+				parts = []*genai.Part{} // avoid nil parts
 			}
 			vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
 				Role:  role,

@@ -26,6 +26,7 @@ type streamAccumulator struct {
 
 	// Accumulated content
 	fullText      string
+	fullRefusal   string // accumulated refusal text
 	toolCalls     []accumulatedToolCall
 	currentToolID int // index into toolCalls for the active tool call
 
@@ -47,6 +48,9 @@ type streamAccumulator struct {
 	// Whether completion events have been emitted (via [DONE])
 	completed bool
 
+	// Original Chat Completions ID for correlation
+	originalChatCompletionID string
+
 	// Request-echoed metadata (populated from ResponsesMetadata when available)
 	storeFlag          bool
 	previousResponseID string
@@ -62,11 +66,13 @@ type accumulatedToolCall struct {
 
 // chatCompletionsUsage represents usage from a Chat Completions streaming chunk.
 type chatCompletionsUsage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	CachedTokens     int
-	ReasoningTokens  int
+	PromptTokens      int
+	CompletionTokens  int
+	TotalTokens       int
+	CachedTokens      int
+	ReasoningTokens   int
+	AudioInputTokens  int
+	AudioOutputTokens int
 }
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
@@ -80,6 +86,7 @@ type chatStreamChunk struct {
 		Delta struct {
 			Role      string `json:"role,omitempty"`
 			Content   string `json:"content,omitempty"`
+			Refusal   string `json:"refusal,omitempty"`
 			ToolCalls []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id,omitempty"`
@@ -98,9 +105,11 @@ type chatStreamChunk struct {
 		TotalTokens         int `json:"total_tokens"`
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens,omitempty"`
+			AudioTokens  int `json:"audio_tokens,omitempty"`
 		} `json:"prompt_tokens_details,omitempty"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			AudioTokens     int `json:"audio_tokens,omitempty"`
 		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
@@ -190,6 +199,9 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			if chunk.Model != "" {
 				acc.model = chunk.Model
 			}
+			if chunk.ID != "" {
+				acc.originalChatCompletionID = chunk.ID
+			}
 		}
 
 		// Capture usage if present
@@ -201,9 +213,11 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			}
 			if chunk.Usage.PromptTokensDetails != nil {
 				acc.usage.CachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+				acc.usage.AudioInputTokens = chunk.Usage.PromptTokensDetails.AudioTokens
 			}
 			if chunk.Usage.CompletionTokensDetails != nil {
 				acc.usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+				acc.usage.AudioOutputTokens = chunk.Usage.CompletionTokensDetails.AudioTokens
 			}
 		}
 
@@ -244,6 +258,30 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 				"delta":         choice.Delta.Content,
 			}
 			if err := writeSSE(writer, "response.output_text.delta", deltaEvent); err != nil {
+				return err
+			}
+		}
+
+		// handle refusal deltas
+		if choice.Delta.Refusal != "" {
+			if !acc.headerEmitted {
+				if err := emitHeaderEvents(writer, acc); err != nil {
+					return err
+				}
+			}
+			if !acc.messageStarted {
+				if err := emitMessageStartEvents(writer, acc); err != nil {
+					return err
+				}
+			}
+			acc.fullRefusal += choice.Delta.Refusal
+			refusalEvent := map[string]interface{}{
+				"type":          "response.refusal.delta",
+				"output_index":  0,
+				"content_index": 0,
+				"delta":         choice.Delta.Refusal,
+			}
+			if err := writeSSE(writer, "response.refusal.delta", refusalEvent); err != nil {
 				return err
 			}
 		}
@@ -409,8 +447,8 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 			InputTokens:         acc.usage.PromptTokens,
 			OutputTokens:        acc.usage.CompletionTokens,
 			TotalTokens:         acc.usage.TotalTokens,
-			InputTokensDetails:  &InputDetails{CachedTokens: acc.usage.CachedTokens},
-			OutputTokensDetails: &OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens},
+			InputTokensDetails:  &InputDetails{CachedTokens: acc.usage.CachedTokens, AudioTokens: acc.usage.AudioInputTokens},
+			OutputTokensDetails: &OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens},
 		}
 	}
 
@@ -520,8 +558,9 @@ func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 
 // emitCompletionEvents emits all closing events and the final response.completed.
 func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
-	// Close text content if we were streaming text
-	if acc.messageStarted {
+	// only emit text closing events if there's actual text content.
+	// This matches the condition in buildCompletedResponse (messageStarted && fullText != "").
+	if acc.messageStarted && acc.fullText != "" {
 		// output_text.done
 		textDoneEvent := map[string]interface{}{
 			"type":          "response.output_text.done",
@@ -606,13 +645,25 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		}
 	}
 
-	// response.completed with full response object
+	// emit correct event type based on finish reason
 	completedResp := buildCompletedResponse(acc)
+	var eventType string
+	status, _ := completedResp["status"].(string)
+
+	switch status {
+	case "incomplete":
+		eventType = "response.incomplete"
+	case "failed":
+		eventType = "response.failed"
+	default:
+		eventType = "response.completed"
+	}
+
 	completedEvent := map[string]interface{}{
-		"type":     "response.completed",
+		"type":     eventType,
 		"response": completedResp,
 	}
-	return writeSSE(w, "response.completed", completedEvent)
+	return writeSSE(w, eventType, completedEvent)
 }
 
 // buildInProgressResponse builds the response object for in-progress events.

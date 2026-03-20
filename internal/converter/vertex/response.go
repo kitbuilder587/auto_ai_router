@@ -233,9 +233,9 @@ func mapFinishReason(vertexReason string) string {
 		return "stop"
 	case "MAX_TOKENS":
 		return "length"
-	case "SAFETY":
+	case "SAFETY", "RECITATION":
 		return "content_filter"
-	case "RECITATION":
+	case "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
 		return "content_filter"
 	case "TOOL_CALL":
 		return "tool_calls"

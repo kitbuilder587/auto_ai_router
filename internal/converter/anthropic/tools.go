@@ -75,7 +75,7 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 			}
 		case "computer_use":
 			tool := AnthropicTool{
-				Type: "computer_20241022",
+				Type: "computer_20250124", // — updated to latest version
 				Name: "computer",
 			}
 			if w, ok := toolMap["display_width_px"].(float64); ok {
@@ -87,12 +87,12 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 			tools = append(tools, tool)
 		case "text_editor":
 			tools = append(tools, AnthropicTool{
-				Type: "text_editor_20241022",
+				Type: "text_editor_20250124", // — updated to latest version
 				Name: "str_replace_editor",
 			})
 		case "bash":
 			tools = append(tools, AnthropicTool{
-				Type: "bash_20241022",
+				Type: "bash_20250124", // — updated to latest version
 				Name: "bash",
 			})
 		case "web_search", "web_search_preview":

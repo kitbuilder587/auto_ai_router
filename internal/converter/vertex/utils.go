@@ -2,10 +2,14 @@ package vertex
 
 import (
 	"encoding/base64"
+	"net"
+	"net/url"
 	"strings"
 
 	"google.golang.org/genai"
 )
+
+const maxBase64Size = 20 * 1024 * 1024 // 20MB encoded ≈ 15MB decoded
 
 // parseDataURLToPart converts a data URL string to a genai.Part with inline data
 // Handles formats like: data:image/jpeg;base64,/9j/4AAQ...
@@ -15,7 +19,7 @@ func parseDataURLToPart(dataURL string) *genai.Part {
 	}
 
 	// Split: data:image/jpeg;base64,<data>
-	parts := strings.Split(dataURL, ",")
+	parts := strings.SplitN(dataURL, ",", 2) // SplitN to handle base64 with commas
 	if len(parts) != 2 {
 		return nil
 	}
@@ -26,6 +30,11 @@ func parseDataURLToPart(dataURL string) *genai.Part {
 	// Extract mime type from header
 	mimeType := extractMimeType(header)
 	if mimeType == "" {
+		return nil
+	}
+
+	// check base64 payload size before decoding
+	if len(b64Data) > maxBase64Size {
 		return nil
 	}
 
@@ -81,15 +90,76 @@ var mimeTypeMap = map[string]string{
 	"txt":  "text/plain",
 }
 
+// isPrivateURL checks if a URL points to a private/internal network address.
+func isPrivateURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return true // block unparseable URLs
+	}
+
+	hostname := parsed.Hostname()
+
+	// Block well-known metadata endpoints
+	blockedHosts := []string{"metadata.google.internal", "metadata.aws.internal"}
+	for _, blocked := range blockedHosts {
+		if strings.EqualFold(hostname, blocked) {
+			return true
+		}
+	}
+
+	// Block localhost
+	if strings.EqualFold(hostname, "localhost") {
+		return true
+	}
+
+	// Resolve hostname and check IP ranges
+	ip := net.ParseIP(hostname)
+	if ip == nil {
+		// Could be a hostname — resolve it
+		ips, err := net.LookupIP(hostname)
+		if err != nil || len(ips) == 0 {
+			return false // can't resolve, let Vertex handle it
+		}
+		ip = ips[0]
+	}
+
+	// Private IP ranges
+	privateRanges := []string{
+		"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
+		"192.168.0.0/16", "169.254.0.0/16", "::1/128", "fc00::/7",
+	}
+	for _, cidr := range privateRanges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // parseURLToPart converts a regular URL or file reference to a genai.Part.
-// Supports http/https/gs/file URLs and determines MIME type from format or file extension.
-func parseURLToPart(url string, fileObj map[string]interface{}) *genai.Part {
-	if url == "" {
+// Supports https and gs:// URLs. Blocks file:// and private network URLs (SSRF protection).
+func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
+	if rawURL == "" {
 		return nil
 	}
 
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") &&
-		!strings.HasPrefix(url, "gs://") && !strings.HasPrefix(url, "file://") {
+	// block file:// URLs completely (SSRF vector)
+	if strings.HasPrefix(rawURL, "file://") {
+		return nil
+	}
+
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") &&
+		!strings.HasPrefix(rawURL, "gs://") {
+		return nil
+	}
+
+	//  block private/internal network URLs
+	if (strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) && isPrivateURL(rawURL) {
 		return nil
 	}
 
@@ -98,7 +168,7 @@ func parseURLToPart(url string, fileObj map[string]interface{}) *genai.Part {
 	if format, ok := fileObj["format"].(string); ok && format != "" {
 		mimeType = format
 	} else {
-		mimeType = getMimeTypeFromURL(url)
+		mimeType = getMimeTypeFromURL(rawURL)
 	}
 
 	if mimeType == "" {
@@ -108,7 +178,7 @@ func parseURLToPart(url string, fileObj map[string]interface{}) *genai.Part {
 	return &genai.Part{
 		FileData: &genai.FileData{
 			MIMEType: mimeType,
-			FileURI:  url,
+			FileURI:  rawURL,
 		},
 	}
 }
@@ -145,7 +215,7 @@ func getAudioMimeType(format string) string {
 		"aac":  "audio/aac",
 		"flac": "audio/flac",
 		"m4a":  "audio/mp4",
-		"weba": "audio/webp",
+		"weba": "audio/webm",
 	}
 
 	if mimeType, ok := mimeTypes[formatLower]; ok {

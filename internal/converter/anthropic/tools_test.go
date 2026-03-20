@@ -101,15 +101,15 @@ func TestConvertOpenAIToolsToAnthropic(t *testing.T) {
 		result := convertOpenAIToolsToAnthropic(tools)
 		require.Len(t, result, 4)
 
-		assert.Equal(t, "computer_20241022", result[0].Type)
+		assert.Equal(t, "computer_20250124", result[0].Type)
 		assert.Equal(t, "computer", result[0].Name)
 		assert.Equal(t, 1920, result[0].DisplayWidthPx)
 		assert.Equal(t, 1080, result[0].DisplayHeightPx)
 
-		assert.Equal(t, "text_editor_20241022", result[1].Type)
+		assert.Equal(t, "text_editor_20250124", result[1].Type)
 		assert.Equal(t, "str_replace_editor", result[1].Name)
 
-		assert.Equal(t, "bash_20241022", result[2].Type)
+		assert.Equal(t, "bash_20250124", result[2].Type)
 		assert.Equal(t, "bash", result[2].Name)
 
 		assert.Equal(t, "web_search_20250305", result[3].Type)

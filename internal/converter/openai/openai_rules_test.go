@@ -274,10 +274,13 @@ func TestReplaceBodyParam_O3(t *testing.T) {
 				t.Error("top_p should be removed for o3")
 			}
 
-			// Should be preserved (o3 supports these unlike o1)
-			if _, ok := result["frequency_penalty"]; !ok {
-				t.Error("frequency_penalty should be preserved for o3")
+			// o3 also rejects frequency_penalty, presence_penalty, logprobs
+			for _, key := range []string{"frequency_penalty"} {
+				if _, ok := result[key]; ok {
+					t.Errorf("%s should be removed for o3", key)
+				}
 			}
+			// Should be preserved
 			if _, ok := result["reasoning_effort"]; !ok {
 				t.Error("reasoning_effort should be preserved for o3")
 			}
@@ -447,9 +450,9 @@ func TestReplaceBodyParam_WithProviderPrefixes(t *testing.T) {
 		shouldRename bool
 	}{
 		{"openai/o1-mini", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},
-		{"openai:o3-mini", []string{"temperature", "top_p"}, true},
-		{"openai/gpt-5_chat", []string{"temperature", "top_p"}, true},
-		{"vertex/gpt-5.1", []string{"temperature", "top_p"}, true},
+		{"openai:o3-mini", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
+		{"openai/gpt-5_chat", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true}, //
+		{"vertex/gpt-5.1", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
 		{"OpenAI/O1-Preview", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},
 	}
 

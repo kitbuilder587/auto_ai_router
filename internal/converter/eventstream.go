@@ -43,6 +43,11 @@ func DecodeEventStreamToSSE(reader io.Reader, writer io.Writer) error {
 			continue
 		}
 
+		const maxFrameSize = 16 << 20 // 16 MB
+		if remaining > maxFrameSize {
+			return fmt.Errorf("event stream: frame too large: %d bytes (max %d)", remaining, maxFrameSize)
+		}
+
 		frame := make([]byte, remaining)
 		if _, err := io.ReadFull(reader, frame); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {

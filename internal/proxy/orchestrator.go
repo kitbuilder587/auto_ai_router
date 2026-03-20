@@ -331,7 +331,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		realModelID = realName
 	}
 
-	body = openai.ReplaceBodyParam(modelID, body)
+	body = openai.ReplaceBodyParam(realModelID, body)
 
 	return body, modelID, realModelID, streaming, true
 }
