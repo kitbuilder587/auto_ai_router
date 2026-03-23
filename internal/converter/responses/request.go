@@ -287,13 +287,6 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 	return result
 }
 
-// IsCodexModel returns true when the model name indicates a codex model.
-// Codex models natively support the Responses API endpoint and should be
-// forwarded without converting to Chat Completions format.
-func IsCodexModel(modelID string) bool {
-	return strings.Contains(strings.ToLower(modelID), "codex")
-}
-
 // IsResponsesAPI checks if the body is a Responses API request.
 // Returns true if body has "input" field and does NOT have "messages" field.
 func IsResponsesAPI(body []byte) bool {
