@@ -252,6 +252,17 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 		}
 	}
 
+	// 4.5. Drop reasoning.effort="none" for native passthrough.
+	// OpenAI Responses API rejects reasoning.effort on non-reasoning models such as
+	// gpt-4o-mini, while "none" is semantically equivalent to omitting reasoning.
+	if reasoningVal, ok := raw["reasoning"]; ok {
+		if reasoningMap, ok := reasoningVal.(map[string]interface{}); ok {
+			if effort, ok := reasoningMap["effort"].(string); ok && effort == "none" {
+				delete(raw, "reasoning")
+			}
+		}
+	}
+
 	// 5. Normalize tools: nested Chat Completions function format → flat Responses API format.
 	// Input:  {type:"function", function:{name:"...", description:"...", parameters:{...}}}
 	// Output: {type:"function", name:"...", description:"...", parameters:{...}}

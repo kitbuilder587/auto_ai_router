@@ -713,6 +713,21 @@ func TestRequestToChat_ReasoningNone(t *testing.T) {
 	assert.NotContains(t, parsed, "reasoning")
 }
 
+func TestPrepareCodexPassthrough_DropsReasoningNone(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4o-mini",
+		"input": "Say pong",
+		"reasoning": {"effort": "none"}
+	}`)
+
+	result := PrepareCodexPassthrough(body, false)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.NotContains(t, parsed, "reasoning", "reasoning.effort='none' should be dropped for native passthrough")
+}
+
 func TestRequestToChat_TextFormat(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",

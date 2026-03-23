@@ -32,12 +32,27 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	vertexReq := VertexRequest{
 		Contents: make([]*genai.Content, 0),
 	}
+	var pendingToolParts []*genai.Part
+
+	flushPendingToolParts := func() {
+		if len(pendingToolParts) == 0 {
+			return
+		}
+		vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
+			Role:  "user",
+			Parts: pendingToolParts,
+		})
+		pendingToolParts = nil
+	}
 
 	// Generation config
 	vertexReq.GenerationConfig = buildGenerationConfig(&req, model)
 
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
+		if msg.Role != "tool" {
+			flushPendingToolParts()
+		}
 		switch msg.Role {
 		case "system", "developer":
 			// concatenate multiple system messages instead of overwriting
@@ -52,7 +67,8 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			}
 		case "tool":
 			// OpenAI tool result: {role: "tool", tool_call_id: "call_xyz", name: "func_name", content: "..."}
-			// Vertex expects: Part.FunctionResponse{Name: funcName, Response: {output: content}}
+			// Vertex expects all responses for a single model tool-call turn to be grouped
+			// in one user content with multiple functionResponse parts.
 			funcName := msg.Name
 			if funcName == "" && msg.ToolCallID != "" {
 				// Look up function name from preceding assistant message's tool_calls
@@ -73,14 +89,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			} else {
 				responseData = map[string]interface{}{"output": ""}
 			}
-			vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{{
-					FunctionResponse: &genai.FunctionResponse{
-						Name:     funcName,
-						Response: responseData,
-					},
-				}},
+			pendingToolParts = append(pendingToolParts, &genai.Part{
+				FunctionResponse: &genai.FunctionResponse{
+					Name:     funcName,
+					Response: responseData,
+				},
 			})
 		default:
 			role := msg.Role
@@ -108,6 +121,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			})
 		}
 	}
+	flushPendingToolParts()
 
 	// Tools
 	var hasUserFunctions bool

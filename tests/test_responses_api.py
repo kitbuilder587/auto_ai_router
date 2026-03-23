@@ -21,7 +21,7 @@ from test_helpers import TestModels, ContentValidator, ToolDefinitions, ImageTes
 # Responses API now works with all providers via internal conversion
 RESPONSES_MODELS = (
     TestModels.OPENAI_MODELS
-    # + TestModels.VERTEX_MODELS
+    + TestModels.VERTEX_MODELS
     # + TestModels.ANTHROPIC_MODELS
 )
 
@@ -258,17 +258,17 @@ class TestResponsesAPIStreaming:
     def test_streaming_usage_in_completed_event(self, openai_client, model):
         """Test that usage is present in the response.completed event (core BUG-2 streaming fix).
 
-        max_output_tokens is set generously so the model finishes naturally
-        (finish_reason=stop → response.completed).  A value that is too small
-        causes finish_reason=length → response.incomplete, which would never
-        trigger ResponseCompletedEvent and fail the assertion below.
+        Keep the prompt tightly bounded so every provider finishes naturally
+        with response.completed. This test is about usage extraction from the
+        completed event, not about model verbosity or reasoning behavior.
         """
         completed_response = None
 
         with openai_client.responses.stream(
             model=model,
-            input="What is AI?",
-            max_output_tokens=300,
+            input="Reply with exactly one word: pong",
+            max_output_tokens=40,
+            temperature=0,
         ) as stream:
             for event in stream:
                 if isinstance(event, ResponseCompletedEvent):
