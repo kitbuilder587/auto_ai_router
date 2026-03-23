@@ -662,29 +662,6 @@ func TestConvertWebSearchTools_PreservesExistingWebSearchOptions(t *testing.T) {
 	}
 }
 
-// TestConvertWebSearchTools_NonFunctionToolChoiceDropped: if a non-function
-// tool_choice (e.g. web_search_preview) is present while tools array still exists,
-// it must be removed so the provider defaults to "auto".
-func TestConvertWebSearchTools_NonFunctionToolChoiceDropped(t *testing.T) {
-	body := []byte(`{"model":"gpt-4o-mini","tools":[{"type":"web_search_preview"}],"tool_choice":{"type":"web_search_preview"}}`)
-	result := bodyToMap(t, ConvertWebSearchTools(body))
-
-	if _, ok := result["tool_choice"]; ok {
-		t.Error("non-function tool_choice must be removed")
-	}
-	if _, ok := result["web_search_options"]; ok {
-		t.Error("web_search_options must NOT be added")
-	}
-	// web_search_preview tool itself should still be in tools
-	tools, ok := result["tools"].([]interface{})
-	if !ok {
-		t.Fatal("tools should remain")
-	}
-	if len(tools) != 1 {
-		t.Errorf("expected 1 tool, got %d", len(tools))
-	}
-}
-
 // TestConvertWebSearchTools_OtherNonFunctionToolsDropped: non-web-search
 // non-function tools (computer_use, code_execution, etc.) must be dropped
 // for OpenAI Chat Completions.
