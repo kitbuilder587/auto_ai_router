@@ -539,3 +539,175 @@ func TestReplaceModelInBody(t *testing.T) {
 		})
 	}
 }
+
+// --- ConvertWebSearchTools tests ---
+
+// TestConvertWebSearchTools_SearchModel verifies that web_search_preview is
+// converted to web_search_options for search-preview models that support it.
+func TestConvertWebSearchTools_SearchModel(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-search-preview","tools":[{"type":"web_search_preview"}],"tool_choice":"auto"}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["tools"]; ok {
+		t.Error("tools should be removed when only web_search tools exist")
+	}
+	if _, ok := result["tool_choice"]; ok {
+		t.Error("tool_choice should be removed when no function tools remain")
+	}
+	if _, ok := result["web_search_options"]; !ok {
+		t.Error("web_search_options should be added for search-preview model")
+	}
+}
+
+// TestConvertWebSearchTools_NonSearchModelDropsTool verifies that web_search_preview
+// is silently dropped (without adding web_search_options) for models that don't
+// support the web_search_options parameter (e.g. gpt-4o-mini, gpt-4o).
+func TestConvertWebSearchTools_NonSearchModelDropsTool(t *testing.T) {
+	for _, model := range []string{"gpt-4o-mini", "gpt-4o"} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","tools":[{"type":"web_search_preview"}],"tool_choice":"auto"}`)
+			result := bodyToMap(t, ConvertWebSearchTools(body))
+
+			if _, ok := result["web_search_options"]; ok {
+				t.Error("web_search_options must NOT be added for non-search model")
+			}
+			if _, ok := result["tools"]; ok {
+				t.Error("tools should be removed (tool was dropped)")
+			}
+			if _, ok := result["tool_choice"]; ok {
+				t.Error("tool_choice should be removed when no function tools remain")
+			}
+		})
+	}
+}
+
+// TestConvertWebSearchTools_WebSearchWithFunctions verifies mixed tool arrays:
+// web_search tool is converted to web_search_options, function tools are kept.
+func TestConvertWebSearchTools_WebSearchWithFunctions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-search-preview","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["web_search_options"]; !ok {
+		t.Error("web_search_options should be added for search-preview model")
+	}
+	if _, ok := result["tool_choice"]; !ok {
+		t.Error("tool_choice should remain when function tools exist")
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should be an array")
+	}
+	if len(tools) != 1 {
+		t.Errorf("expected 1 function tool, got %d", len(tools))
+	}
+	toolMap := tools[0].(map[string]interface{})
+	if toolMap["type"] != "function" {
+		t.Errorf("expected function tool, got %v", toolMap["type"])
+	}
+}
+
+// TestConvertWebSearchTools_NonSearchModelWithFunctions: for a non-search model,
+// web_search tool is dropped but function tools and tool_choice are kept.
+func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added for gpt-4o-mini")
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("function tools should remain")
+	}
+	if len(tools) != 1 {
+		t.Errorf("expected 1 function tool, got %d", len(tools))
+	}
+	if _, ok := result["tool_choice"]; !ok {
+		t.Error("tool_choice should remain when function tools exist")
+	}
+}
+
+// TestConvertWebSearchTools_NoWebSearch verifies that bodies with only function
+// tools are returned unchanged.
+func TestConvertWebSearchTools_NoWebSearch(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"get_weather"}}]}`)
+	result := ConvertWebSearchTools(body)
+
+	if string(result) != string(body) {
+		t.Error("body should be unchanged when no web_search tools")
+	}
+}
+
+func TestConvertWebSearchTools_NoTools(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := ConvertWebSearchTools(body)
+
+	if string(result) != string(body) {
+		t.Error("body should be unchanged when no tools field")
+	}
+}
+
+// TestConvertWebSearchTools_BothWebSearchTypes: both web_search and
+// web_search_preview map to a single web_search_options (search-preview model).
+func TestConvertWebSearchTools_BothWebSearchTypes(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini-search-preview","tools":[{"type":"web_search"},{"type":"web_search_preview"}]}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["web_search_options"]; !ok {
+		t.Error("web_search_options should be added")
+	}
+	if _, ok := result["tools"]; ok {
+		t.Error("tools should be removed when only web_search tools exist")
+	}
+}
+
+func TestConvertWebSearchTools_PreservesExistingWebSearchOptions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-search-preview","tools":[{"type":"web_search_preview"}],"web_search_options":{"search_context_size":"high"}}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	opts, ok := result["web_search_options"].(map[string]interface{})
+	if !ok {
+		t.Fatal("web_search_options should be present")
+	}
+	if opts["search_context_size"] != "high" {
+		t.Error("existing web_search_options should be preserved")
+	}
+}
+
+// TestConvertWebSearchTools_NonFunctionToolChoiceDropped: if a non-function
+// tool_choice (e.g. web_search_preview) is present after tools are filtered,
+// it must be removed so the provider defaults to "auto".
+func TestConvertWebSearchTools_NonFunctionToolChoiceDropped(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini","tools":[{"type":"web_search_preview"}],"tool_choice":{"type":"web_search_preview"}}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["tool_choice"]; ok {
+		t.Error("non-function tool_choice must be removed")
+	}
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added for gpt-4o-mini")
+	}
+}
+
+// TestConvertWebSearchTools_OtherNonFunctionToolsDropped: non-web-search
+// non-function tools (computer_use, code_execution, etc.) must be dropped
+// for OpenAI Chat Completions.
+func TestConvertWebSearchTools_OtherNonFunctionToolsDropped(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","tools":[{"type":"computer_use"},{"type":"code_execution"},{"type":"function","function":{"name":"my_func"}}]}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should remain (function tool must be kept)")
+	}
+	if len(tools) != 1 {
+		t.Errorf("expected 1 function tool, got %d (non-function tools must be dropped)", len(tools))
+	}
+	toolMap := tools[0].(map[string]interface{})
+	if toolMap["type"] != "function" {
+		t.Errorf("expected function tool, got %v", toolMap["type"])
+	}
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added (no web_search tools)")
+	}
+}

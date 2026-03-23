@@ -8,6 +8,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	openaiconv "github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 )
 
@@ -76,8 +77,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
 	default:
-		// ProviderTypeOpenAI, ProviderTypeProxy, and others: pass through unchanged
-		return body, nil
+		// ProviderTypeOpenAI, ProviderTypeProxy, and others: convert non-function tools
+		// (web_search, web_search_preview) to web_search_options, then pass through.
+		return openaiconv.ConvertWebSearchTools(body), nil
 	}
 }
 

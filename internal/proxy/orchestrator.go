@@ -141,7 +141,11 @@ func (p *Proxy) orchestrateRequest(
 				WriteErrorBadRequest(w, "Failed to convert Responses API request")
 				return nil, false
 			}
-			body = chatBody
+			// Re-apply model-specific parameter transformations now that the body is
+			// in Chat Completions format.  RequestToChat maps max_output_tokens →
+			// max_tokens; for reasoning models (o1/o3/o4/gpt-5) ReplaceBodyParam
+			// renames max_tokens → max_completion_tokens and strips unsupported params.
+			body = openai.ReplaceBodyParam(realModelID, chatBody)
 			convertedResp = true
 			// For streaming: inject stream_options.include_usage since extractMetadataFromBody
 			// skipped it for Responses API (the original body had "input" not "messages").

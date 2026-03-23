@@ -169,6 +169,7 @@ func ChatToResponse(body []byte) ([]byte, error) {
 		Error:              nil,
 		IncompleteDetails:  incompleteDetails,
 		Metadata:           map[string]string{},
+		ToolChoice:         "auto",
 		Tools:              []Tool{},
 		ParallelToolCalls:  true,
 		Instructions:       nil,

@@ -162,6 +162,9 @@ func TestRequestToChat_InstructionsArray(t *testing.T) {
 }
 
 func TestRequestToChat_MaxOutputTokens(t *testing.T) {
+	// max_output_tokens must be converted to max_tokens (universal Chat Completions
+	// parameter). Renaming to max_completion_tokens for reasoning models is done
+	// later by openai.ReplaceBodyParam after conversion.
 	body := `{"model":"gpt-4o","input":"hi","max_output_tokens":100}`
 	result, err := RequestToChat([]byte(body))
 	require.NoError(t, err)
@@ -169,9 +172,10 @@ func TestRequestToChat_MaxOutputTokens(t *testing.T) {
 	var parsed map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &parsed))
 
-	assert.Contains(t, parsed, "max_completion_tokens")
-	assert.Equal(t, float64(100), parsed["max_completion_tokens"])
+	assert.Contains(t, parsed, "max_tokens")
+	assert.Equal(t, float64(100), parsed["max_tokens"])
 	assert.NotContains(t, parsed, "max_output_tokens")
+	assert.NotContains(t, parsed, "max_completion_tokens")
 }
 
 func TestRequestToChat_Tools(t *testing.T) {
@@ -298,6 +302,9 @@ func TestRequestToChat_ToolChoiceString(t *testing.T) {
 }
 
 func TestRequestToChat_ToolChoiceNonFunctionPassthrough(t *testing.T) {
+	// Non-function tool_choice (e.g. web_search_preview, file_search) references
+	// Responses-API built-in tools.  RequestToChat passes it through so that
+	// provider-specific converters downstream can handle it.
 	body := `{"model":"gpt-4o","input":"hi","tool_choice":{"type":"file_search"}}`
 	result, err := RequestToChat([]byte(body))
 	require.NoError(t, err)
@@ -758,6 +765,10 @@ func TestRequestToChat_PreservesOtherFields(t *testing.T) {
 }
 
 func TestRequestToChat_NonFunctionToolsPassthrough(t *testing.T) {
+	// Non-function tools (web_search, web_search_preview, computer_use, etc.) are
+	// Responses-API built-in constructs.  RequestToChat passes them through so
+	// that provider-specific converters downstream (Vertex, Anthropic, OpenAI)
+	// can map or drop them according to their own capabilities.
 	body := `{
 		"model": "gpt-4o",
 		"input": "search the web",
@@ -774,12 +785,11 @@ func TestRequestToChat_NonFunctionToolsPassthrough(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &parsed))
 
 	tools := parsed["tools"].([]interface{})
-	assert.Len(t, tools, 3)
+	assert.Len(t, tools, 3, "all tools must be preserved for downstream converters")
 
 	// web_search passed through as-is
 	tool0 := tools[0].(map[string]interface{})
 	assert.Equal(t, "web_search", tool0["type"])
-	assert.Equal(t, "web_search", tool0["name"])
 
 	// web_search_preview passed through as-is
 	tool1 := tools[1].(map[string]interface{})

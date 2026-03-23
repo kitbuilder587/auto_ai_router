@@ -248,9 +248,11 @@ func RequestToChat(body []byte) ([]byte, error) {
 	// Set messages
 	raw["messages"] = messages
 
-	// max_output_tokens -> max_completion_tokens
+	// max_output_tokens -> max_tokens (universal Chat Completions parameter).
+	// Reasoning models (o1/o3/o4/gpt-5) will have this renamed to
+	// max_completion_tokens by openai.ReplaceBodyParam applied after conversion.
 	if maxOut, ok := raw["max_output_tokens"]; ok {
-		raw["max_completion_tokens"] = maxOut
+		raw["max_tokens"] = maxOut
 	}
 
 	// Convert tools from flat to nested format
@@ -536,9 +538,11 @@ func convertTools(raw map[string]interface{}) error {
 		toolType, _ := toolMap["type"].(string)
 
 		if toolType != "function" {
-			// Non-function tools (web_search, web_search_preview, computer_use, etc.)
-			// are passed through as-is. Provider-specific converters downstream
-			// (Vertex, Anthropic, OpenAI) handle mapping them to the correct format.
+			// Non-function tools (web_search_preview, computer_use, google_search_retrieval,
+			// code_execution, etc.) are Responses-API built-in constructs.
+			// Pass them through as-is: provider-specific converters downstream
+			// (Vertex, Anthropic, OpenAI) know which tools they support and will
+			// map or drop them accordingly.
 			converted = append(converted, toolMap)
 			continue
 		}
@@ -604,8 +608,10 @@ func convertToolChoice(raw map[string]interface{}) error {
 		return nil
 	}
 
-	// Non-function tool_choice types (e.g. web_search, web_search_preview)
-	// are passed through as-is for provider-specific handling.
+	// Non-function tool_choice types (e.g. web_search_preview, file_search) reference
+	// Responses-API built-in tools.  Pass them through: provider-specific converters
+	// downstream (Vertex, Anthropic, OpenAI) handle what they support and ignore
+	// what they don't.
 	return nil
 }
 

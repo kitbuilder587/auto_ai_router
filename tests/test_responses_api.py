@@ -256,13 +256,19 @@ class TestResponsesAPIStreaming:
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
     def test_streaming_usage_in_completed_event(self, openai_client, model):
-        """Test that usage is present in the response.completed event (core BUG-2 streaming fix)."""
+        """Test that usage is present in the response.completed event (core BUG-2 streaming fix).
+
+        max_output_tokens is set generously so the model finishes naturally
+        (finish_reason=stop → response.completed).  A value that is too small
+        causes finish_reason=length → response.incomplete, which would never
+        trigger ResponseCompletedEvent and fail the assertion below.
+        """
         completed_response = None
 
         with openai_client.responses.stream(
             model=model,
             input="What is AI?",
-            max_output_tokens=100,
+            max_output_tokens=300,
         ) as stream:
             for event in stream:
                 if isinstance(event, ResponseCompletedEvent):

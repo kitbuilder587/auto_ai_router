@@ -202,3 +202,115 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 	}
 	return body
 }
+
+// ConvertWebSearchTools normalises non-function tools in an OpenAI Chat Completions
+// request body.  Chat Completions does not accept non-function tool types, so:
+//
+//   - web_search / web_search_preview → converted to the top-level
+//     web_search_options parameter, but ONLY for models that support it
+//     (currently search-preview models; see isWebSearchModel).  For other
+//     models the tool is silently dropped.
+//   - All other non-function tools (computer_use, google_search_retrieval,
+//     code_execution, etc.) are dropped; they have no Chat Completions
+//     equivalent and would cause a 400 from OpenAI.
+//   - If a non-function tool_choice remains after tools are filtered, it is
+//     also removed so the provider defaults to "auto".
+func ConvertWebSearchTools(body []byte) []byte {
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+
+	modelID, _ := data["model"].(string)
+
+	toolsRaw, ok := data["tools"]
+	if !ok {
+		// No tools array; still clean up a stray non-function tool_choice.
+		if dropNonFunctionToolChoice(data) {
+			result, err := json.Marshal(data)
+			if err != nil {
+				return body
+			}
+			return result
+		}
+		return body
+	}
+	toolsArr, ok := toolsRaw.([]any)
+	if !ok {
+		return body
+	}
+
+	var functionTools []any
+	hasWebSearch := false
+	nonFunctionDropped := false
+
+	for _, t := range toolsArr {
+		toolMap, ok := t.(map[string]any)
+		if !ok {
+			functionTools = append(functionTools, t)
+			continue
+		}
+		toolType, _ := toolMap["type"].(string)
+		switch toolType {
+		case "web_search", "web_search_preview":
+			hasWebSearch = true
+			nonFunctionDropped = true
+		case "function":
+			functionTools = append(functionTools, t)
+		default:
+			// computer_use, text_editor, bash, google_search_retrieval,
+			// code_execution, etc. — not supported by OpenAI Chat Completions.
+			nonFunctionDropped = true
+		}
+	}
+
+	if !hasWebSearch && !nonFunctionDropped {
+		// Nothing to do.
+		return body
+	}
+
+	// Add web_search_options only for models that support it.
+	if hasWebSearch && isWebSearchModel(modelID) {
+		if _, exists := data["web_search_options"]; !exists {
+			data["web_search_options"] = map[string]any{}
+		}
+	}
+
+	if len(functionTools) > 0 {
+		data["tools"] = functionTools
+	} else {
+		delete(data, "tools")
+		delete(data, "tool_choice")
+	}
+
+	// If tool_choice still references a non-function built-in, remove it.
+	dropNonFunctionToolChoice(data)
+
+	result, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
+// isWebSearchModel reports whether modelID supports the web_search_options
+// parameter in OpenAI Chat Completions API.
+// OpenAI exposes web search only on dedicated search-preview models
+// (e.g. gpt-4o-search-preview, gpt-4o-mini-search-preview).
+func isWebSearchModel(modelID string) bool {
+	return strings.Contains(strings.ToLower(modelID), "search-preview")
+}
+
+// dropNonFunctionToolChoice removes tool_choice from data if it is a
+// map-style object whose type is not "function".  Returns true if removed.
+func dropNonFunctionToolChoice(data map[string]any) bool {
+	tc, ok := data["tool_choice"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if tcType, _ := tc["type"].(string); tcType != "function" {
+		delete(data, "tool_choice")
+		return true
+	}
+	return false
+}
