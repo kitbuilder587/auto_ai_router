@@ -227,21 +227,45 @@ func (m *Manager) GetRealModelName(alias string) (string, bool) {
 	return alias, false
 }
 
+// responsesAPIModelPrefixes lists model name substrings that natively support
+// the /v1/responses endpoint.  Checked case-insensitively via strings.Contains.
+// Source: https://platform.openai.com/docs/api-reference/responses
+var responsesAPIModelPrefixes = []string{
+	"codex",
+	"gpt-4o",
+	"gpt-4.1",
+	"gpt-5",
+	"o1",
+	"o3",
+	"o4",
+}
+
+// isNativeResponsesModel returns true when modelID matches any known prefix
+// that supports the native /v1/responses endpoint.
+func isNativeResponsesModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	for _, prefix := range responsesAPIModelPrefixes {
+		if strings.Contains(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsPassthroughResponses reports whether Responses API requests for modelID
 // should be forwarded to the provider's native /v1/responses endpoint as-is,
 // without converting to Chat Completions format.
 //
 // Priority:
 //  1. Explicit config override (passthrough_responses: true/false in models[])
-//  2. Auto-detect: true for codex models (model name contains "codex")
+//  2. Auto-detect: true for models in responsesAPIModelPrefixes
 func (m *Manager) IsPassthroughResponses(modelID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if v, ok := m.modelPassthroughResponses[modelID]; ok && v != nil {
 		return *v
 	}
-	// Auto-detect: codex models natively support /v1/responses.
-	return strings.Contains(strings.ToLower(modelID), "codex")
+	return isNativeResponsesModel(modelID)
 }
 
 // SetCredentials sets the credentials for fetching remote models from proxies
