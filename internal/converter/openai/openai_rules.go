@@ -203,13 +203,10 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 	return body
 }
 
-// ConvertWebSearchTools normalises non-function tools in an OpenAI Chat Completions
-// request body.  Chat Completions does not accept non-function tool types, so:
+// ConvertWebSearchTools normalises non-function tools in a request body.
 //
-//   - web_search / web_search_preview → converted to the top-level
-//     web_search_options parameter, but ONLY for models that support it
-//     (currently search-preview models; see isWebSearchModel).  For other
-//     models the tool is silently dropped.
+//   - web_search / web_search_preview → passed through as-is; the provider
+//     handles them natively (Responses API) or returns an error — caller's problem.
 //   - All other non-function tools (computer_use, google_search_retrieval,
 //     code_execution, etc.) are dropped; they have no Chat Completions
 //     equivalent and would cause a 400 from OpenAI.
@@ -220,8 +217,6 @@ func ConvertWebSearchTools(body []byte) []byte {
 	if err := json.Unmarshal(body, &data); err != nil {
 		return body
 	}
-
-	modelID, _ := data["model"].(string)
 
 	toolsRaw, ok := data["tools"]
 	if !ok {
@@ -240,23 +235,20 @@ func ConvertWebSearchTools(body []byte) []byte {
 		return body
 	}
 
-	var functionTools []any
-	hasWebSearch := false
+	var keepTools []any
 	nonFunctionDropped := false
 
 	for _, t := range toolsArr {
 		toolMap, ok := t.(map[string]any)
 		if !ok {
-			functionTools = append(functionTools, t)
+			keepTools = append(keepTools, t)
 			continue
 		}
 		toolType, _ := toolMap["type"].(string)
 		switch toolType {
-		case "web_search", "web_search_preview":
-			hasWebSearch = true
-			nonFunctionDropped = true
-		case "function":
-			functionTools = append(functionTools, t)
+		case "web_search", "web_search_preview", "function":
+			// Pass through as-is.
+			keepTools = append(keepTools, t)
 		default:
 			// computer_use, text_editor, bash, google_search_retrieval,
 			// code_execution, etc. — not supported by OpenAI Chat Completions.
@@ -264,20 +256,13 @@ func ConvertWebSearchTools(body []byte) []byte {
 		}
 	}
 
-	if !hasWebSearch && !nonFunctionDropped {
-		// Nothing to do.
+	if !nonFunctionDropped && len(keepTools) == len(toolsArr) {
+		// Nothing changed.
 		return body
 	}
 
-	// Add web_search_options only for models that support it.
-	if hasWebSearch && isWebSearchModel(modelID) {
-		if _, exists := data["web_search_options"]; !exists {
-			data["web_search_options"] = map[string]any{}
-		}
-	}
-
-	if len(functionTools) > 0 {
-		data["tools"] = functionTools
+	if len(keepTools) > 0 {
+		data["tools"] = keepTools
 	} else {
 		delete(data, "tools")
 		delete(data, "tool_choice")
@@ -291,14 +276,6 @@ func ConvertWebSearchTools(body []byte) []byte {
 		return body
 	}
 	return result
-}
-
-// isWebSearchModel reports whether modelID supports the web_search_options
-// parameter in OpenAI Chat Completions API.
-// OpenAI exposes web search only on dedicated search-preview models
-// (e.g. gpt-4o-search-preview, gpt-4o-mini-search-preview).
-func isWebSearchModel(modelID string) bool {
-	return strings.Contains(strings.ToLower(modelID), "search-preview")
 }
 
 // dropNonFunctionToolChoice removes tool_choice from data if it is a
