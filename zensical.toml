@@ -36,6 +36,14 @@ nav = [
     { "Model Aliases" = "advanced/model_alias.md" },
     { "Troubleshooting" = "advanced/troubleshooting.md" },
   ]},
+  { "API Reference [WIP]" = [
+    { "Overview" = "refs/index.md" },
+    { "Anthropic Messages API" = "refs/anthropic_messages_api.md" },
+    { "AWS Bedrock Anthropic" = "refs/bedrock_anthropic.md" },
+    { "OpenAI Chat Completions" = "refs/openai_chat_completions.md" },
+    { "OpenAI Responses API" = "refs/openai_responses_api.md" },
+    { "Vertex Gemini API" = "refs/vertex_gemini_api.md" },
+  ]},
 ]
 
 [project.theme]

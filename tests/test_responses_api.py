@@ -396,24 +396,28 @@ class TestResponsesAPIStore:
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
     def test_previous_response_id_context(self, openai_client, model):
-        """Use previous_response_id to provide multi-turn context from store."""
+        """Use previous_response_id to provide multi-turn context from store.
+
+        Uses a plain factual statement (not a 'codeword' or 'secret') so that
+        safety filters on reasoning models do not block the recall.
+        """
         first = openai_client.responses.create(
             model=model,
-            input="Remember this codeword: zebra-123. Reply only 'ok'.",
+            input="My favorite number is 83471. Reply only 'ok'.",
             max_output_tokens=20,
             store=True,
         )
 
         second = openai_client.responses.create(
             model=model,
-            input="What codeword did I give you? Reply exactly.",
-            max_output_tokens=50,
+            input="What is my favorite number? Reply with the number only.",
+            max_output_tokens=20,
             previous_response_id=first.id,
         )
 
         assert second.previous_response_id == first.id
         text = extract_response_text(second)
-        ContentValidator.assert_contains_any(text, ["zebra-123"])
+        ContentValidator.assert_contains_any(text, ["83471"])
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)
     def test_retrieve_not_stored(self, openai_client, model):

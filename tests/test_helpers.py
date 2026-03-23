@@ -20,7 +20,8 @@ class TestModels:
 
     # OpenAI models
     OPENAI_MODELS = [
-        "gpt-4o-mini",
+        # "gpt-4o-mini",
+        "gpt-5.3-codex",
         # "gpt-5-mini",
     ]
 

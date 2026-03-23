@@ -43,6 +43,13 @@ type ModelRPMConfig struct {
 	RPM        int    `yaml:"rpm"`
 	TPM        int    `yaml:"tpm"`
 	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+
+	// PassthroughResponses controls whether Responses API requests for this model
+	// are forwarded as-is to the provider's native /v1/responses endpoint instead
+	// of being converted to Chat Completions format.
+	// nil (omitted in config) = auto-detect: true for codex models, false otherwise.
+	// Explicit true/false overrides the auto-detection.
+	PassthroughResponses *bool `yaml:"passthrough_responses,omitempty"`
 }
 
 type Config struct {

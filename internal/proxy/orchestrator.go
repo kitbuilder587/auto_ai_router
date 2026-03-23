@@ -106,26 +106,15 @@ func (p *Proxy) orchestrateRequest(
 		// This must happen after any history prepending but before RequestToChat removes "input".
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(body)
 
-		if responses.IsCodexModel(modelID) {
-			// Codex passthrough: forward to the provider's native /v1/responses endpoint.
-			// Strip proxy-handled fields (store, metadata, ttl) from the forwarded body.
-			// If we resolved previous_response_id from our local store (history already
-			// injected into input), strip it too so the provider doesn't try to look it up.
-			// If we didn't resolve it, keep it in the body for the provider to handle natively.
-			var raw map[string]interface{}
-			if err := json.Unmarshal(body, &raw); err == nil {
-				delete(raw, "store")
-				delete(raw, "metadata")
-				delete(raw, "ttl")
-				if prevEntryHandled {
-					delete(raw, "previous_response_id")
-				}
-				if stripped, marshalErr := json.Marshal(raw); marshalErr == nil {
-					body = stripped
-				}
-			}
+		if p.modelManager.IsPassthroughResponses(modelID) {
+			// Passthrough: forward to the provider's native /v1/responses endpoint.
+			// Enabled automatically for codex models; can be overridden per-model via
+			// passthrough_responses: true/false in the models[] config section.
+			// PrepareCodexPassthrough strips proxy-internal fields and normalises the
+			// body to match what OpenAI's Responses API actually accepts.
+			body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
 			passthroughResponses = true
-			p.logger.Debug("Codex model: using native Responses API passthrough",
+			p.logger.Debug("Native Responses API passthrough",
 				"model", modelID, "streaming", streaming)
 		} else {
 			// Non-codex: convert to Chat Completions format so all providers work uniformly.

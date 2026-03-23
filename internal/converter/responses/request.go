@@ -170,15 +170,17 @@ func outputToInputItems(output []OutputItem) []interface{} {
 			for _, c := range item.Content {
 				switch c.Type {
 				case "output_text":
+					// Keep output_text type: valid for assistant-role messages in both
+					// the native Responses API (codex passthrough) and is handled by
+					// convertContentParts for the Chat Completions conversion path.
 					content = append(content, map[string]interface{}{
-						"type": "input_text",
+						"type": "output_text",
 						"text": c.Text,
 					})
 				case "output_refusal":
-					// Refusals are echoed back as plain input text.
 					content = append(content, map[string]interface{}{
-						"type": "input_text",
-						"text": c.Refusal,
+						"type":    "output_refusal",
+						"refusal": c.Refusal,
 					})
 				}
 			}
@@ -197,6 +199,92 @@ func outputToInputItems(output []OutputItem) []interface{} {
 		}
 	}
 	return items
+}
+
+// PrepareCodexPassthrough strips proxy-internal fields and normalises the
+// request body so it is accepted by OpenAI's native /v1/responses endpoint.
+//
+// Normalizations applied (in one JSON round-trip):
+//  1. Strip store / metadata / ttl (handled by the proxy, not forwarded).
+//  2. Strip previous_response_id when prevEntryHandled=true (history already
+//     injected into input by PrependHistoryToInput).
+//  3. input: single message object → wrapped in a one-element array.
+//  4. instructions: array of messages → content joined as a plain string.
+//  5. tools: nested Chat Completions format ({function:{name:...}}) →
+//     flat Responses API format ({name:...}) for function-type tools.
+func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+
+	// 1 & 2. Strip proxy-internal and conditionally previous_response_id.
+	delete(raw, "store")
+	delete(raw, "metadata")
+	delete(raw, "ttl")
+	if prevEntryHandled {
+		delete(raw, "previous_response_id")
+	}
+
+	// 3. Normalize input: single dict → one-element array.
+	if inputVal, ok := raw["input"]; ok {
+		if inputMap, ok := inputVal.(map[string]interface{}); ok {
+			raw["input"] = []interface{}{inputMap}
+		}
+	}
+
+	// 4. Normalize instructions: array → plain string (native API requires string).
+	if instVal, ok := raw["instructions"]; ok {
+		if instArr, ok := instVal.([]interface{}); ok {
+			var parts []string
+			for _, item := range instArr {
+				if m, ok := item.(map[string]interface{}); ok {
+					if content, ok := m["content"].(string); ok && content != "" {
+						parts = append(parts, content)
+					}
+				}
+			}
+			if len(parts) > 0 {
+				raw["instructions"] = strings.Join(parts, "\n")
+			} else {
+				delete(raw, "instructions")
+			}
+		}
+	}
+
+	// 5. Normalize tools: nested Chat Completions function format → flat Responses API format.
+	// Input:  {type:"function", function:{name:"...", description:"...", parameters:{...}}}
+	// Output: {type:"function", name:"...", description:"...", parameters:{...}}
+	if toolsVal, ok := raw["tools"]; ok {
+		if toolsArr, ok := toolsVal.([]interface{}); ok {
+			normalized := make([]interface{}, len(toolsArr))
+			for i, t := range toolsArr {
+				toolMap, ok := t.(map[string]interface{})
+				if !ok {
+					normalized[i] = t
+					continue
+				}
+				if toolMap["type"] == "function" {
+					if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
+						flat := map[string]interface{}{"type": "function"}
+						for k, v := range funcDef {
+							flat[k] = v
+						}
+						normalized[i] = flat
+						continue
+					}
+				}
+				normalized[i] = t
+			}
+			raw["tools"] = normalized
+		}
+	}
+
+	result, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 // IsCodexModel returns true when the model name indicates a codex model.
