@@ -1,7 +1,10 @@
 package vertex
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
+	"net/textproto"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -53,6 +56,7 @@ func TestSizeToImageSize(t *testing.T) {
 		{"2048x2048", "2K"},
 		{"3584x2048", "2K"},
 		{"2048x3584", "2K"},
+		{"2016x1008", "2K"},
 		// 4K sizes
 		{"4096x4096", "4K"},
 		{"7168x4096", "4K"},
@@ -109,10 +113,154 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 		assert.Equal(t, "1K", imageConfig["imageSize"])
 	})
 
+	t.Run("request clamps n to 10", func(t *testing.T) {
+		input := `{"model":"gemini-2.0-flash","prompt":"A landscape","n":99}`
+		result, err := ImageRequestToOpenAIChatRequest([]byte(input))
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		require.NotNil(t, chatReq.N)
+		assert.Equal(t, 10, *chatReq.N)
+	})
+
 	t.Run("invalid JSON input returns error", func(t *testing.T) {
 		result, err := ImageRequestToOpenAIChatRequest([]byte("not json"))
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "failed to parse OpenAI image request")
+	})
+}
+
+func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
+	buildMultipart := func(t *testing.T) ([]byte, string) {
+		t.Helper()
+
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		require.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
+		require.NoError(t, writer.WriteField("prompt", "Make the object blue"))
+		require.NoError(t, writer.WriteField("n", "2"))
+		require.NoError(t, writer.WriteField("size", "1792x1024"))
+
+		part, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
+			"Content-Type":        []string{"image/png"},
+		})
+		require.NoError(t, err)
+		_, err = part.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+		require.NoError(t, err)
+
+		require.NoError(t, writer.Close())
+		return buf.Bytes(), writer.FormDataContentType()
+	}
+
+	t.Run("multipart edit request converts to multimodal chat request", func(t *testing.T) {
+		body, contentType := buildMultipart(t)
+		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		assert.Equal(t, "gemini-2.5-flash-image-preview", chatReq.Model)
+		require.NotNil(t, chatReq.N)
+		assert.Equal(t, 2, *chatReq.N)
+		require.Len(t, chatReq.Messages, 1)
+
+		blocks, ok := chatReq.Messages[0].Content.([]interface{})
+		require.True(t, ok)
+		require.Len(t, blocks, 2)
+
+		textBlock, ok := blocks[0].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "text", textBlock["type"])
+		assert.Equal(t, "Make the object blue", textBlock["text"])
+
+		imageBlock, ok := blocks[1].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "image_url", imageBlock["type"])
+
+		genConfig, ok := chatReq.ExtraBody["generation_config"].(map[string]interface{})
+		require.True(t, ok)
+		imageConfig, ok := genConfig["image_config"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "16:9", imageConfig["aspectRatio"])
+		assert.Equal(t, "1K", imageConfig["imageSize"])
+	})
+
+	t.Run("missing model returns error", func(t *testing.T) {
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		require.NoError(t, writer.WriteField("prompt", "Edit this"))
+		require.NoError(t, writer.Close())
+
+		result, err := ImageEditRequestToOpenAIChatRequest(buf.Bytes(), writer.FormDataContentType())
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "missing model")
+	})
+
+	t.Run("mask image is included in content blocks", func(t *testing.T) {
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		require.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
+		require.NoError(t, writer.WriteField("prompt", "Edit with mask"))
+
+		imagePart, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
+			"Content-Type":        []string{"image/png"},
+		})
+		require.NoError(t, err)
+		_, err = imagePart.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+		require.NoError(t, err)
+
+		maskPart, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{`form-data; name="mask"; filename="mask.png"`},
+			"Content-Type":        []string{"image/png"},
+		})
+		require.NoError(t, err)
+		_, err = maskPart.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+		require.NoError(t, err)
+
+		require.NoError(t, writer.Close())
+
+		result, err := ImageEditRequestToOpenAIChatRequest(buf.Bytes(), writer.FormDataContentType())
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		blocks, ok := chatReq.Messages[0].Content.([]interface{})
+		require.True(t, ok)
+		require.Len(t, blocks, 4)
+
+		maskPrompt, ok := blocks[2].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "text", maskPrompt["type"])
+		assert.Contains(t, maskPrompt["text"], "mask")
+
+		maskBlock, ok := blocks[3].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "image_url", maskBlock["type"])
+	})
+
+	t.Run("non-image mime type returns error", func(t *testing.T) {
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		require.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
+		require.NoError(t, writer.WriteField("prompt", "Edit this"))
+
+		part, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{`form-data; name="image"; filename="input.txt"`},
+			"Content-Type":        []string{"text/plain"},
+		})
+		require.NoError(t, err)
+		_, err = part.Write([]byte("not an image"))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		result, err := ImageEditRequestToOpenAIChatRequest(buf.Bytes(), writer.FormDataContentType())
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "unsupported MIME type")
 	})
 }

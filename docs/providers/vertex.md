@@ -73,6 +73,12 @@ Requests are distributed across credentials using round-robin. See [Load Balanci
 
 The router accepts requests in **OpenAI Chat Completion format** and automatically converts them to Vertex AI (GenAI) format. Responses are converted back to OpenAI format, so any OpenAI SDK works transparently.
 
+For thinking-capable Gemini models, the router treats "thinking depth" and "thought disclosure" separately:
+
+- `reasoning_effort`, `thinking_budget`, `thinking_level`, and Anthropic-style `thinking` control reasoning depth only.
+- These shorthands do **not** enable `include_thoughts`; internal thoughts are hidden by default.
+- To receive `reasoning_content`, explicitly set `extra_body.thinking_config.include_thoughts=true`.
+
 ### Supported Parameters
 
 | OpenAI Parameter      | Vertex Mapping                        | Notes                                    |
@@ -259,6 +265,21 @@ response = client.chat.completions.create(
 )
 ```
 
+If you want reasoning depth without exposing thoughts, omit `include_thoughts` or set it to `False`:
+
+```python
+response = client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "Complex reasoning task"}],
+    extra_body={
+        "thinking_config": {
+            "thinking_budget": 8192,
+            "include_thoughts": False,
+        }
+    },
+)
+```
+
 For **Gemini 3+** use `thinking_level` (enum string):
 
 ```python
@@ -376,6 +397,33 @@ response = client.chat.completions.create(
     extra_body={"generation_config": {"response_modalities": ["IMAGE"]}},
 )
 ```
+
+OpenAI image endpoints are also supported for Gemini image-capable models:
+
+```python
+# Text-to-image
+resp = client.images.generate(
+    model="gemini-2.5-flash-image-preview",
+    prompt="A sunset over snowy mountains",
+    size="1792x1024",
+    n=1,
+)
+
+# Image edit / composition
+resp = client.images.edit(
+    model="gemini-2.5-flash-image-preview",
+    image=[open("base.png", "rb"), open("style.png", "rb")],
+    prompt="Blend these into one cinematic scene",
+    size="1024x1024",
+    n=1,
+)
+```
+
+For Gemini-backed `images.generate` / `images.edit`, the router converts the OpenAI request to a multimodal Gemini chat request with `response_modalities=["IMAGE"]`.
+
+- `images.generate` maps prompt and size to Gemini image config.
+- `images.edit` accepts multipart image uploads and sends them as inline image parts alongside the text prompt.
+- `response_format="b64_json"` is supported naturally because Gemini image responses are returned as inline image bytes and converted to `b64_json`.
 
 The router also supports the dedicated Imagen API endpoint for image generation models.
 

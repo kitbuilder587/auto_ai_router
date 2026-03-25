@@ -29,7 +29,7 @@ func TestOpenAIToVertex_ToolRoleMessage_UsesNameField(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_FallbackToToolResult(t *testin
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_ResolvesFromToolCalls(t *testi
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-flash-preview")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3-flash-preview", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t 
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-flash-preview")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3-flash-preview", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_AreGroupedIntoSingleTu
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-pro-preview")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3-pro-preview", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestOpenAIToVertex_BasicMessageConversion(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestOpenAIToVertex_DeveloperRole(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestOpenAIToVertex_ToolRoleMessage_JSONContent(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyContent(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}

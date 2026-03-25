@@ -284,6 +284,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 		{"completions", "/v1/completions"},
 		{"embeddings", "/v1/embeddings"},
 		{"images", "/v1/images/generations"},
+		{"image edits", "/v1/images/edits"},
 	}
 
 	for _, tt := range tests {

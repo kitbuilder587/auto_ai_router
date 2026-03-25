@@ -9,6 +9,9 @@ import (
 // mapReasoningToThinkingConfig maps OpenAI reasoning params to Vertex ThinkingConfig.
 // Checks Anthropic-style thinking first, then falls back to reasoning_effort.
 func mapReasoningToThinkingConfig(thinking interface{}, reasoningEffort string, model string) *genai.ThinkingConfig {
+	if isGeminiImageModel(model) {
+		return nil
+	}
 	if thinking != nil {
 		if thinkingMap, ok := thinking.(map[string]interface{}); ok {
 			return mapAnthropicThinking(thinkingMap, model)
@@ -30,10 +33,20 @@ func isFlashModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "flash")
 }
 
+// isGeminiImageModel returns true for Gemini image generation/editing models.
+// These models do not support ThinkingConfig.
+func isGeminiImageModel(model string) bool {
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "gemini") && strings.Contains(lower, "image")
+}
+
 // isThinkingCapableModel returns true for models that support dynamic thinking
 // (Gemini 2.5+ and Gemini 3+). These models think autonomously when ThinkingConfig
 // is not set, causing unpredictable latency.
 func isThinkingCapableModel(model string) bool {
+	if isGeminiImageModel(model) {
+		return false
+	}
 	lower := strings.ToLower(model)
 	return strings.Contains(lower, "gemini-2.5") || strings.Contains(lower, "gemini-3")
 }
@@ -86,7 +99,7 @@ func disableThinkingConfig(model string) *genai.ThinkingConfig {
 // mapReasoningEffort maps OpenAI reasoning_effort to Vertex ThinkingConfig.
 // Gemini 2.5 uses ThinkingBudget (tokens), Gemini 3+ uses ThinkingLevel (enum).
 func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
-	config := &genai.ThinkingConfig{IncludeThoughts: true}
+	config := &genai.ThinkingConfig{IncludeThoughts: false}
 
 	if isGemini3Model(model) {
 		// Gemini 3+: ThinkingLevel enum.
@@ -140,7 +153,7 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 // If both are present, thinking_budget takes precedence for Gemini 2.5 and
 // thinking_level takes precedence for Gemini 3+.
 func mapNativeThinkingConfig(tcMap map[string]interface{}, model string) *genai.ThinkingConfig {
-	config := &genai.ThinkingConfig{IncludeThoughts: true}
+	config := &genai.ThinkingConfig{IncludeThoughts: false}
 
 	if include, ok := tcMap["include_thoughts"].(bool); ok {
 		config.IncludeThoughts = include
@@ -225,8 +238,7 @@ func mapAnthropicThinking(thinking map[string]interface{}, model string) *genai.
 	}
 
 	config := &genai.ThinkingConfig{}
-
-	config.IncludeThoughts = true
+	config.IncludeThoughts = false
 
 	if isGemini3Model(model) {
 		// Map Anthropic budget_tokens to Gemini 3 ThinkingLevel.

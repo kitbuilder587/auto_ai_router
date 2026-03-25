@@ -10,17 +10,28 @@ import (
 )
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format.
-func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]byte, error) {
+func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool, model, contentType string) ([]byte, error) {
 	var req openai.OpenAIRequest
 
-	if isImageGeneration {
+	if isImageGeneration || isImageEdit {
 		if strings.Contains(model, "gemini") {
-			chatBody, err := ImageRequestToOpenAIChatRequest(openAIBody)
+			var (
+				chatBody []byte
+				err      error
+			)
+			if isImageEdit {
+				chatBody, err = ImageEditRequestToOpenAIChatRequest(openAIBody, contentType)
+			} else {
+				chatBody, err = ImageRequestToOpenAIChatRequest(openAIBody)
+			}
 			if err != nil {
 				return nil, err
 			}
 			openAIBody = chatBody
 		} else {
+			if isImageEdit {
+				return nil, fmt.Errorf("image edits are not supported for model %s", model)
+			}
 			return OpenAIImageToVertex(openAIBody)
 		}
 	}

@@ -605,14 +605,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Track embeddings and image generation requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
-	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
+	isImageGeneration := strings.Contains(r.URL.Path, "/images/generations")
+	isImageEdit := strings.Contains(r.URL.Path, "/images/edits")
+	logCtx.IsImageGeneration = isImageGeneration || isImageEdit
 	if logCtx.IsImageGeneration {
-		var imgReq struct {
-			N *int `json:"n"`
-		}
-		if err := json.Unmarshal(body, &imgReq); err == nil && imgReq.N != nil {
-			logCtx.ImageCount = *imgReq.N
-		} else {
+		logCtx.ImageCount = extractImageCountFromBody(body, r.Header.Get("Content-Type"))
+		if logCtx.ImageCount <= 0 {
 			logCtx.ImageCount = 1
 		}
 	}
@@ -670,9 +668,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// modelID (alias) is used for credential selection and rate limiting.
 		conv = converter.New(cred.Type, converter.RequestMode{
 			IsImageGeneration: logCtx.IsImageGeneration,
+			IsImageEdit:       isImageEdit,
 			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
 			ModelID:           realModelID,
+			ContentType:       r.Header.Get("Content-Type"),
 		})
 
 		// Convert request body to provider format
@@ -741,6 +741,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
+		// Converted provider requests are JSON even if the original OpenAI request
+		// was multipart/form-data (e.g. images.edit).
+		proxyReq.Header.Set("Content-Type", "application/json")
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)

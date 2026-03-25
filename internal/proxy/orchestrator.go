@@ -294,7 +294,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	modelID, streaming, sessionID, body := extractMetadataFromBody(body)
+	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
 

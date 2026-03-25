@@ -5,8 +5,10 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"os"
 	"strings"
 	"testing"
@@ -480,7 +482,7 @@ func TestExtractModelFromBody(t *testing.T) {
 	// Additional check: Responses API streaming must NOT have stream_options
 	t.Run("responses API streaming must not inject stream_options", func(t *testing.T) {
 		body := `{"model": "gpt-5", "stream": true, "input": "Hello"}`
-		_, stream, _, modifiedBody := extractMetadataFromBody([]byte(body))
+		_, stream, _, modifiedBody := extractMetadataFromBody([]byte(body), "application/json")
 		assert.True(t, stream)
 
 		var bodyMap map[string]interface{}
@@ -493,7 +495,7 @@ func TestExtractModelFromBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, stream, _, modifiedBody := extractMetadataFromBody([]byte(tt.body))
+			model, stream, _, modifiedBody := extractMetadataFromBody([]byte(tt.body), "application/json")
 			assert.Equal(t, tt.expectedModel, model)
 			assert.Equal(t, tt.expectedStream, stream)
 
@@ -509,6 +511,26 @@ func TestExtractModelFromBody(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("multipart image edit extracts model", func(t *testing.T) {
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		assert.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
+		assert.NoError(t, writer.WriteField("prompt", "Edit this"))
+		part, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
+			"Content-Type":        []string{"image/png"},
+		})
+		assert.NoError(t, err)
+		_, err = part.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+		assert.NoError(t, err)
+		assert.NoError(t, writer.Close())
+
+		model, stream, _, modifiedBody := extractMetadataFromBody(buf.Bytes(), writer.FormDataContentType())
+		assert.Equal(t, "gemini-2.5-flash-image-preview", model)
+		assert.False(t, stream)
+		assert.Equal(t, buf.Bytes(), modifiedBody)
+	})
 }
 
 func TestIsStreamingResponse(t *testing.T) {
@@ -634,6 +656,48 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Custom-Header", "custom-value")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var bodyMap map[string]interface{}
+		err := json.NewDecoder(r.Body).Decode(&bodyMap)
+		assert.NoError(t, err)
+		assert.NotNil(t, bodyMap["contents"])
+		assert.NotNil(t, bodyMap["generationConfig"])
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aW1n","mimeType":"image/png"}}],"role":"model"}}]}`))
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeGemini, mockServer.URL, "upstream-key-1").
+		Build()
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	assert.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
+	assert.NoError(t, writer.WriteField("prompt", "Edit this image"))
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
+		"Content-Type":        []string{"image/png"},
+	})
+	assert.NoError(t, err)
+	_, err = part.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	req := httptest.NewRequest("POST", "/v1/images/edits", &buf)
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 
 	prx.ProxyRequest(w, req)

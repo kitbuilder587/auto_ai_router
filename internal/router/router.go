@@ -65,6 +65,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		"/v1/completions":        true,
 		"/v1/embeddings":         true,
 		"/v1/images/generations": true,
+		"/v1/images/edits":       true,
 		"/v1/responses":          true,
 	}
 	if !allowedPaths[req.URL.Path] {

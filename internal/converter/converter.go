@@ -15,9 +15,11 @@ import (
 // RequestMode holds context parameters for a conversion session.
 type RequestMode struct {
 	IsImageGeneration bool   // true for /images/generations requests
+	IsImageEdit       bool   // true for /images/edits requests
 	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
 	ModelID           string // e.g. "gemini-2.0-flash", "claude-opus-4-5"
+	ContentType       string // original request content type (needed for multipart endpoints)
 }
 
 // ProviderConverter performs request/response conversion for a specific provider.
@@ -64,7 +66,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.ModelID)
+		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
 	case config.ProviderTypeAnthropic:
 		// Anthropic does not support image generation
 		if c.mode.IsImageGeneration {
