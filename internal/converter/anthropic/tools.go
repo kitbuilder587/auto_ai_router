@@ -8,10 +8,11 @@ import (
 
 // mapToolChoice maps an OpenAI tool_choice value to the Anthropic tool_choice format.
 //
-//	"none"      → {"type": "none"}
-//	"auto"      → {"type": "auto"}
-//	"required"  → {"type": "any"}
-//	{function}  → {"type": "tool", "name": "<name>"}
+//	"none"            → {"type": "none"}
+//	"auto"            → {"type": "auto"}
+//	"required"        → {"type": "any"}
+//	{type:function}   → {"type": "tool", "name": "<name>"}
+//	{type:allowed_tools/auto/any/none/tool} → passed through as-is (Anthropic-native)
 func mapToolChoice(toolChoice interface{}) interface{} {
 	if toolChoice == nil {
 		return nil
@@ -27,7 +28,7 @@ func mapToolChoice(toolChoice interface{}) interface{} {
 			return map[string]interface{}{"type": "any"}
 		}
 	case map[string]interface{}:
-		// {"type": "function", "function": {"name": "func_name"}}
+		// OpenAI format: {"type": "function", "function": {"name": "func_name"}}
 		if funcObj, ok := choice["function"].(map[string]interface{}); ok {
 			if name, ok := funcObj["name"].(string); ok && name != "" {
 				return map[string]interface{}{
@@ -35,6 +36,13 @@ func mapToolChoice(toolChoice interface{}) interface{} {
 					"name": name,
 				}
 			}
+		}
+		// Anthropic-native format (e.g. {"type":"allowed_tools",...},
+		// {"type":"auto"}, {"type":"any"}, {"type":"none"}, {"type":"tool",...}):
+		// pass through unchanged — the Python OpenAI SDK merges extra_body into
+		// the top-level request, so these arrive as req.ToolChoice directly.
+		if tcType, ok := choice["type"].(string); ok && tcType != "function" {
+			return choice
 		}
 	}
 	return nil
@@ -106,6 +114,44 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 		return nil
 	}
 	return tools
+}
+
+// expandAllowedTools converts an "allowed_tools" tool_choice into a supported Anthropic/Bedrock
+// format by filtering the tools slice to only the allowed subset and returning a plain
+// {"type":"auto"} or {"type":"any"} tool_choice based on the mode field.
+//
+// Bedrock (and the Anthropic API) do not support "allowed_tools" natively; restricting the
+// visible tools list achieves the same effect: the model can only call what it sees.
+func expandAllowedTools(tc map[string]interface{}, tools []AnthropicTool) (interface{}, []AnthropicTool) {
+	// Build set of allowed tool names.
+	allowed := map[string]bool{}
+	if list, ok := tc["tools"].([]interface{}); ok {
+		for _, item := range list {
+			if m, ok := item.(map[string]interface{}); ok {
+				if name, ok := m["name"].(string); ok && name != "" {
+					allowed[name] = true
+				}
+			}
+		}
+	}
+
+	// Filter tools to allowed subset (keep all if no names were specified).
+	filtered := tools
+	if len(allowed) > 0 {
+		filtered = make([]AnthropicTool, 0, len(allowed))
+		for _, t := range tools {
+			if allowed[t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+	}
+
+	// Map mode → tool_choice type.
+	choiceType := "auto"
+	if mode, _ := tc["mode"].(string); mode == "any" {
+		choiceType = "any"
+	}
+	return map[string]interface{}{"type": choiceType}, filtered
 }
 
 // convertToolCallsToAnthropicContent converts OpenAI tool_calls (from an assistant message)

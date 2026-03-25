@@ -451,3 +451,107 @@ class TestAnthropicToolsEdgeCases:
         )
 
         ResponseValidator.validate_chat_response(response)
+
+
+class TestAnthropicAllowedTools:
+    """Test allowed_tools tool_choice restriction (Anthropic-native feature via extra_body)"""
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_allowed_tools_constraint(self, openai_client, model):
+        """Only tools listed in allowed_tools should be called"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_docs",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What is the weather and search the docs?"}],
+            tools=tools,
+            extra_body={
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "tool", "name": "get_weather"}],
+                }
+            },
+            max_tokens=200,
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+        if response.choices[0].message.tool_calls:
+            names = [tc.function.name for tc in response.choices[0].message.tool_calls]
+            assert "search_docs" not in names, (
+                f"Forbidden tool 'search_docs' was called despite allowed_tools restriction. Got: {names}"
+            )
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_allowed_tools_multiple_allowed(self, openai_client, model):
+        """When multiple tools are allowed, only those can be called"""
+        tools = [
+            ToolDefinitions.get_weather_tool(),
+            ToolDefinitions.get_calculation_tool(),
+            ToolDefinitions.get_search_flights_tool(),
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "What's the weather in Paris and calculate 2+2?"}],
+            tools=tools,
+            extra_body={
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "any",
+                    "tools": [
+                        {"type": "tool", "name": "get_weather"},
+                        {"type": "tool", "name": "calculate"},
+                    ],
+                }
+            },
+            max_tokens=300,
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+        if response.choices[0].message.tool_calls:
+            names = [tc.function.name for tc in response.choices[0].message.tool_calls]
+            forbidden = [n for n in names if n == "search_flights"]
+            assert not forbidden, (
+                f"Forbidden tool 'search_flights' was called despite allowed_tools restriction. Got: {names}"
+            )
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_allowed_tools_none_mode(self, openai_client, model):
+        """allowed_tools with mode=auto should not force a tool call"""
+        tools = [ToolDefinitions.get_weather_tool()]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Just say hello, don't use any tools"}],
+            tools=tools,
+            extra_body={
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "tool", "name": "get_weather"}],
+                }
+            },
+            max_tokens=100,
+        )
+
+        ResponseValidator.validate_chat_response(response)
+        # With mode=auto the model may choose not to call any tool
+        assert response.choices[0].finish_reason in ("stop", "tool_calls")

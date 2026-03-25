@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,6 +56,44 @@ func TestMapToolChoice(t *testing.T) {
 		}
 		result := mapToolChoice(toolChoice)
 		assert.Nil(t, result)
+	})
+
+	// allowed_tools is passed through by mapToolChoice so that OpenAIToAnthropic
+	// can intercept and call expandAllowedTools afterwards.
+	t.Run("allowed_tools_passthrough", func(t *testing.T) {
+		toolChoice := map[string]interface{}{
+			"type": "allowed_tools",
+			"mode": "auto",
+			"tools": []interface{}{
+				map[string]interface{}{"type": "tool", "name": "get_weather"},
+			},
+		}
+		result := mapToolChoice(toolChoice)
+		require.NotNil(t, result)
+		m := result.(map[string]interface{})
+		// must come back unchanged so OpenAIToAnthropic can detect and expand it
+		assert.Equal(t, "allowed_tools", m["type"])
+	})
+
+	t.Run("anthropic_auto_object_passthrough", func(t *testing.T) {
+		toolChoice := map[string]interface{}{"type": "auto"}
+		result := mapToolChoice(toolChoice)
+		require.NotNil(t, result)
+		assert.Equal(t, toolChoice, result)
+	})
+
+	t.Run("anthropic_any_object_passthrough", func(t *testing.T) {
+		toolChoice := map[string]interface{}{"type": "any"}
+		result := mapToolChoice(toolChoice)
+		require.NotNil(t, result)
+		assert.Equal(t, toolChoice, result)
+	})
+
+	t.Run("anthropic_tool_object_passthrough", func(t *testing.T) {
+		toolChoice := map[string]interface{}{"type": "tool", "name": "my_func"}
+		result := mapToolChoice(toolChoice)
+		require.NotNil(t, result)
+		assert.Equal(t, toolChoice, result)
 	})
 }
 
@@ -128,6 +167,153 @@ func TestConvertOpenAIToolsToAnthropic(t *testing.T) {
 		result := convertOpenAIToolsToAnthropic(tools)
 		assert.Nil(t, result)
 	})
+}
+
+func TestExpandAllowedTools(t *testing.T) {
+	allTools := []AnthropicTool{
+		{Name: "get_weather"},
+		{Name: "search_docs"},
+		{Name: "calculate"},
+	}
+
+	t.Run("filters_to_allowed_subset_auto", func(t *testing.T) {
+		tc := map[string]interface{}{
+			"type": "allowed_tools",
+			"mode": "auto",
+			"tools": []interface{}{
+				map[string]interface{}{"type": "tool", "name": "get_weather"},
+			},
+		}
+		choice, tools := expandAllowedTools(tc, allTools)
+		m := choice.(map[string]interface{})
+		assert.Equal(t, "auto", m["type"])
+		require.Len(t, tools, 1)
+		assert.Equal(t, "get_weather", tools[0].Name)
+	})
+
+	t.Run("mode_any_maps_to_any", func(t *testing.T) {
+		tc := map[string]interface{}{
+			"type": "allowed_tools",
+			"mode": "any",
+			"tools": []interface{}{
+				map[string]interface{}{"name": "get_weather"},
+				map[string]interface{}{"name": "calculate"},
+			},
+		}
+		choice, tools := expandAllowedTools(tc, allTools)
+		m := choice.(map[string]interface{})
+		assert.Equal(t, "any", m["type"])
+		assert.Len(t, tools, 2)
+	})
+
+	t.Run("empty_allowed_list_keeps_all_tools", func(t *testing.T) {
+		tc := map[string]interface{}{
+			"type":  "allowed_tools",
+			"mode":  "auto",
+			"tools": []interface{}{},
+		}
+		choice, tools := expandAllowedTools(tc, allTools)
+		m := choice.(map[string]interface{})
+		assert.Equal(t, "auto", m["type"])
+		assert.Len(t, tools, 3) // unchanged
+	})
+}
+
+func TestOpenAIToAnthropic_AllowedToolsExpanded(t *testing.T) {
+	// allowed_tools must be expanded: only the allowed tool should remain in tools[],
+	// and tool_choice must become {"type":"auto"} (Bedrock-compatible).
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "test"}],
+		"tools": [
+			{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}},
+			{"type": "function", "function": {"name": "search_docs",  "parameters": {"type": "object", "properties": {}}}}
+		],
+		"tool_choice": {
+			"type": "allowed_tools",
+			"mode": "auto",
+			"tools": [{"type": "tool", "name": "get_weather"}]
+		},
+		"max_tokens": 200
+	}`
+
+	out, err := OpenAIToAnthropic([]byte(body), "")
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &req))
+
+	// tool_choice must be plain auto, not allowed_tools
+	tc, ok := req["tool_choice"].(map[string]interface{})
+	require.True(t, ok, "tool_choice should be present")
+	assert.Equal(t, "auto", tc["type"])
+	assert.Nil(t, tc["tools"], "tools key must not be present in converted tool_choice")
+
+	// only get_weather must remain in the tools array
+	tools, ok := req["tools"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	toolName := tools[0].(map[string]interface{})["name"]
+	assert.Equal(t, "get_weather", toolName)
+}
+
+func TestOpenAIToAnthropic_AllowedToolsViaExtraBody(t *testing.T) {
+	// extra_body["tool_choice"] path: same expansion must apply.
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "test"}],
+		"tools": [
+			{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}}},
+			{"type": "function", "function": {"name": "search_docs",  "parameters": {"type": "object", "properties": {}}}}
+		],
+		"extra_body": {
+			"tool_choice": {
+				"type": "allowed_tools",
+				"mode": "auto",
+				"tools": [{"type": "tool", "name": "get_weather"}]
+			}
+		},
+		"max_tokens": 200
+	}`
+
+	out, err := OpenAIToAnthropic([]byte(body), "")
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &req))
+
+	tc, ok := req["tool_choice"].(map[string]interface{})
+	require.True(t, ok, "tool_choice should be present")
+	assert.Equal(t, "auto", tc["type"])
+
+	tools, ok := req["tools"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "get_weather", tools[0].(map[string]interface{})["name"])
+}
+
+func TestOpenAIToAnthropic_ExtraBodyToolChoiceOverridesRegular(t *testing.T) {
+	// When both tool_choice and extra_body["tool_choice"] are set,
+	// extra_body takes precedence.
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [{"role": "user", "content": "test"}],
+		"tool_choice": "required",
+		"extra_body": {
+			"tool_choice": {"type": "none"}
+		},
+		"max_tokens": 100
+	}`
+
+	out, err := OpenAIToAnthropic([]byte(body), "")
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &req))
+
+	tc, ok := req["tool_choice"].(map[string]interface{})
+	require.True(t, ok, "tool_choice should be present")
+	assert.Equal(t, "none", tc["type"], "extra_body tool_choice should override regular tool_choice")
 }
 
 func TestConvertToolCallsToAnthropicContent(t *testing.T) {

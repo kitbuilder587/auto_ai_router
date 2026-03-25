@@ -121,9 +121,24 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 		anthropicReq.Tools = convertOpenAIToolsToAnthropic(req.Tools)
 	}
 
-	// Tool choice
+	// Tool choice: map standard OpenAI format first, then let extra_body override
+	// with Anthropic-native format (e.g. {"type":"allowed_tools",...}).
 	if req.ToolChoice != nil {
 		anthropicReq.ToolChoice = mapToolChoice(req.ToolChoice)
+	}
+	if req.ExtraBody != nil {
+		if tc, ok := req.ExtraBody["tool_choice"]; ok && tc != nil {
+			anthropicReq.ToolChoice = tc
+		}
+	}
+
+	// allowed_tools is not supported by Bedrock/Anthropic API.
+	// Convert it by filtering the tools array to only the allowed subset,
+	// then replacing tool_choice with {"type": mode} (auto or any).
+	if tc, ok := anthropicReq.ToolChoice.(map[string]interface{}); ok {
+		if tc["type"] == "allowed_tools" {
+			anthropicReq.ToolChoice, anthropicReq.Tools = expandAllowedTools(tc, anthropicReq.Tools)
+		}
 	}
 
 	// Messages (system messages are extracted to the top-level system field)
