@@ -2296,6 +2296,105 @@
       ],
       "title": "Total Cached Tokens",
       "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 120 },
+      "id": 811,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Input Tokens" }],
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
+          "fields": ["Value #A", "Value #B", "Value #C", "Value #D"],
+          "reducer": ["sum"],
+          "show": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (credential, model) (increase(auto_ai_router_input_tokens_total{instance=~\"$instance\",credential=~\"$credential\",model=~\"$model\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (credential, model) (increase(auto_ai_router_output_tokens_total{instance=~\"$instance\",credential=~\"$credential\",model=~\"$model\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (credential, model) (increase(auto_ai_router_cached_tokens_total{instance=~\"$instance\",credential=~\"$credential\",model=~\"$model\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (credential, model) (increase(auto_ai_router_reasoning_tokens_total{instance=~\"$instance\",credential=~\"$credential\",model=~\"$model\"}[$__range]))",
+          "format": "table",
+          "instant": true,
+          "refId": "D"
+        }
+      ],
+      "title": "Token Usage by Credential & Model",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "credential": 0,
+              "model": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5
+            },
+            "renameByName": {
+              "credential": "Credential",
+              "model": "Model",
+              "Value #A": "Input Tokens",
+              "Value #B": "Output Tokens",
+              "Value #C": "Cached Tokens",
+              "Value #D": "Reasoning Tokens"
+            }
+          }
+        }
+      ],
+      "type": "table"
     }
   ],
   "preload": false,
