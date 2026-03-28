@@ -53,12 +53,23 @@ func isImageFieldName(name string) bool {
 	return false
 }
 
+// collectedPart holds a fully-read multipart part so we can do two passes.
+type collectedPart struct {
+	header    textproto.MIMEHeader
+	fieldName string
+	filename  string
+	data      []byte
+}
+
 // RewriteImageEditMultipart rewrites a multipart/form-data body for /v1/images/edits:
 //  1. Fixes image parts whose Content-Type is "application/octet-stream" by
 //     detecting the actual image format from magic bytes and setting the correct
 //     Content-Type (image/png, image/jpeg, or image/webp) and filename.
 //  2. Strips the "response_format" field when stripResponseFormat is true
 //     (used for gpt-image-1 which rejects that parameter).
+//  3. Renames multiple "image" fields to "image[]" — when the client sends
+//     more than one image using the same field name "image", OpenAI requires
+//     the array syntax "image[]" instead.
 //
 // Returns the rewritten body bytes and the new Content-Type header value
 // (multipart/form-data with updated boundary).  On any parse error the original
@@ -74,10 +85,10 @@ func RewriteImageEditMultipart(body []byte, contentType string, stripResponseFor
 		return body, contentType
 	}
 
+	// --- First pass: collect all parts into memory. ---
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
-
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
+	var parts []collectedPart
+	imageCount := 0
 
 	for {
 		part, err := reader.NextPart()
@@ -85,26 +96,49 @@ func RewriteImageEditMultipart(body []byte, contentType string, stripResponseFor
 			break
 		}
 		if err != nil {
-			// Parse error — return original unchanged.
 			return body, contentType
 		}
 
 		fieldName := part.FormName()
-		partData, readErr := io.ReadAll(part)
+		data, readErr := io.ReadAll(part)
 		_ = part.Close()
 		if readErr != nil {
 			return body, contentType
 		}
+
+		if fieldName == "image" {
+			imageCount++
+		}
+
+		parts = append(parts, collectedPart{
+			header:    part.Header,
+			fieldName: fieldName,
+			filename:  part.FileName(),
+			data:      data,
+		})
+	}
+
+	// --- Second pass: write rewritten parts. ---
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	for _, p := range parts {
+		fieldName := p.fieldName
+		filename := p.filename
+		partData := p.data
 
 		// Skip response_format field when requested.
 		if stripResponseFormat && fieldName == "response_format" {
 			continue
 		}
 
-		// Check if this is an image field with octet-stream content type.
-		partContentType := part.Header.Get("Content-Type")
-		filename := part.FileName()
+		// Rename "image" → "image[]" when multiple images are present.
+		if fieldName == "image" && imageCount > 1 {
+			fieldName = "image[]"
+		}
 
+		// Fix octet-stream MIME type for image fields.
+		partContentType := p.header.Get("Content-Type")
 		if isImageFieldName(fieldName) && strings.EqualFold(strings.TrimSpace(partContentType), "application/octet-stream") {
 			if detected, ok := detectImageMIME(partData); ok {
 				partContentType = detected
@@ -130,7 +164,7 @@ func RewriteImageEditMultipart(body []byte, contentType string, stripResponseFor
 
 		// Copy any other headers from the original part (except the ones we
 		// just handled).
-		for key, vals := range part.Header {
+		for key, vals := range p.header {
 			canonKey := textproto.CanonicalMIMEHeaderKey(key)
 			if canonKey == "Content-Disposition" || canonKey == "Content-Type" {
 				continue

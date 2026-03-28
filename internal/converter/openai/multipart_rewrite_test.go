@@ -330,8 +330,74 @@ func TestRewriteImageEditMultipart_UnknownImageData_NotChanged(t *testing.T) {
 	}
 }
 
-func TestRewriteImageEditMultipart_MultipleImages(t *testing.T) {
-	// image[0] and image[1] both get corrected MIME types.
+func TestRewriteImageEditMultipart_MultipleImages_RenamedToArraySyntax(t *testing.T) {
+	// Python SDK sends multiple "image" fields; OpenAI requires "image[]".
+	body, ct := buildMultipart(t, []struct {
+		name        string
+		contentType string
+		filename    string
+		data        []byte
+	}{
+		{"image", "application/octet-stream", "", makePNG()},
+		{"image", "application/octet-stream", "", makeJPEG()},
+	})
+
+	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+
+	// Count occurrences of "image" vs "image[]" in the rewritten body.
+	_, newParams, _ := mime.ParseMediaType(newCT)
+	r := multipart.NewReader(bytes.NewReader(newBody), newParams["boundary"])
+	imageCount, imageArrayCount := 0, 0
+	for {
+		p, err := r.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("NextPart: %v", err)
+		}
+		_, _ = io.ReadAll(p)
+		_ = p.Close()
+		switch p.FormName() {
+		case "image":
+			imageCount++
+		case "image[]":
+			imageArrayCount++
+		}
+	}
+
+	if imageCount != 0 {
+		t.Errorf("found %d 'image' fields, want 0 (should all be renamed to 'image[]')", imageCount)
+	}
+	if imageArrayCount != 2 {
+		t.Errorf("found %d 'image[]' fields, want 2", imageArrayCount)
+	}
+}
+
+func TestRewriteImageEditMultipart_SingleImage_KeepsOriginalName(t *testing.T) {
+	// Single image must NOT be renamed to image[].
+	body, ct := buildMultipart(t, []struct {
+		name        string
+		contentType string
+		filename    string
+		data        []byte
+	}{
+		{"image", "application/octet-stream", "", makePNG()},
+	})
+
+	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	parts := parseResult(t, newBody, newCT)
+
+	if _, exists := parts["image"]; !exists {
+		t.Error("single 'image' field should keep its name, not be renamed to 'image[]'")
+	}
+	if _, exists := parts["image[]"]; exists {
+		t.Error("single image should not produce 'image[]' field")
+	}
+}
+
+func TestRewriteImageEditMultipart_MultipleImages_MIMEFixed(t *testing.T) {
+	// image[0] and image[1] already using array syntax — MIME types still get corrected.
 	body, ct := buildMultipart(t, []struct {
 		name        string
 		contentType string
