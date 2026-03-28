@@ -741,9 +741,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
-		// Converted provider requests are JSON even if the original OpenAI request
-		// was multipart/form-data (e.g. images.edit).
-		proxyReq.Header.Set("Content-Type", "application/json")
+		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
+		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
+		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,
+		// and non-multipart OpenAI) always send JSON.
+		originalContentType := r.Header.Get("Content-Type")
+		isMultipartPassthrough := conv.IsPassthrough() &&
+			strings.HasPrefix(strings.ToLower(originalContentType), "multipart/form-data")
+		if !isMultipartPassthrough {
+			proxyReq.Header.Set("Content-Type", "application/json")
+		} else if rewrittenCT := conv.RewrittenContentType(); rewrittenCT != "" {
+			// RequestFrom rewrote the multipart body (e.g. fixed image MIME types or
+			// stripped response_format).  The boundary has changed so we must update the
+			// Content-Type header to match the new boundary.
+			proxyReq.Header.Set("Content-Type", rewrittenCT)
+		}
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)

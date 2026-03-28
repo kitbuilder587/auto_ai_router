@@ -31,6 +31,9 @@ type ProviderConverter struct {
 	// GeminiEmbeddingToOpenAI can estimate prompt_tokens when the upstream
 	// API (Gemini batchEmbedContents) does not return token statistics.
 	inputTexts []string
+	// rewrittenContentType is set by RequestFrom when a multipart body is rewritten
+	// (e.g. for image edits).  Empty string means the original Content-Type is still valid.
+	rewrittenContentType string
 }
 
 // New creates a ProviderConverter for the given provider and request mode.
@@ -81,7 +84,28 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, and others: convert non-function tools
 		// (web_search, web_search_preview) to web_search_options, then pass through.
-		return openaiconv.ConvertWebSearchTools(body), nil
+		body = openaiconv.ConvertWebSearchTools(body)
+
+		// gpt-image-1 family does not support the response_format parameter in
+		// /v1/images/generations — strip it before forwarding to avoid a 400.
+		if c.mode.IsImageGeneration && openaiconv.IsGptImage1Model(c.mode.ModelID) {
+			body = openaiconv.StripResponseFormat(body)
+		}
+
+		// /v1/images/edits uses multipart/form-data.  Rewrite the multipart to:
+		//   1. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
+		//   2. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
+		if c.mode.IsImageEdit && strings.Contains(strings.ToLower(c.mode.ContentType), "multipart/form-data") {
+			stripRF := openaiconv.IsGptImage1Model(c.mode.ModelID)
+			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, stripRF)
+			// Only replace when something actually changed (boundary or content differs).
+			if newCT != c.mode.ContentType {
+				c.rewrittenContentType = newCT
+			}
+			body = newBody
+		}
+
+		return body, nil
 	}
 }
 
@@ -179,6 +203,13 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 		// OpenAI and Proxy: URL constructed by proxy based on cred.BaseURL + path
 		return ""
 	}
+}
+
+// RewrittenContentType returns the new Content-Type header value when RequestFrom rewrote
+// a multipart body (e.g. for image edits with fixed MIME types or stripped fields).
+// Returns an empty string when the original Content-Type is still valid.
+func (c *ProviderConverter) RewrittenContentType() string {
+	return c.rewrittenContentType
 }
 
 // IsPassthrough returns true if this provider requires no request/response transformation.

@@ -291,3 +291,17 @@ func dropNonFunctionToolChoice(data map[string]any) bool {
 	}
 	return false
 }
+
+// IsGptImage1Model reports whether the given model ID belongs to the gpt-image-1 family.
+// This family does not support the response_format parameter in /v1/images/generations.
+func IsGptImage1Model(modelID string) bool {
+	return matchModelFamily(modelID, "gpt-image-1")
+}
+
+// StripResponseFormat removes the response_format field from a JSON request body.
+// Used for model families (e.g. gpt-image-1) that reject this parameter.
+func StripResponseFormat(body []byte) []byte {
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"response_format"},
+	})
+}
