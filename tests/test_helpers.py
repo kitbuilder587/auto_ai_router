@@ -21,7 +21,8 @@ class TestModels:
     # OpenAI models
     OPENAI_MODELS = [
         "gpt-4o-mini",
-        # "gpt-5-mini",
+        "gpt-5.3-codex",
+        "gpt-5-mini",
     ]
 
     # Google Vertex AI models
@@ -53,6 +54,12 @@ class TestModels:
     VERTEX_IMAGE_MODELS = [
         "imagen-4.0-fast-generate-001",
         "imagen-3.0-fast-generate-001",
+    ]
+
+    GEMINI_IMAGE_MODELS = [
+        "gemini-2.5-flash-image",
+        "gemini-3-pro-image-preview",
+        "gemini-3.1-flash-image-preview"
     ]
 
     # Embedding models

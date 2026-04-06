@@ -111,6 +111,53 @@ The router also converts these special tool types:
 | `"required"`                                       | `{"type": "any"}`                |
 | `{"type": "function", "function": {"name": "fn"}}` | `{"type": "tool", "name": "fn"}` |
 
+#### Restricting allowed tools
+
+Anthropic's `allowed_tools` tool_choice type is not supported by the Anthropic API or AWS Bedrock. The router emulates the behaviour by filtering the `tools` array to only the listed tools before forwarding the request.
+
+Pass it via `extra_body` (the OpenAI Python SDK merges `extra_body` into the top-level request body):
+
+```python
+response = client.chat.completions.create(
+    model="claude-sonnet-4-20250514",
+    messages=[{"role": "user", "content": "What is the weather and search the docs?"}],
+    tools=[
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_docs",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ],
+    extra_body={
+        "tool_choice": {
+            "type": "allowed_tools",
+            "mode": "auto",  # "auto" or "any"
+            "tools": [{"type": "tool", "name": "get_weather"}],
+        }
+    },
+    max_tokens=200,
+)
+```
+
+The router converts this to an equivalent Anthropic-compatible request:
+
+- `tools` array is filtered to `[get_weather]` only — `search_docs` is removed
+- `tool_choice` becomes `{"type": "auto"}` (or `{"type": "any"}` when `mode` is `"any"`)
+
+| `mode`   | Resulting `tool_choice` | Behaviour                                  |
+| -------- | ----------------------- | ------------------------------------------ |
+| `"auto"` | `{"type": "auto"}`      | Model may or may not call a tool           |
+| `"any"`  | `{"type": "any"}`       | Model must call one of the remaining tools |
+
 ### Extended Thinking
 
 The router supports Anthropic's extended thinking for reasoning-capable models.

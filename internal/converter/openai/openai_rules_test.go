@@ -274,12 +274,58 @@ func TestReplaceBodyParam_O3(t *testing.T) {
 				t.Error("top_p should be removed for o3")
 			}
 
-			// Should be preserved (o3 supports these unlike o1)
-			if _, ok := result["frequency_penalty"]; !ok {
-				t.Error("frequency_penalty should be preserved for o3")
+			// o3 also rejects frequency_penalty, presence_penalty, logprobs
+			for _, key := range []string{"frequency_penalty"} {
+				if _, ok := result[key]; ok {
+					t.Errorf("%s should be removed for o3", key)
+				}
 			}
+			// Should be preserved
 			if _, ok := result["reasoning_effort"]; !ok {
 				t.Error("reasoning_effort should be preserved for o3")
+			}
+		})
+	}
+}
+
+func TestReplaceBodyParam_O4(t *testing.T) {
+	models := []string{"o4-mini", "o4"}
+
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			body := makeBody(t, map[string]any{
+				"model":             model,
+				"max_tokens":        1000,
+				"temperature":       0.7,
+				"top_p":             0.9,
+				"frequency_penalty": 0.5,
+				"presence_penalty":  0.3,
+				"logprobs":          true,
+				"top_logprobs":      5,
+				"reasoning_effort":  "high",
+				"messages":          []any{},
+			})
+
+			result := bodyToMap(t, ReplaceBodyParam(model, body))
+
+			// Should be renamed
+			if _, ok := result["max_tokens"]; ok {
+				t.Error("max_tokens should be renamed")
+			}
+			if v := result["max_completion_tokens"]; v != float64(1000) {
+				t.Errorf("max_completion_tokens = %v, want 1000", v)
+			}
+
+			// Should be removed
+			for _, key := range []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs", "top_logprobs"} {
+				if _, ok := result[key]; ok {
+					t.Errorf("%s should be removed for o4", key)
+				}
+			}
+
+			// Should be preserved
+			if _, ok := result["reasoning_effort"]; !ok {
+				t.Error("reasoning_effort should be preserved for o4")
 			}
 		})
 	}
@@ -447,9 +493,9 @@ func TestReplaceBodyParam_WithProviderPrefixes(t *testing.T) {
 		shouldRename bool
 	}{
 		{"openai/o1-mini", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},
-		{"openai:o3-mini", []string{"temperature", "top_p"}, true},
-		{"openai/gpt-5_chat", []string{"temperature", "top_p"}, true},
-		{"vertex/gpt-5.1", []string{"temperature", "top_p"}, true},
+		{"openai:o3-mini", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
+		{"openai/gpt-5_chat", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true}, //
+		{"vertex/gpt-5.1", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},    //
 		{"OpenAI/O1-Preview", []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs"}, true},
 	}
 
@@ -534,5 +580,150 @@ func TestReplaceModelInBody(t *testing.T) {
 				t.Errorf("model = %v, want %v", m["model"], tt.wantModel)
 			}
 		})
+	}
+}
+
+// --- ConvertWebSearchTools tests ---
+
+// TestConvertWebSearchTools_WebSearchPassthrough verifies that web_search_preview
+// is passed through as-is in the tools array for any model.
+func TestConvertWebSearchTools_WebSearchPassthrough(t *testing.T) {
+	for _, model := range []string{"gpt-4o-search-preview", "gpt-4o-mini", "gpt-5-mini", "gpt-4o"} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","tools":[{"type":"web_search_preview"}],"tool_choice":"auto"}`)
+			result := bodyToMap(t, ConvertWebSearchTools(body))
+
+			if _, ok := result["web_search_options"]; ok {
+				t.Error("web_search_options must NOT be added (no conversion)")
+			}
+			tools, ok := result["tools"].([]interface{})
+			if !ok {
+				t.Fatal("tools should remain in the array")
+			}
+			if len(tools) != 1 {
+				t.Errorf("expected 1 tool, got %d", len(tools))
+			}
+			toolMap := tools[0].(map[string]interface{})
+			if toolMap["type"] != "web_search_preview" {
+				t.Errorf("expected web_search_preview tool, got %v", toolMap["type"])
+			}
+		})
+	}
+}
+
+// TestConvertWebSearchTools_WebSearchWithFunctions verifies mixed tool arrays:
+// both web_search_preview and function tools are kept.
+func TestConvertWebSearchTools_WebSearchWithFunctions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-search-preview","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added")
+	}
+	if _, ok := result["tool_choice"]; !ok {
+		t.Error("tool_choice should remain")
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should be an array")
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools (web_search_preview + function), got %d", len(tools))
+	}
+}
+
+// TestConvertWebSearchTools_NonSearchModelWithFunctions: web_search_preview and
+// function tools are both kept regardless of model.
+func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added")
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should remain")
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(tools))
+	}
+	if _, ok := result["tool_choice"]; !ok {
+		t.Error("tool_choice should remain")
+	}
+}
+
+// TestConvertWebSearchTools_NoWebSearch verifies that bodies with only function
+// tools are returned unchanged.
+func TestConvertWebSearchTools_NoWebSearch(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"get_weather"}}]}`)
+	result := ConvertWebSearchTools(body)
+
+	if string(result) != string(body) {
+		t.Error("body should be unchanged when no web_search tools")
+	}
+}
+
+func TestConvertWebSearchTools_NoTools(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := ConvertWebSearchTools(body)
+
+	if string(result) != string(body) {
+		t.Error("body should be unchanged when no tools field")
+	}
+}
+
+// TestConvertWebSearchTools_BothWebSearchTypes: both web_search and web_search_preview
+// are passed through as-is.
+func TestConvertWebSearchTools_BothWebSearchTypes(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini-search-preview","tools":[{"type":"web_search"},{"type":"web_search_preview"}]}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added")
+	}
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should remain")
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected 2 tools, got %d", len(tools))
+	}
+}
+
+func TestConvertWebSearchTools_PreservesExistingWebSearchOptions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-search-preview","tools":[{"type":"web_search_preview"}],"web_search_options":{"search_context_size":"high"}}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	// web_search_options should be preserved if already present (not touched)
+	opts, ok := result["web_search_options"].(map[string]interface{})
+	if !ok {
+		t.Fatal("web_search_options should be preserved if already set")
+	}
+	if opts["search_context_size"] != "high" {
+		t.Error("existing web_search_options should be preserved")
+	}
+}
+
+// TestConvertWebSearchTools_OtherNonFunctionToolsDropped: non-web-search
+// non-function tools (computer_use, code_execution, etc.) must be dropped
+// for OpenAI Chat Completions.
+func TestConvertWebSearchTools_OtherNonFunctionToolsDropped(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","tools":[{"type":"computer_use"},{"type":"code_execution"},{"type":"function","function":{"name":"my_func"}}]}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should remain (function tool must be kept)")
+	}
+	if len(tools) != 1 {
+		t.Errorf("expected 1 function tool, got %d (non-function tools must be dropped)", len(tools))
+	}
+	toolMap := tools[0].(map[string]interface{})
+	if toolMap["type"] != "function" {
+		t.Errorf("expected function tool, got %v", toolMap["type"])
+	}
+	if _, ok := result["web_search_options"]; ok {
+		t.Error("web_search_options must NOT be added (no web_search tools)")
 	}
 }

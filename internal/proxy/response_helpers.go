@@ -6,6 +6,9 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"mime"
+	"mime/multipart"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -58,10 +61,15 @@ func extractTokensFromStreamingChunk(chunk string) int {
 // extractMetadataFromBody extracts the model ID and session ID from the request body
 // and ensures stream_options.include_usage is true for streaming requests
 // Returns: model, streaming, sessionID, body
-func extractMetadataFromBody(body []byte) (string, bool, string, []byte) {
+func extractMetadataFromBody(body []byte, contentType string) (string, bool, string, []byte) {
 	// Check for empty body
 	if len(body) == 0 {
 		return "", false, "", body
+	}
+
+	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		model, sessionID := extractMetadataFromMultipartBody(body, contentType)
+		return model, false, sessionID, body
 	}
 
 	// Parse JSON body
@@ -137,6 +145,87 @@ func extractMetadataFromBody(body []byte) (string, bool, string, []byte) {
 	}
 
 	return model, stream, sessionID, modifiedBody
+}
+
+func extractMetadataFromMultipartBody(body []byte, contentType string) (string, string) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return "", ""
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return "", ""
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var model, sessionID string
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			break
+		}
+		if part.FileName() != "" {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(part, 1024*1024))
+		if err != nil {
+			continue
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			continue
+		}
+		switch part.FormName() {
+		case "model":
+			model = value
+		case "session_id", "user":
+			if sessionID == "" {
+				sessionID = value
+			}
+		}
+	}
+	return model, sessionID
+}
+
+func extractImageCountFromBody(body []byte, contentType string) int {
+	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		_, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return 1
+		}
+		boundary := params["boundary"]
+		if boundary == "" {
+			return 1
+		}
+		reader := multipart.NewReader(bytes.NewReader(body), boundary)
+		for {
+			part, err := reader.NextPart()
+			if err != nil {
+				break
+			}
+			if part.FileName() != "" || part.FormName() != "n" {
+				continue
+			}
+			data, err := io.ReadAll(io.LimitReader(part, 64))
+			if err != nil {
+				break
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err == nil && n > 0 {
+				return n
+			}
+			break
+		}
+		return 1
+	}
+
+	var imgReq struct {
+		N *int `json:"n"`
+	}
+	if err := json.Unmarshal(body, &imgReq); err == nil && imgReq.N != nil && *imgReq.N > 0 {
+		return *imgReq.N
+	}
+	return 1
 }
 
 // decodeResponseBody decodes the response body based on Content-Encoding

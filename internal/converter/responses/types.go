@@ -146,9 +146,11 @@ type Usage struct {
 // InputDetails represents details of input token usage.
 type InputDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	AudioTokens  int `json:"audio_tokens,omitempty"`
 }
 
 // OutputDetails represents details of output token usage.
 type OutputDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens"`
+	AudioTokens     int `json:"audio_tokens,omitempty"`
 }

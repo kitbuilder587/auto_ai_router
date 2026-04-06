@@ -1,16 +1,98 @@
 package vertex
 
 import (
+	"fmt"
 	"strings"
 
 	"google.golang.org/genai"
 )
 
-// convertMapToGenaiSchema recursively converts a map[string]interface{} (JSON Schema) to *genai.Schema.
-// This is used for response schemas to maintain structured format instead of raw JSON.
-func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
+// resolveRef resolves a $ref pointer within a root schema's $defs or definitions.
+func resolveRef(ref string, rootSchema map[string]interface{}) map[string]interface{} {
+	// Handle "#/$defs/Name" or "#/definitions/Name"
+	parts := strings.Split(ref, "/")
+	if len(parts) != 3 || parts[0] != "#" {
+		return nil
+	}
+	section := parts[1] // "$defs" or "definitions"
+	name := parts[2]
+
+	if defs, ok := rootSchema[section].(map[string]interface{}); ok {
+		if def, ok := defs[name].(map[string]interface{}); ok {
+			return def
+		}
+	}
+	return nil
+}
+
+// mergeAllOf merges multiple schemas from allOf into one combined schema.
+func mergeAllOf(schemas []interface{}, rootSchema map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{})
+	mergedProps := make(map[string]interface{})
+	var mergedRequired []interface{}
+
+	for _, item := range schemas {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Resolve $ref if present
+		if ref, ok := itemMap["$ref"].(string); ok {
+			if resolved := resolveRef(ref, rootSchema); resolved != nil {
+				itemMap = resolved
+			}
+		}
+		// Merge properties
+		if props, ok := itemMap["properties"].(map[string]interface{}); ok {
+			for k, v := range props {
+				mergedProps[k] = v
+			}
+		}
+		// Merge required
+		if req, ok := itemMap["required"].([]interface{}); ok {
+			mergedRequired = append(mergedRequired, req...)
+		}
+		// Copy type if present
+		if t, ok := itemMap["type"]; ok {
+			merged["type"] = t
+		}
+	}
+
+	if len(mergedProps) > 0 {
+		merged["properties"] = mergedProps
+	}
+	if len(mergedRequired) > 0 {
+		merged["required"] = mergedRequired
+	}
+	return merged
+}
+
+// convertMapToGenaiSchemaWithRoot recursively converts a JSON Schema to *genai.Schema,
+// with access to the root schema for $ref resolution.
+func convertMapToGenaiSchemaWithRoot(data map[string]interface{}, rootSchema map[string]interface{}) *genai.Schema {
 	if data == nil {
 		return nil
+	}
+
+	// resolve $ref before processing
+	if ref, ok := data["$ref"].(string); ok {
+		if resolved := resolveRef(ref, rootSchema); resolved != nil {
+			return convertMapToGenaiSchemaWithRoot(resolved, rootSchema)
+		}
+	}
+
+	//  handle allOf by merging sub-schemas
+	if allOf, ok := data["allOf"].([]interface{}); ok {
+		merged := mergeAllOf(allOf, rootSchema)
+		// Copy other fields from data that aren't allOf
+		for k, v := range data {
+			if k != "allOf" {
+				if _, exists := merged[k]; !exists {
+					merged[k] = v
+				}
+			}
+		}
+		return convertMapToGenaiSchemaWithRoot(merged, rootSchema)
 	}
 
 	schema := &genai.Schema{}
@@ -36,6 +118,8 @@ func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
 		for _, e := range enumVals {
 			if str, ok := e.(string); ok {
 				enumStrs = append(enumStrs, str)
+			} else {
+				enumStrs = append(enumStrs, fmt.Sprintf("%v", e))
 			}
 		}
 		if len(enumStrs) > 0 {
@@ -61,14 +145,14 @@ func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
 		schema.Properties = make(map[string]*genai.Schema)
 		for propName, propVal := range properties {
 			if propMap, ok := propVal.(map[string]interface{}); ok {
-				schema.Properties[propName] = convertMapToGenaiSchema(propMap)
+				schema.Properties[propName] = convertMapToGenaiSchemaWithRoot(propMap, rootSchema)
 			}
 		}
 	}
 
 	// Convert items for array types
 	if items, ok := data["items"].(map[string]interface{}); ok {
-		schema.Items = convertMapToGenaiSchema(items)
+		schema.Items = convertMapToGenaiSchemaWithRoot(items, rootSchema)
 	}
 
 	// Convert anyOf
@@ -76,7 +160,7 @@ func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
 		schemas := make([]*genai.Schema, 0, len(anyOf))
 		for _, item := range anyOf {
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				schemas = append(schemas, convertMapToGenaiSchema(itemMap))
+				schemas = append(schemas, convertMapToGenaiSchemaWithRoot(itemMap, rootSchema))
 			}
 		}
 		if len(schemas) > 0 {
@@ -84,12 +168,30 @@ func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
 		}
 	}
 
-	// Convert format (e.g., "email", "date", etc.)
+	// handle oneOf (same as anyOf for Vertex)
+	if oneOf, ok := data["oneOf"].([]interface{}); ok {
+		schemas := make([]*genai.Schema, 0, len(oneOf))
+		for _, item := range oneOf {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				schemas = append(schemas, convertMapToGenaiSchemaWithRoot(itemMap, rootSchema))
+			}
+		}
+		if len(schemas) > 0 {
+			// Vertex doesn't have OneOf, use AnyOf as closest equivalent
+			if schema.AnyOf == nil {
+				schema.AnyOf = schemas
+			} else {
+				schema.AnyOf = append(schema.AnyOf, schemas...)
+			}
+		}
+	}
+
+	// Convert format
 	if format, ok := data["format"].(string); ok {
 		schema.Format = format
 	}
 
-	// Convert pattern (regex for string validation)
+	// Convert pattern
 	if pattern, ok := data["pattern"].(string); ok {
 		schema.Pattern = pattern
 	}
@@ -144,6 +246,15 @@ func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
 	}
 
 	return schema
+}
+
+// convertMapToGenaiSchema recursively converts a map[string]interface{} (JSON Schema) to *genai.Schema.
+// This is used for response schemas to maintain structured format instead of raw JSON.
+func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
+	if data == nil {
+		return nil
+	}
+	return convertMapToGenaiSchemaWithRoot(data, data) // use data itself as root for $ref resolution
 }
 
 // convertOpenAIParamsToGenaiSchema converts OpenAI parameter schema to genai.Schema.

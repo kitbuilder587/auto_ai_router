@@ -170,15 +170,17 @@ func outputToInputItems(output []OutputItem) []interface{} {
 			for _, c := range item.Content {
 				switch c.Type {
 				case "output_text":
+					// Keep output_text type: valid for assistant-role messages in both
+					// the native Responses API (codex passthrough) and is handled by
+					// convertContentParts for the Chat Completions conversion path.
 					content = append(content, map[string]interface{}{
-						"type": "input_text",
+						"type": "output_text",
 						"text": c.Text,
 					})
 				case "output_refusal":
-					// Refusals are echoed back as plain input text.
 					content = append(content, map[string]interface{}{
-						"type": "input_text",
-						"text": c.Refusal,
+						"type":    "output_refusal",
+						"refusal": c.Refusal,
 					})
 				}
 			}
@@ -199,11 +201,101 @@ func outputToInputItems(output []OutputItem) []interface{} {
 	return items
 }
 
-// IsCodexModel returns true when the model name indicates a codex model.
-// Codex models natively support the Responses API endpoint and should be
-// forwarded without converting to Chat Completions format.
-func IsCodexModel(modelID string) bool {
-	return strings.Contains(strings.ToLower(modelID), "codex")
+// PrepareCodexPassthrough strips proxy-internal fields and normalises the
+// request body so it is accepted by OpenAI's native /v1/responses endpoint.
+//
+// Normalizations applied (in one JSON round-trip):
+//  1. Strip store / metadata / ttl (handled by the proxy, not forwarded).
+//  2. Strip previous_response_id when prevEntryHandled=true (history already
+//     injected into input by PrependHistoryToInput).
+//  3. input: single message object → wrapped in a one-element array.
+//  4. instructions: array of messages → content joined as a plain string.
+//  5. tools: nested Chat Completions format ({function:{name:...}}) →
+//     flat Responses API format ({name:...}) for function-type tools.
+func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+
+	// 1 & 2. Strip proxy-internal and conditionally previous_response_id.
+	delete(raw, "store")
+	delete(raw, "metadata")
+	delete(raw, "ttl")
+	if prevEntryHandled {
+		delete(raw, "previous_response_id")
+	}
+
+	// 3. Normalize input: single dict → one-element array.
+	if inputVal, ok := raw["input"]; ok {
+		if inputMap, ok := inputVal.(map[string]interface{}); ok {
+			raw["input"] = []interface{}{inputMap}
+		}
+	}
+
+	// 4. Normalize instructions: array → plain string (native API requires string).
+	if instVal, ok := raw["instructions"]; ok {
+		if instArr, ok := instVal.([]interface{}); ok {
+			var parts []string
+			for _, item := range instArr {
+				if m, ok := item.(map[string]interface{}); ok {
+					if content, ok := m["content"].(string); ok && content != "" {
+						parts = append(parts, content)
+					}
+				}
+			}
+			if len(parts) > 0 {
+				raw["instructions"] = strings.Join(parts, "\n")
+			} else {
+				delete(raw, "instructions")
+			}
+		}
+	}
+
+	// 4.5. Drop reasoning.effort="none" for native passthrough.
+	// OpenAI Responses API rejects reasoning.effort on non-reasoning models such as
+	// gpt-4o-mini, while "none" is semantically equivalent to omitting reasoning.
+	if reasoningVal, ok := raw["reasoning"]; ok {
+		if reasoningMap, ok := reasoningVal.(map[string]interface{}); ok {
+			if effort, ok := reasoningMap["effort"].(string); ok && effort == "none" {
+				delete(raw, "reasoning")
+			}
+		}
+	}
+
+	// 5. Normalize tools: nested Chat Completions function format → flat Responses API format.
+	// Input:  {type:"function", function:{name:"...", description:"...", parameters:{...}}}
+	// Output: {type:"function", name:"...", description:"...", parameters:{...}}
+	if toolsVal, ok := raw["tools"]; ok {
+		if toolsArr, ok := toolsVal.([]interface{}); ok {
+			normalized := make([]interface{}, len(toolsArr))
+			for i, t := range toolsArr {
+				toolMap, ok := t.(map[string]interface{})
+				if !ok {
+					normalized[i] = t
+					continue
+				}
+				if toolMap["type"] == "function" {
+					if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
+						flat := map[string]interface{}{"type": "function"}
+						for k, v := range funcDef {
+							flat[k] = v
+						}
+						normalized[i] = flat
+						continue
+					}
+				}
+				normalized[i] = t
+			}
+			raw["tools"] = normalized
+		}
+	}
+
+	result, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 // IsResponsesAPI checks if the body is a Responses API request.
@@ -248,9 +340,11 @@ func RequestToChat(body []byte) ([]byte, error) {
 	// Set messages
 	raw["messages"] = messages
 
-	// max_output_tokens -> max_completion_tokens
+	// max_output_tokens -> max_tokens (universal Chat Completions parameter).
+	// Reasoning models (o1/o3/o4/gpt-5) will have this renamed to
+	// max_completion_tokens by openai.ReplaceBodyParam applied after conversion.
 	if maxOut, ok := raw["max_output_tokens"]; ok {
-		raw["max_completion_tokens"] = maxOut
+		raw["max_tokens"] = maxOut
 	}
 
 	// Convert tools from flat to nested format
@@ -354,6 +448,12 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 		default:
 			// Flush any pending tool calls before a regular message
 			flushToolCalls()
+			// only convert items that have a "role" field (messages).
+			// Skip unrecognized input item types (e.g. item_reference) to avoid
+			// sending malformed messages to Chat Completions providers.
+			if _, hasRole := itemMap["role"]; !hasRole && itemType != "" && itemType != "message" {
+				continue
+			}
 			msg, err := convertMessage(itemMap)
 			if err != nil {
 				return nil, err
@@ -463,8 +563,9 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 			result = append(result, entry)
 
 		default:
-			// Pass through unknown types as-is
-			result = append(result, part)
+			// skip unknown content part types silently.
+			// Passing unknown types through would cause provider rejection.
+			continue
 		}
 	}
 	return result, nil
@@ -529,9 +630,11 @@ func convertTools(raw map[string]interface{}) error {
 		toolType, _ := toolMap["type"].(string)
 
 		if toolType != "function" {
-			// Non-function tools (web_search, web_search_preview, computer_use, etc.)
-			// are passed through as-is. Provider-specific converters downstream
-			// (Vertex, Anthropic, OpenAI) handle mapping them to the correct format.
+			// Non-function tools (web_search_preview, computer_use, google_search_retrieval,
+			// code_execution, etc.) are Responses-API built-in constructs.
+			// Pass them through as-is: provider-specific converters downstream
+			// (Vertex, Anthropic, OpenAI) know which tools they support and will
+			// map or drop them accordingly.
 			converted = append(converted, toolMap)
 			continue
 		}
@@ -597,13 +700,17 @@ func convertToolChoice(raw map[string]interface{}) error {
 		return nil
 	}
 
-	// Non-function tool_choice types (e.g. web_search, web_search_preview)
-	// are passed through as-is for provider-specific handling.
+	// Non-function tool_choice types (e.g. web_search_preview, file_search) reference
+	// Responses-API built-in tools.  Pass them through: provider-specific converters
+	// downstream (Vertex, Anthropic, OpenAI) handle what they support and ignore
+	// what they don't.
 	return nil
 }
 
 // convertReasoning extracts reasoning.effort and sets it as top-level reasoning_effort.
 // Skips "none" effort (equivalent to no reasoning) and empty values.
+// Note: reasoning.generate_summary is a Responses-API-only field with no Chat Completions
+// equivalent — it is intentionally not forwarded.
 func convertReasoning(raw map[string]interface{}) {
 	reasoning, ok := raw["reasoning"]
 	if !ok {
@@ -660,6 +767,8 @@ func convertTextFormat(raw map[string]interface{}) {
 }
 
 // deleteResponsesFields removes Responses-API-only fields from the request.
+// comprehensive list of Responses-only fields that must not
+// leak to Chat Completions providers.
 func deleteResponsesFields(raw map[string]interface{}) {
 	delete(raw, "input")
 	delete(raw, "instructions")
@@ -676,4 +785,6 @@ func deleteResponsesFields(raw map[string]interface{}) {
 	delete(raw, "truncation")
 	delete(raw, "safety_identifier")
 	delete(raw, "service_tier")
+	delete(raw, "background")
+	delete(raw, "prompt")
 }

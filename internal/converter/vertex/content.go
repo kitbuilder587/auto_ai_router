@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -58,6 +59,11 @@ func convertContentToParts(content interface{}) []*genai.Part {
 				}
 				data, ok := audioData["data"].(string)
 				if !ok {
+					return nil
+				}
+
+				// check base64 payload size before decoding
+				if len(data) > 20*1024*1024 {
 					return nil
 				}
 
@@ -143,6 +149,10 @@ func convertContentToParts(content interface{}) []*genai.Part {
 			}
 		}
 		return parts
+	}
+	// use json.Marshal instead of fmt.Sprintf for structured content
+	if data, err := json.Marshal(content); err == nil {
+		return []*genai.Part{{Text: string(data)}}
 	}
 	return []*genai.Part{{Text: fmt.Sprintf("%v", content)}}
 }

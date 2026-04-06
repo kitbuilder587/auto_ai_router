@@ -605,14 +605,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Track embeddings and image generation requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
-	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
+	isImageGeneration := strings.Contains(r.URL.Path, "/images/generations")
+	isImageEdit := strings.Contains(r.URL.Path, "/images/edits")
+	logCtx.IsImageGeneration = isImageGeneration || isImageEdit
 	if logCtx.IsImageGeneration {
-		var imgReq struct {
-			N *int `json:"n"`
-		}
-		if err := json.Unmarshal(body, &imgReq); err == nil && imgReq.N != nil {
-			logCtx.ImageCount = *imgReq.N
-		} else {
+		logCtx.ImageCount = extractImageCountFromBody(body, r.Header.Get("Content-Type"))
+		if logCtx.ImageCount <= 0 {
 			logCtx.ImageCount = 1
 		}
 	}
@@ -670,9 +668,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// modelID (alias) is used for credential selection and rate limiting.
 		conv = converter.New(cred.Type, converter.RequestMode{
 			IsImageGeneration: logCtx.IsImageGeneration,
+			IsImageEdit:       isImageEdit,
 			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
 			ModelID:           realModelID,
+			ContentType:       r.Header.Get("Content-Type"),
 		})
 
 		// Convert request body to provider format
@@ -741,6 +741,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
+		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
+		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
+		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,
+		// and non-multipart OpenAI) always send JSON.
+		originalContentType := r.Header.Get("Content-Type")
+		isMultipartPassthrough := conv.IsPassthrough() &&
+			strings.HasPrefix(strings.ToLower(originalContentType), "multipart/form-data")
+		if !isMultipartPassthrough {
+			proxyReq.Header.Set("Content-Type", "application/json")
+		} else if rewrittenCT := conv.RewrittenContentType(); rewrittenCT != "" {
+			// RequestFrom rewrote the multipart body (e.g. fixed image MIME types or
+			// stripped response_format).  The boundary has changed so we must update the
+			// Content-Type header to match the new boundary.
+			proxyReq.Header.Set("Content-Type", rewrittenCT)
+		}
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)

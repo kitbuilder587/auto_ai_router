@@ -8,15 +8,18 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	openaiconv "github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 )
 
 // RequestMode holds context parameters for a conversion session.
 type RequestMode struct {
 	IsImageGeneration bool   // true for /images/generations requests
+	IsImageEdit       bool   // true for /images/edits requests
 	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
 	ModelID           string // e.g. "gemini-2.0-flash", "claude-opus-4-5"
+	ContentType       string // original request content type (needed for multipart endpoints)
 }
 
 // ProviderConverter performs request/response conversion for a specific provider.
@@ -28,6 +31,9 @@ type ProviderConverter struct {
 	// GeminiEmbeddingToOpenAI can estimate prompt_tokens when the upstream
 	// API (Gemini batchEmbedContents) does not return token statistics.
 	inputTexts []string
+	// rewrittenContentType is set by RequestFrom when a multipart body is rewritten
+	// (e.g. for image edits).  Empty string means the original Content-Type is still valid.
+	rewrittenContentType string
 }
 
 // New creates a ProviderConverter for the given provider and request mode.
@@ -63,7 +69,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.ModelID)
+		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
 	case config.ProviderTypeAnthropic:
 		// Anthropic does not support image generation
 		if c.mode.IsImageGeneration {
@@ -76,7 +82,29 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
 	default:
-		// ProviderTypeOpenAI, ProviderTypeProxy, and others: pass through unchanged
+		// ProviderTypeOpenAI, ProviderTypeProxy, and others: convert non-function tools
+		// (web_search, web_search_preview) to web_search_options, then pass through.
+		body = openaiconv.ConvertWebSearchTools(body)
+
+		// gpt-image-1 family does not support the response_format parameter in
+		// /v1/images/generations — strip it before forwarding to avoid a 400.
+		if c.mode.IsImageGeneration && openaiconv.IsGptImage1Model(c.mode.ModelID) {
+			body = openaiconv.StripResponseFormat(body)
+		}
+
+		// /v1/images/edits uses multipart/form-data.  Rewrite the multipart to:
+		//   1. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
+		//   2. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
+		if c.mode.IsImageEdit && strings.Contains(strings.ToLower(c.mode.ContentType), "multipart/form-data") {
+			stripRF := openaiconv.IsGptImage1Model(c.mode.ModelID)
+			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, stripRF)
+			// Only replace when something actually changed (boundary or content differs).
+			if newCT != c.mode.ContentType {
+				c.rewrittenContentType = newCT
+			}
+			body = newBody
+		}
+
 		return body, nil
 	}
 }
@@ -175,6 +203,13 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 		// OpenAI and Proxy: URL constructed by proxy based on cred.BaseURL + path
 		return ""
 	}
+}
+
+// RewrittenContentType returns the new Content-Type header value when RequestFrom rewrote
+// a multipart body (e.g. for image edits with fixed MIME types or stripped fields).
+// Returns an empty string when the original Content-Type is still valid.
+func (c *ProviderConverter) RewrittenContentType() string {
+	return c.rewrittenContentType
 }
 
 // IsPassthrough returns true if this provider requires no request/response transformation.

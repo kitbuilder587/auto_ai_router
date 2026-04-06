@@ -1,6 +1,9 @@
 package anthropic
 
-import "strings"
+import (
+	"log/slog"
+	"strings"
+)
 
 // convertOpenAIContentToAnthropic converts an OpenAI message content value (string or
 // []interface{} of content blocks) into a slice of Anthropic ContentBlocks.
@@ -41,26 +44,15 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 				}
 
 			case "input_audio":
-				// Anthropic does not support audio input; emit a text placeholder.
-				audioData, ok := blockMap["input_audio"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				format, _ := audioData["format"].(string)
 				blocks = append(blocks, ContentBlock{
 					Type: "text",
-					Text: "[Audio input: " + format + " format - not supported by Anthropic API]",
+					Text: "[Audio input not supported by Anthropic API]",
 				})
 
 			case "video_url":
-				videoURL, ok := blockMap["video_url"].(map[string]interface{})
-				if !ok {
-					continue
-				}
-				url, _ := videoURL["url"].(string)
 				blocks = append(blocks, ContentBlock{
 					Type: "text",
-					Text: "[Video: " + url + "]",
+					Text: "[Video input not supported by Anthropic API]",
 				})
 
 			case "file":
@@ -77,6 +69,9 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 					if cb := convertDataURLToDocument(fileID); cb != nil {
 						blocks = append(blocks, *cb)
 					}
+				} else {
+					slog.Warn("unsupported file reference in Anthropic conversion, skipping",
+						"file_id", fileID)
 				}
 			}
 		}

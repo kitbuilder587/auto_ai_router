@@ -26,6 +26,7 @@ type streamAccumulator struct {
 
 	// Accumulated content
 	fullText      string
+	fullRefusal   string // accumulated refusal text
 	toolCalls     []accumulatedToolCall
 	currentToolID int // index into toolCalls for the active tool call
 
@@ -46,6 +47,11 @@ type streamAccumulator struct {
 	messageItemID string
 	// Whether completion events have been emitted (via [DONE])
 	completed bool
+	// Monotonic sequence counter for SSE events (required by OpenAI SDK)
+	sequenceNumber int
+
+	// Original Chat Completions ID for correlation
+	originalChatCompletionID string
 
 	// Request-echoed metadata (populated from ResponsesMetadata when available)
 	storeFlag          bool
@@ -62,11 +68,13 @@ type accumulatedToolCall struct {
 
 // chatCompletionsUsage represents usage from a Chat Completions streaming chunk.
 type chatCompletionsUsage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	CachedTokens     int
-	ReasoningTokens  int
+	PromptTokens      int
+	CompletionTokens  int
+	TotalTokens       int
+	CachedTokens      int
+	ReasoningTokens   int
+	AudioInputTokens  int
+	AudioOutputTokens int
 }
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
@@ -80,6 +88,7 @@ type chatStreamChunk struct {
 		Delta struct {
 			Role      string `json:"role,omitempty"`
 			Content   string `json:"content,omitempty"`
+			Refusal   string `json:"refusal,omitempty"`
 			ToolCalls []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id,omitempty"`
@@ -98,9 +107,11 @@ type chatStreamChunk struct {
 		TotalTokens         int `json:"total_tokens"`
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens,omitempty"`
+			AudioTokens  int `json:"audio_tokens,omitempty"`
 		} `json:"prompt_tokens_details,omitempty"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			AudioTokens     int `json:"audio_tokens,omitempty"`
 		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
@@ -190,6 +201,9 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			if chunk.Model != "" {
 				acc.model = chunk.Model
 			}
+			if chunk.ID != "" {
+				acc.originalChatCompletionID = chunk.ID
+			}
 		}
 
 		// Capture usage if present
@@ -201,9 +215,11 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			}
 			if chunk.Usage.PromptTokensDetails != nil {
 				acc.usage.CachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+				acc.usage.AudioInputTokens = chunk.Usage.PromptTokensDetails.AudioTokens
 			}
 			if chunk.Usage.CompletionTokensDetails != nil {
 				acc.usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
+				acc.usage.AudioOutputTokens = chunk.Usage.CompletionTokensDetails.AudioTokens
 			}
 		}
 
@@ -243,7 +259,31 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 				"content_index": 0,
 				"delta":         choice.Delta.Content,
 			}
-			if err := writeSSE(writer, "response.output_text.delta", deltaEvent); err != nil {
+			if err := writeSSEWithSeq(writer, "response.output_text.delta", deltaEvent, acc); err != nil {
+				return err
+			}
+		}
+
+		// handle refusal deltas
+		if choice.Delta.Refusal != "" {
+			if !acc.headerEmitted {
+				if err := emitHeaderEvents(writer, acc); err != nil {
+					return err
+				}
+			}
+			if !acc.messageStarted {
+				if err := emitMessageStartEvents(writer, acc); err != nil {
+					return err
+				}
+			}
+			acc.fullRefusal += choice.Delta.Refusal
+			refusalEvent := map[string]interface{}{
+				"type":          "response.refusal.delta",
+				"output_index":  0,
+				"content_index": 0,
+				"delta":         choice.Delta.Refusal,
+			}
+			if err := writeSSEWithSeq(writer, "response.refusal.delta", refusalEvent, acc); err != nil {
 				return err
 			}
 		}
@@ -292,7 +332,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 						"status":    "in_progress",
 					},
 				}
-				if err := writeSSE(writer, "response.output_item.added", itemAddedEvent); err != nil {
+				if err := writeSSEWithSeq(writer, "response.output_item.added", itemAddedEvent, acc); err != nil {
 					return err
 				}
 			}
@@ -319,7 +359,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 					"output_index": outputIndex,
 					"delta":        tc.Function.Arguments,
 				}
-				if err := writeSSE(writer, "response.function_call_arguments.delta", argDeltaEvent); err != nil {
+				if err := writeSSEWithSeq(writer, "response.function_call_arguments.delta", argDeltaEvent, acc); err != nil {
 					return err
 				}
 			}
@@ -409,8 +449,8 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 			InputTokens:         acc.usage.PromptTokens,
 			OutputTokens:        acc.usage.CompletionTokens,
 			TotalTokens:         acc.usage.TotalTokens,
-			InputTokensDetails:  &InputDetails{CachedTokens: acc.usage.CachedTokens},
-			OutputTokensDetails: &OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens},
+			InputTokensDetails:  &InputDetails{CachedTokens: acc.usage.CachedTokens, AudioTokens: acc.usage.AudioInputTokens},
+			OutputTokensDetails: &OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens},
 		}
 	}
 
@@ -446,6 +486,7 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 		Error:              nil,
 		IncompleteDetails:  incompleteDetails,
 		Metadata:           metadata,
+		ToolChoice:         "auto",
 		Tools:              []Tool{},
 		ParallelToolCalls:  true,
 		Instructions:       nil,
@@ -472,7 +513,7 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 		"type":     "response.created",
 		"response": respObj,
 	}
-	if err := writeSSE(w, "response.created", createdEvent); err != nil {
+	if err := writeSSEWithSeq(w, "response.created", createdEvent, acc); err != nil {
 		return err
 	}
 
@@ -480,7 +521,7 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 		"type":     "response.in_progress",
 		"response": respObj,
 	}
-	return writeSSE(w, "response.in_progress", inProgressEvent)
+	return writeSSEWithSeq(w, "response.in_progress", inProgressEvent, acc)
 }
 
 // emitMessageStartEvents emits output_item.added and content_part.added for a message.
@@ -501,7 +542,7 @@ func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 			"content": []interface{}{},
 		},
 	}
-	if err := writeSSE(w, "response.output_item.added", itemAddedEvent); err != nil {
+	if err := writeSSEWithSeq(w, "response.output_item.added", itemAddedEvent, acc); err != nil {
 		return err
 	}
 
@@ -515,13 +556,14 @@ func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 			"annotations": []interface{}{},
 		},
 	}
-	return writeSSE(w, "response.content_part.added", contentPartEvent)
+	return writeSSEWithSeq(w, "response.content_part.added", contentPartEvent, acc)
 }
 
 // emitCompletionEvents emits all closing events and the final response.completed.
 func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
-	// Close text content if we were streaming text
-	if acc.messageStarted {
+	// only emit text closing events if there's actual text content.
+	// This matches the condition in buildCompletedResponse (messageStarted && fullText != "").
+	if acc.messageStarted && acc.fullText != "" {
 		// output_text.done
 		textDoneEvent := map[string]interface{}{
 			"type":          "response.output_text.done",
@@ -529,7 +571,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 			"content_index": 0,
 			"text":          acc.fullText,
 		}
-		if err := writeSSE(w, "response.output_text.done", textDoneEvent); err != nil {
+		if err := writeSSEWithSeq(w, "response.output_text.done", textDoneEvent, acc); err != nil {
 			return err
 		}
 
@@ -544,7 +586,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 				"annotations": []interface{}{},
 			},
 		}
-		if err := writeSSE(w, "response.content_part.done", contentPartDoneEvent); err != nil {
+		if err := writeSSEWithSeq(w, "response.content_part.done", contentPartDoneEvent, acc); err != nil {
 			return err
 		}
 
@@ -566,7 +608,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 				},
 			},
 		}
-		if err := writeSSE(w, "response.output_item.done", msgDoneEvent); err != nil {
+		if err := writeSSEWithSeq(w, "response.output_item.done", msgDoneEvent, acc); err != nil {
 			return err
 		}
 	}
@@ -584,7 +626,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 			"output_index": outputIndex,
 			"arguments":    tc.arguments,
 		}
-		if err := writeSSE(w, "response.function_call_arguments.done", argsDoneEvent); err != nil {
+		if err := writeSSEWithSeq(w, "response.function_call_arguments.done", argsDoneEvent, acc); err != nil {
 			return err
 		}
 
@@ -601,18 +643,30 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 				"status":    "completed",
 			},
 		}
-		if err := writeSSE(w, "response.output_item.done", fcDoneEvent); err != nil {
+		if err := writeSSEWithSeq(w, "response.output_item.done", fcDoneEvent, acc); err != nil {
 			return err
 		}
 	}
 
-	// response.completed with full response object
+	// emit correct event type based on finish reason
 	completedResp := buildCompletedResponse(acc)
+	var eventType string
+	status, _ := completedResp["status"].(string)
+
+	switch status {
+	case "incomplete":
+		eventType = "response.incomplete"
+	case "failed":
+		eventType = "response.failed"
+	default:
+		eventType = "response.completed"
+	}
+
 	completedEvent := map[string]interface{}{
-		"type":     "response.completed",
+		"type":     eventType,
 		"response": completedResp,
 	}
-	return writeSSE(w, "response.completed", completedEvent)
+	return writeSSEWithSeq(w, eventType, completedEvent, acc)
 }
 
 // buildInProgressResponse builds the response object for in-progress events.
@@ -648,6 +702,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 		"error":                nil,
 		"incomplete_details":   incompleteDetails,
 		"metadata":             metadata,
+		"tool_choice":          "auto",
 		"tools":                []interface{}{},
 		"parallel_tool_calls":  true,
 		"instructions":         nil,
@@ -658,7 +713,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 
 // buildCompletedResponse builds the full response object for the completed event.
 func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
-	var output []interface{}
+	output := make([]interface{}, 0)
 
 	if acc.messageStarted && acc.fullText != "" {
 		output = append(output, map[string]interface{}{
@@ -734,6 +789,7 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 		"error":                nil,
 		"incomplete_details":   incompleteDetails,
 		"metadata":             metadata,
+		"tool_choice":          "auto",
 		"tools":                []interface{}{},
 		"parallel_tool_calls":  true,
 		"instructions":         nil,
@@ -742,14 +798,17 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 	}
 }
 
-// writeSSE writes a single SSE event to the writer.
-func writeSSE(w io.Writer, eventType string, data interface{}) error {
+// writeSSEWithSeq writes a single SSE event to the writer, injecting the
+// monotonic sequence_number required by the OpenAI Python SDK.
+func writeSSEWithSeq(w io.Writer, eventType string, data map[string]interface{}, acc *streamAccumulator) error {
+	acc.sequenceNumber++
+	data["sequence_number"] = acc.sequenceNumber
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("failed to marshal SSE data: %w", err)
 	}
 	slog.Debug("[responses/streaming] writeSSE",
-		"event", eventType, "data_len", len(jsonData))
+		"event", eventType, "data_len", len(jsonData), "seq", acc.sequenceNumber)
 	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
 	if err != nil {
 		slog.Error("[responses/streaming] writeSSE failed",

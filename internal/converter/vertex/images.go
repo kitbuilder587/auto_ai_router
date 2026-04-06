@@ -1,9 +1,16 @@
 package vertex
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -176,6 +183,134 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 			"generation_config": genConfig,
 		},
 	}
+	if imageReq.N != nil && *imageReq.N > 0 {
+		n := clampImageCount(*imageReq.N)
+		chatReq.N = &n
+	}
+
+	return json.Marshal(chatReq)
+}
+
+// ImageEditRequestToOpenAIChatRequest converts OpenAI multipart images.edit payload
+// to an OpenAI chat request for Gemini image-capable models.
+func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) ([]byte, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse image edit content type: %w", err)
+	}
+	if !strings.HasPrefix(mediaType, "multipart/form-data") {
+		return nil, fmt.Errorf("image edits require multipart/form-data content type")
+	}
+
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, fmt.Errorf("missing multipart boundary in content type")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(openAIBody), boundary)
+	fields := make(map[string]string)
+	contentBlocks := make([]map[string]interface{}, 0)
+	maskBlocks := make([]map[string]interface{}, 0)
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read multipart image edit payload: %w", err)
+		}
+
+		formName := part.FormName()
+		if formName == "" {
+			continue
+		}
+
+		data, readErr := readMultipartPartLimit(part, 20*1024*1024)
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		if part.FileName() == "" {
+			fields[formName] = strings.TrimSpace(string(data))
+			continue
+		}
+
+		mimeType, mimeErr := detectImageMIMEType(part.Header.Get("Content-Type"), data)
+		if mimeErr != nil {
+			return nil, fmt.Errorf("invalid multipart part %q: %w", formName, mimeErr)
+		}
+
+		block := map[string]interface{}{
+			"type": "image_url",
+			"image_url": map[string]interface{}{
+				"url": "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+			},
+		}
+
+		switch formName {
+		case "image", "images", "image[]":
+			contentBlocks = append(contentBlocks, block)
+		case "mask":
+			maskBlocks = append(maskBlocks, block)
+		}
+	}
+
+	model := strings.TrimSpace(fields["model"])
+	if model == "" {
+		return nil, fmt.Errorf("image edit request missing model field")
+	}
+	prompt := strings.TrimSpace(fields["prompt"])
+	if prompt == "" {
+		return nil, fmt.Errorf("image edit request missing prompt field")
+	}
+
+	messageBlocks := make([]map[string]interface{}, 0, 1+len(contentBlocks)+len(maskBlocks))
+	messageBlocks = append(messageBlocks, map[string]interface{}{
+		"type": "text",
+		"text": prompt,
+	})
+	messageBlocks = append(messageBlocks, contentBlocks...)
+	if len(maskBlocks) > 0 {
+		messageBlocks = append(messageBlocks, map[string]interface{}{
+			"type": "text",
+			"text": "Use the provided mask image to constrain the edit.",
+		})
+		messageBlocks = append(messageBlocks, maskBlocks...)
+	}
+
+	genConfig := map[string]interface{}{
+		"response_modalities": []string{"IMAGE"},
+	}
+	if size := strings.TrimSpace(fields["size"]); size != "" {
+		imageConfig := map[string]interface{}{}
+		if aspectRatio := sizeToAspectRatio(size); aspectRatio != "" {
+			imageConfig["aspectRatio"] = aspectRatio
+		}
+		if imageSize := sizeToImageSize(size); imageSize != "" {
+			imageConfig["imageSize"] = imageSize
+		}
+		if len(imageConfig) > 0 {
+			genConfig["image_config"] = imageConfig
+		}
+	}
+
+	chatReq := openai.OpenAIRequest{
+		Model: model,
+		Messages: []openai.OpenAIMessage{
+			{
+				Role:    "user",
+				Content: messageBlocks,
+			},
+		},
+		ExtraBody: map[string]interface{}{
+			"generation_config": genConfig,
+		},
+	}
+	if n := parsePositiveInt(fields["n"]); n > 0 {
+		n = clampImageCount(n)
+		chatReq.N = &n
+	}
 
 	return json.Marshal(chatReq)
 }
@@ -222,6 +357,8 @@ func sizeToImageSize(size string) string {
 	// 2K sizes (larger variations)
 	case "2048x2048", "3584x2048", "2048x3584":
 		return "2K"
+	case "2016x1008":
+		return "2K"
 	// 4K sizes
 	case "4096x4096", "7168x4096", "4096x7168":
 		return "4K"
@@ -261,4 +398,47 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(openAIResp)
+}
+
+func parsePositiveInt(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(part, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read multipart part %q: %w", part.FormName(), err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("multipart part %q exceeds %d bytes", part.FormName(), maxBytes)
+	}
+	return data, nil
+}
+
+func detectImageMIMEType(headerValue string, data []byte) (string, error) {
+	mimeType := strings.TrimSpace(headerValue)
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return "", fmt.Errorf("unsupported MIME type %q", mimeType)
+	}
+	return mimeType, nil
+}
+
+func clampImageCount(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > 10 {
+		return 10
+	}
+	return n
 }

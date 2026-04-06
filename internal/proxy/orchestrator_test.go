@@ -19,7 +19,7 @@ func TestOrchestrateRequest_ResponsesAPIStreaming(t *testing.T) {
 		Build()
 	prx.logger = logger
 
-	body := `{"model":"gpt-5","input":"Hello","stream":true}`
+	body := `{"model":"Xpt-5","input":"Hello","stream":true}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
@@ -58,7 +58,7 @@ func TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAI(t *testing.T) {
 		Build()
 	prx.logger = logger
 
-	body := `{"model":"gpt-5","input":"Hello","stream":false}`
+	body := `{"model":"qwen-5","input":"Hello","stream":false}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()

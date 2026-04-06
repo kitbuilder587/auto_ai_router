@@ -11,7 +11,7 @@ func TestMapReasoningEffortToBudget(t *testing.T) {
 		effort string
 		want   int
 	}{
-		{"minimal", 1000},
+		{"minimal", 1024}, // Anthropic minimum is 1024
 		{"low", 5000},
 		{"medium", 15000},
 		{"high", 30000},

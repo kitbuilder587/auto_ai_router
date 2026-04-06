@@ -31,6 +31,7 @@ type OpenAIRequest struct {
 	Modalities           []string               `json:"modalities,omitempty"`
 	PromptCacheRetention string                 `json:"prompt_cache_retention,omitempty"`
 	ReasoningEffort      string                 `json:"reasoning_effort,omitempty"`
+	Reasoning            interface{}            `json:"reasoning,omitempty"`       // {"effort":"high","generate_summary":"auto"}
 	Thinking             interface{}            `json:"thinking,omitempty"`        // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
 	ThinkingBudget       interface{}            `json:"thinking_budget,omitempty"` // Gemini-style thinking budget: int (tokens) or -1 (dynamic)
 	ThinkingLevel        string                 `json:"thinking_level,omitempty"`  // Gemini-style thinking level: "low"/"medium"/"high"
@@ -77,12 +78,14 @@ type VideoURL struct {
 
 // OpenAIResponse represents OpenAI response format
 type OpenAIResponse struct {
-	ID      string         `json:"id"`
-	Object  string         `json:"object"`
-	Created int64          `json:"created"`
-	Model   string         `json:"model"`
-	Choices []OpenAIChoice `json:"choices"`
-	Usage   *OpenAIUsage   `json:"usage,omitempty"`
+	ID                string         `json:"id"`
+	Object            string         `json:"object"`
+	Created           int64          `json:"created"`
+	Model             string         `json:"model"`
+	SystemFingerprint string         `json:"system_fingerprint,omitempty"`
+	ServiceTier       string         `json:"service_tier,omitempty"`
+	Choices           []OpenAIChoice `json:"choices"`
+	Usage             *OpenAIUsage   `json:"usage,omitempty"`
 }
 
 type OpenAIChoice struct {
@@ -141,12 +144,14 @@ type OpenAIUsage struct {
 
 // OpenAIStreamingChunk represents OpenAI streaming response format
 type OpenAIStreamingChunk struct {
-	ID      string                  `json:"id"`
-	Object  string                  `json:"object"`
-	Created int64                   `json:"created"`
-	Model   string                  `json:"model"`
-	Choices []OpenAIStreamingChoice `json:"choices"`
-	Usage   *OpenAIUsage            `json:"usage,omitempty"`
+	ID                string                  `json:"id"`
+	Object            string                  `json:"object"`
+	Created           int64                   `json:"created"`
+	Model             string                  `json:"model"`
+	SystemFingerprint string                  `json:"system_fingerprint,omitempty"`
+	ServiceTier       string                  `json:"service_tier,omitempty"`
+	Choices           []OpenAIStreamingChoice `json:"choices"`
+	Usage             *OpenAIUsage            `json:"usage,omitempty"`
 }
 
 type OpenAIStreamingChoice struct {

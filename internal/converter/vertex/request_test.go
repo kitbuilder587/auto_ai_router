@@ -29,7 +29,7 @@ func TestOpenAIToVertex_ToolRoleMessage_UsesNameField(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_FallbackToToolResult(t *testin
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_ResolvesFromToolCalls(t *testi
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-flash-preview")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3-flash-preview", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t 
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-flash-preview")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3-flash-preview", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -239,21 +239,113 @@ func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t 
 		t.Fatalf("unmarshal vertex request: %v", err)
 	}
 
-	// Contents: [0] user, [1] model, [2] tool result (call_2), [3] tool result (call_1)
-	if len(vertexReq.Contents) < 4 {
-		t.Fatalf("expected at least 4 contents, got %d", len(vertexReq.Contents))
+	// Contents: [0] user, [1] model, [2] grouped tool results
+	if len(vertexReq.Contents) < 3 {
+		t.Fatalf("expected at least 3 contents, got %d", len(vertexReq.Contents))
+	}
+
+	toolResponses := vertexReq.Contents[2]
+	if len(toolResponses.Parts) != 2 {
+		t.Fatalf("expected 2 grouped tool response parts, got %d", len(toolResponses.Parts))
 	}
 
 	// First tool result should resolve to "get_time" (call_2)
-	fr1 := vertexReq.Contents[2].Parts[0].FunctionResponse
+	fr1 := toolResponses.Parts[0].FunctionResponse
 	if fr1 == nil || fr1.Name != "get_time" {
 		t.Fatalf("expected first tool result Name = %q, got %q", "get_time", fr1.Name)
 	}
 
 	// Second tool result should resolve to "get_weather" (call_1)
-	fr2 := vertexReq.Contents[3].Parts[0].FunctionResponse
+	fr2 := toolResponses.Parts[1].FunctionResponse
 	if fr2 == nil || fr2.Name != "get_weather" {
 		t.Fatalf("expected second tool result Name = %q, got %q", "get_weather", fr2.Name)
+	}
+}
+
+// TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_AreGroupedIntoSingleTurn verifies
+// that consecutive tool messages are converted into a single user content with multiple
+// functionResponse parts, matching Gemini's requirement for multi-tool response turns.
+func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_AreGroupedIntoSingleTurn(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-3-pro-preview",
+		Messages: []openai.OpenAIMessage{
+			{Role: "user", Content: "Get weather for NY and MSC"},
+			{
+				Role: "assistant",
+				ToolCalls: []interface{}{
+					map[string]interface{}{
+						"id":   "call_ny",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_weather",
+							"arguments": `{"city":"NY"}`,
+						},
+					},
+					map[string]interface{}{
+						"id":   "call_msc",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_weather",
+							"arguments": `{"city":"MSC"}`,
+						},
+					},
+				},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_ny",
+				Content:    "17",
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_msc",
+				Content:    "15.3",
+			},
+		},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3-pro-preview", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	// Contents: [0] user, [1] model with 2 function calls, [2] user with 2 function responses
+	if len(vertexReq.Contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d", len(vertexReq.Contents))
+	}
+
+	toolResponses := vertexReq.Contents[2]
+	if toolResponses.Role != "user" {
+		t.Fatalf("expected grouped tool responses role = %q, got %q", "user", toolResponses.Role)
+	}
+	if len(toolResponses.Parts) != 2 {
+		t.Fatalf("expected 2 grouped function response parts, got %d", len(toolResponses.Parts))
+	}
+
+	fr1 := toolResponses.Parts[0].FunctionResponse
+	if fr1 == nil || fr1.Name != "get_weather" {
+		t.Fatalf("expected first grouped function response name = %q, got %#v", "get_weather", fr1)
+	}
+	if output, ok := fr1.Response["output"]; !ok || output != "17" {
+		t.Fatalf("expected first grouped response output = %q, got %v", "17", fr1.Response)
+	}
+
+	fr2 := toolResponses.Parts[1].FunctionResponse
+	if fr2 == nil || fr2.Name != "get_weather" {
+		t.Fatalf("expected second grouped function response name = %q, got %#v", "get_weather", fr2)
+	}
+	if output, ok := fr2.Response["output"]; !ok || output != "15.3" {
+		t.Fatalf("expected second grouped response output = %q, got %v", "15.3", fr2.Response)
 	}
 }
 
@@ -275,7 +367,7 @@ func TestOpenAIToVertex_BasicMessageConversion(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -339,7 +431,7 @@ func TestOpenAIToVertex_DeveloperRole(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -377,7 +469,7 @@ func TestOpenAIToVertex_ToolRoleMessage_JSONContent(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}
@@ -421,7 +513,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyContent(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 
-	resultBytes, err := OpenAIToVertex(body, false, "gemini-2.5-flash")
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
 	if err != nil {
 		t.Fatalf("OpenAIToVertex error: %v", err)
 	}

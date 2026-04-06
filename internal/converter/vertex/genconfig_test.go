@@ -43,6 +43,15 @@ func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
 		assert.Nil(t, cfg.ThinkingConfig)
 	})
 
+	t.Run("gemini_image_model_no_thinking_config", func(t *testing.T) {
+		req := &openai.OpenAIRequest{Model: "gemini-2.5-flash-image"}
+		temp := float64(0.7)
+		req.Temperature = &temp
+		cfg := buildGenerationConfig(req, "gemini-2.5-flash-image")
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.ThinkingConfig)
+	})
+
 	t.Run("explicit_reasoning_effort_overrides_default", func(t *testing.T) {
 		req := &openai.OpenAIRequest{
 			Model:           "gemini-2.5-flash",
@@ -51,7 +60,7 @@ func TestBuildGenerationConfig_DefaultThinkingDisable(t *testing.T) {
 		cfg := buildGenerationConfig(req, "gemini-2.5-flash")
 		require.NotNil(t, cfg)
 		require.NotNil(t, cfg.ThinkingConfig)
-		assert.True(t, cfg.ThinkingConfig.IncludeThoughts)
+		assert.False(t, cfg.ThinkingConfig.IncludeThoughts)
 		require.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
 		assert.Equal(t, int32(24576), *cfg.ThinkingConfig.ThinkingBudget)
 	})

@@ -45,7 +45,7 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string) *AnthropicT
 func mapReasoningEffortToBudget(effort string) int {
 	switch effort {
 	case "minimal":
-		return 1000
+		return 1024 //  Anthropic minimum is 1024, not 1000
 	case "low":
 		return 5000
 	case "medium":

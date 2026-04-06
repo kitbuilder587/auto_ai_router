@@ -16,9 +16,11 @@ import (
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
 func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(vertexStream)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) //  1MB buffer (default 64KB too small)
 	chatID := converterutil.GenerateID()
 	timestamp := converterutil.GetCurrentTimestamp()
 	isFirstChunk := true
+	doneWritten := false // track if [DONE] was sent
 
 	vertexLineCount := 0
 	vertexChunkCount := 0
@@ -36,7 +38,10 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		if jsonData == "[DONE]" {
 			slog.Debug("[vertex/streaming] received [DONE]", "lines_read", vertexLineCount, "chunks_processed", vertexChunkCount)
 			// Write final done message
-			_, _ = fmt.Fprintf(output, "data: [DONE]\n\n")
+			if _, err := fmt.Fprintf(output, "data: [DONE]\n\n"); err != nil {
+				return fmt.Errorf("write [DONE]: %w", err)
+			}
+			doneWritten = true
 			break
 		}
 
@@ -68,7 +73,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 						"prompt_tokens", vertexChunk.UsageMetadata.PromptTokenCount,
 						"candidates_tokens", vertexChunk.UsageMetadata.CandidatesTokenCount,
 						"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount)
-					_, _ = fmt.Fprintf(output, "data: %s\n\n", chunkJSON)
+					if _, werr := fmt.Fprintf(output, "data: %s\n\n", chunkJSON); werr != nil {
+						return fmt.Errorf("write usage chunk: %w", werr)
+					}
 				}
 			}
 			continue
@@ -162,13 +169,20 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			continue
 		}
 
-		_, _ = fmt.Fprintf(output, "data: %s\n\n", chunkJSON)
+		if _, werr := fmt.Fprintf(output, "data: %s\n\n", chunkJSON); werr != nil {
+			return fmt.Errorf("write chunk: %w", werr)
+		}
 		isFirstChunk = false
 	}
 
 	slog.Debug("[vertex/streaming] scan finished",
 		"lines_read", vertexLineCount, "chunks_processed", vertexChunkCount,
 		"scanner_err", scanner.Err())
+
+	// always send [DONE] even if stream ended without it
+	if !doneWritten {
+		_, _ = fmt.Fprintf(output, "data: [DONE]\n\n")
+	}
 
 	return scanner.Err()
 }

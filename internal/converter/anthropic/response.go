@@ -3,6 +3,7 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -25,14 +26,16 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	}
 
 	// Translate content blocks to OpenAI message fields.
-	var textContent string
+	var textParts []string // collect text parts separately, join with separator
 	var reasoningContent string
 	var toolCalls []openai.OpenAIToolCall
 
 	for _, block := range anthropicResp.Content {
 		switch block.Type {
 		case "text":
-			textContent += block.Text
+			if block.Text != "" {
+				textParts = append(textParts, block.Text)
+			}
 		case "thinking":
 			reasoningContent += block.Thinking
 		case "tool_use":
@@ -54,6 +57,12 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	}
 
 	finishReason := mapAnthropicStopReason(anthropicResp.StopReason)
+
+	// join multiple text blocks with double newline separator
+	textContent := ""
+	if len(textParts) > 0 {
+		textContent = strings.Join(textParts, "\n\n")
+	}
 
 	message := openai.OpenAIResponseMessage{
 		Role:    "assistant",
@@ -90,6 +99,8 @@ func mapAnthropicStopReason(reason string) string {
 		return "tool_calls"
 	case "stop_sequence":
 		return "stop"
+	case "content_filter": // M2 — Anthropic content filtering stop reason
+		return "content_filter"
 	default:
 		return "stop"
 	}
@@ -105,7 +116,8 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 		CompletionTokens: usage.OutputTokens,
 		TotalTokens:      usage.InputTokens + usage.OutputTokens,
 	}
-	if usage.CacheReadInputTokens > 0 {
+	// map cache_read + cache_creation tokens to prompt_tokens_details
+	if usage.CacheReadInputTokens > 0 || usage.CacheCreationInputTokens > 0 {
 		result.PromptTokensDetails = &openai.TokenDetails{
 			CachedTokens: usage.CacheReadInputTokens,
 		}

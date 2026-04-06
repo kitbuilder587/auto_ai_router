@@ -21,7 +21,7 @@ The OpenAI SDK's `client.responses.create()` and `client.responses.stream()` wor
 flowchart LR
     Client["Client (openai SDK)"]
     Detect["IsResponsesAPI() has 'input' && !has 'messages'"]
-    IsCodex{"IsCodexModel()?"}
+    IsPassthrough{"IsPassthroughResponses()?"}
     ConvReq["RequestToChat() convert request"]
     Providers["Backend Providers (OpenAI / Vertex AI / Anthropic)"]
     ConvResp["ChatToResponse() or TransformChatStreamToResponses()"]
@@ -29,27 +29,48 @@ flowchart LR
     Client2["Client (Response object)"]
 
     Client -->|"POST /v1/responses Responses API body"| Detect
-    Detect -->|"yes"| IsCodex
+    Detect -->|"yes"| IsPassthrough
     Detect -->|"no → pass through"| Providers
-    IsCodex -->|"yes (codex)"| Passthrough
-    IsCodex -->|"no"| ConvReq
+    IsPassthrough -->|"yes"| Passthrough
+    IsPassthrough -->|"no"| ConvReq
     Passthrough -->|"Responses API body (proxy fields stripped)"| Providers
     ConvReq -->|"Chat Completions body"| Providers
     Providers -->|"Chat Completions response (streaming or non-streaming)"| ConvResp
-    Providers -->|"Responses API response (codex)"| Client2
+    Providers -->|"Responses API response (passthrough)"| Client2
     ConvResp -->|"Responses API response"| Client2
 ```
 
-### Codex Models — Native Passthrough
+### Native Passthrough Models
 
-Models whose name contains `codex` (e.g. `gpt-5.3-codex`) natively support the `/v1/responses` endpoint and are forwarded without Chat Completions conversion. The proxy:
+Some models natively support the `/v1/responses` endpoint and can be forwarded without Chat Completions conversion. The proxy determines whether to use passthrough via `IsPassthroughResponses()`:
+
+- **Auto-detect**: models whose name contains `codex` (e.g. `gpt-5.3-codex`) default to passthrough.
+- **Explicit config**: any model can be forced to passthrough or forced to conversion via `passthrough_responses` in the `models` config section.
+
+```yaml
+models:
+  - model: "gpt-5.3-codex"
+    passthrough_responses: true    # explicit (also auto-detected from name)
+
+  - model: "my-responses-model"
+    passthrough_responses: true    # non-codex model with native /v1/responses support
+
+  - model: "gpt-4o"
+    passthrough_responses: false   # force conversion (default for non-codex)
+```
+
+When passthrough is active, the proxy:
 
 1. Strips proxy-only fields (`store`, `metadata`, `ttl`) from the forwarded body.
 2. Handles `previous_response_id` from the local store (prepends history to `input`), or keeps it in the body for the provider if not found locally.
-3. Forwards the body to the provider's `/v1/responses` endpoint unchanged.
-4. Saves the completed response to the local store if `store: true`.
+3. Normalizes the body for provider compatibility:
+   - `input` as a single dict is wrapped into an array (`[dict]`).
+   - `instructions` as an array of messages is joined into a single string.
+   - Tools in nested Chat Completions format (`{function:{name:...}}`) are flattened to `{name:...}`.
+4. Forwards the body to the provider's `/v1/responses` endpoint.
+5. Saves the completed response to the local store if `store: true`.
 
-All response store features (`store`, `previous_response_id`, `metadata`, `ttl`, `GET /v1/responses/{id}`) work the same as for other models.
+All response store features (`store`, `previous_response_id`, `metadata`, `ttl`, `GET /v1/responses/{id}`) work the same as for converted models.
 
 ## Supported Input Formats
 
@@ -167,10 +188,10 @@ response = client.responses.create(
 
 ## Tools
 
-Only `function` type tools are supported. Both the flat Responses API format and the nested Chat Completions format are accepted:
+Both the flat Responses API format and the nested Chat Completions format are accepted for `function` tools:
 
 ```python
-# Flat Responses API format
+# Flat Responses API format (converted to nested Chat Completions internally)
 tools = [
     {
         "type": "function",
@@ -186,6 +207,19 @@ tools = [
 ]
 ```
 
+### Non-Function Tools
+
+Non-function tool types (`web_search`, `web_search_preview`, `computer_use`, `code_execution`, `google_search_retrieval`, etc.) are passed through the `RequestToChat` conversion as-is. Provider-specific handling applies downstream:
+
+| Tool type                           | OpenAI (Chat Completions)                                                                   | Vertex AI      | Anthropic      |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- | -------------- | -------------- |
+| `web_search` / `web_search_preview` | Forwarded with `web_search_options` **only for `search-preview` models**; dropped otherwise | Dropped        | Dropped        |
+| `computer_use`                      | Dropped                                                                                     | Dropped        | Native support |
+| `code_execution`                    | Dropped                                                                                     | Native support | Dropped        |
+| `google_search_retrieval`           | Dropped                                                                                     | Native support | Dropped        |
+
+When a non-function tool is not supported by the target provider, it is silently dropped before the request is forwarded.
+
 ### Tool Choice
 
 | Value                               | Behavior                               |
@@ -195,26 +229,26 @@ tools = [
 | `"required"`                        | Model must call at least one tool      |
 | `{"type": "function", "name": "x"}` | Model must call the specified function |
 
-> Other `tool_choice` object types (e.g. `file_search`) are rejected with an error.
+Non-function `tool_choice` object types (e.g. `{"type": "file_search"}`) are passed through unchanged to the provider. For OpenAI Chat Completions, such values are dropped before forwarding since the endpoint only accepts `"auto"`, `"none"`, `"required"`, or a function reference.
 
 ## Parameters Mapping
 
-| Responses API          | Chat Completions              | Notes                                      |
-| ---------------------- | ----------------------------- | ------------------------------------------ |
-| `input`                | `messages`                    | Converted as described above               |
-| `instructions`         | prepended `developer` message |                                            |
-| `max_output_tokens`    | `max_completion_tokens`       |                                            |
-| `reasoning.effort`     | `reasoning_effort`            | `"low"`, `"medium"`, `"high"`              |
-| `text.format`          | `response_format`             | See below                                  |
-| `tools`                | `tools`                       | Flat → nested conversion                   |
-| `tool_choice`          | `tool_choice`                 | Object form re-wrapped                     |
-| `temperature`          | `temperature`                 | Passed through                             |
-| `top_p`                | `top_p`                       | Passed through                             |
-| `stream`               | `stream`                      | Passed through                             |
-| `store`                | —                             | Handled server-side; see Response Storage  |
-| `previous_response_id` | —                             | History prepended before conversion        |
-| `metadata`             | —                             | Echoed back in response; not forwarded     |
-| `ttl`                  | —                             | Response expiry in seconds (0 = no expiry) |
+| Responses API          | Chat Completions              | Notes                                                                                             |
+| ---------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| `input`                | `messages`                    | Converted as described above                                                                      |
+| `instructions`         | prepended `developer` message |                                                                                                   |
+| `max_output_tokens`    | `max_tokens`                  | Renamed to `max_completion_tokens` for reasoning models (o1/o3/o4/gpt-5) by post-conversion rules |
+| `reasoning.effort`     | `reasoning_effort`            | `"low"`, `"medium"`, `"high"`                                                                     |
+| `text.format`          | `response_format`             | See below                                                                                         |
+| `tools`                | `tools`                       | Flat → nested conversion                                                                          |
+| `tool_choice`          | `tool_choice`                 | Object form re-wrapped                                                                            |
+| `temperature`          | `temperature`                 | Passed through                                                                                    |
+| `top_p`                | `top_p`                       | Passed through                                                                                    |
+| `stream`               | `stream`                      | Passed through                                                                                    |
+| `store`                | —                             | Handled server-side; see Response Storage                                                         |
+| `previous_response_id` | —                             | History prepended before conversion                                                               |
+| `metadata`             | —                             | Echoed back in response; not forwarded                                                            |
+| `ttl`                  | —                             | Response expiry in seconds (0 = no expiry)                                                        |
 
 ### Structured Output (text.format)
 

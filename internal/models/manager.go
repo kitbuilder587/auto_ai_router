@@ -136,41 +136,43 @@ type allModelsCache struct {
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                   sync.RWMutex
-	credentialModels     map[string][]string      // credential name -> list of model IDs
-	allModels            []Model                  // deduplicated list of all models
-	modelToCredentials   map[string][]string      // model ID -> list of credential names
-	modelLimits          map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits    map[string][]ModelLimits // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames map[string]string        // immutable snapshot of real names from config.yaml
-	dbModelNames         map[string]bool          // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases         map[string]string        // alias -> real model name (from model_alias config)
-	modelRealNames       map[string]string        // alias name -> real model name (from models[].model field)
-	defaultModelsRPM     int                      // default RPM for models
-	logger               *slog.Logger
-	credentials          []config.CredentialConfig   // credentials for fetching remote models
-	remoteModelsCache    map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration      time.Duration               // how long to cache remote models (default 5 minutes)
-	allModelsCache       allModelsCache              // cached result of GetAllModels (3 second TTL)
+	mu                        sync.RWMutex
+	credentialModels          map[string][]string      // credential name -> list of model IDs
+	allModels                 []Model                  // deduplicated list of all models
+	modelToCredentials        map[string][]string      // model ID -> list of credential names
+	modelLimits               map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits         map[string][]ModelLimits // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames      map[string]string        // immutable snapshot of real names from config.yaml
+	modelPassthroughResponses map[string]*bool         // model name -> explicit passthrough_responses override (nil = auto)
+	dbModelNames              map[string]bool          // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases              map[string]string        // alias -> real model name (from model_alias config)
+	modelRealNames            map[string]string        // alias name -> real model name (from models[].model field)
+	defaultModelsRPM          int                      // default RPM for models
+	logger                    *slog.Logger
+	credentials               []config.CredentialConfig   // credentials for fetching remote models
+	remoteModelsCache         map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration           time.Duration               // how long to cache remote models (default 5 minutes)
+	allModelsCache            allModelsCache              // cached result of GetAllModels (3 second TTL)
 }
 
 // New creates a new model manager
 func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelRPMConfig) *Manager {
 	m := &Manager{
-		credentialModels:     make(map[string][]string),
-		allModels:            make([]Model, 0),
-		modelToCredentials:   make(map[string][]string),
-		modelLimits:          make(map[string][]ModelLimits),
-		staticModelLimits:    make(map[string][]ModelLimits),
-		staticModelRealNames: make(map[string]string),
-		dbModelNames:         make(map[string]bool),
-		modelAliases:         make(map[string]string),
-		modelRealNames:       make(map[string]string),
-		defaultModelsRPM:     defaultModelsRPM,
-		logger:               logger,
-		credentials:          make([]config.CredentialConfig, 0),
-		remoteModelsCache:    make(map[string]remoteModelCache),
-		cacheExpiration:      5 * time.Minute, // Default cache TTL: 5 minutes
+		credentialModels:          make(map[string][]string),
+		allModels:                 make([]Model, 0),
+		modelToCredentials:        make(map[string][]string),
+		modelLimits:               make(map[string][]ModelLimits),
+		staticModelLimits:         make(map[string][]ModelLimits),
+		staticModelRealNames:      make(map[string]string),
+		dbModelNames:              make(map[string]bool),
+		modelAliases:              make(map[string]string),
+		modelRealNames:            make(map[string]string),
+		modelPassthroughResponses: make(map[string]*bool),
+		defaultModelsRPM:          defaultModelsRPM,
+		logger:                    logger,
+		credentials:               make([]config.CredentialConfig, 0),
+		remoteModelsCache:         make(map[string]remoteModelCache),
+		cacheExpiration:           5 * time.Minute, // Default cache TTL: 5 minutes
 	}
 
 	// Load static models from config.yaml
@@ -186,6 +188,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 			if staticModel.Model != "" && staticModel.Model != staticModel.Name {
 				m.modelRealNames[staticModel.Name] = staticModel.Model
 				logger.Debug("Registered model real name", "alias", staticModel.Name, "real", staticModel.Model)
+			}
+			// Register explicit passthrough_responses override if set
+			if staticModel.PassthroughResponses != nil {
+				m.modelPassthroughResponses[staticModel.Name] = staticModel.PassthroughResponses
+				logger.Debug("Registered passthrough_responses override",
+					"model", staticModel.Name, "value", *staticModel.PassthroughResponses)
 			}
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
@@ -217,6 +225,47 @@ func (m *Manager) GetRealModelName(alias string) (string, bool) {
 		return real, true
 	}
 	return alias, false
+}
+
+// responsesAPIModelPrefixes lists model name substrings that natively support
+// the /v1/responses endpoint.  Checked case-insensitively via strings.Contains.
+// Source: https://platform.openai.com/docs/api-reference/responses
+var responsesAPIModelPrefixes = []string{
+	"codex",
+	"gpt-4o",
+	"gpt-4.1",
+	"gpt-5",
+	"o1",
+	"o3",
+	"o4",
+}
+
+// isNativeResponsesModel returns true when modelID matches any known prefix
+// that supports the native /v1/responses endpoint.
+func isNativeResponsesModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	for _, prefix := range responsesAPIModelPrefixes {
+		if strings.Contains(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPassthroughResponses reports whether Responses API requests for modelID
+// should be forwarded to the provider's native /v1/responses endpoint as-is,
+// without converting to Chat Completions format.
+//
+// Priority:
+//  1. Explicit config override (passthrough_responses: true/false in models[])
+//  2. Auto-detect: true for models in responsesAPIModelPrefixes
+func (m *Manager) IsPassthroughResponses(modelID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if v, ok := m.modelPassthroughResponses[modelID]; ok && v != nil {
+		return *v
+	}
+	return isNativeResponsesModel(modelID)
 }
 
 // SetCredentials sets the credentials for fetching remote models from proxies

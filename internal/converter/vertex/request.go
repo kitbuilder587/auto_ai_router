@@ -10,17 +10,28 @@ import (
 )
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format.
-func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]byte, error) {
+func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool, model, contentType string) ([]byte, error) {
 	var req openai.OpenAIRequest
 
-	if isImageGeneration {
+	if isImageGeneration || isImageEdit {
 		if strings.Contains(model, "gemini") {
-			chatBody, err := ImageRequestToOpenAIChatRequest(openAIBody)
+			var (
+				chatBody []byte
+				err      error
+			)
+			if isImageEdit {
+				chatBody, err = ImageEditRequestToOpenAIChatRequest(openAIBody, contentType)
+			} else {
+				chatBody, err = ImageRequestToOpenAIChatRequest(openAIBody)
+			}
 			if err != nil {
 				return nil, err
 			}
 			openAIBody = chatBody
 		} else {
+			if isImageEdit {
+				return nil, fmt.Errorf("image edits are not supported for model %s", model)
+			}
 			return OpenAIImageToVertex(openAIBody)
 		}
 	}
@@ -32,22 +43,43 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	vertexReq := VertexRequest{
 		Contents: make([]*genai.Content, 0),
 	}
+	var pendingToolParts []*genai.Part
+
+	flushPendingToolParts := func() {
+		if len(pendingToolParts) == 0 {
+			return
+		}
+		vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
+			Role:  "user",
+			Parts: pendingToolParts,
+		})
+		pendingToolParts = nil
+	}
 
 	// Generation config
 	vertexReq.GenerationConfig = buildGenerationConfig(&req, model)
 
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
+		if msg.Role != "tool" {
+			flushPendingToolParts()
+		}
 		switch msg.Role {
 		case "system", "developer":
+			// concatenate multiple system messages instead of overwriting
 			content := extractTextContent(msg.Content)
-			vertexReq.SystemInstruction = &genai.Content{
-				Role:  "user",
-				Parts: []*genai.Part{{Text: content}},
+			if vertexReq.SystemInstruction != nil && len(vertexReq.SystemInstruction.Parts) > 0 {
+				vertexReq.SystemInstruction.Parts[0].Text += "\n" + content
+			} else {
+				vertexReq.SystemInstruction = &genai.Content{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: content}},
+				}
 			}
 		case "tool":
 			// OpenAI tool result: {role: "tool", tool_call_id: "call_xyz", name: "func_name", content: "..."}
-			// Vertex expects: Part.FunctionResponse{Name: funcName, Response: {output: content}}
+			// Vertex expects all responses for a single model tool-call turn to be grouped
+			// in one user content with multiple functionResponse parts.
 			funcName := msg.Name
 			if funcName == "" && msg.ToolCallID != "" {
 				// Look up function name from preceding assistant message's tool_calls
@@ -68,14 +100,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			} else {
 				responseData = map[string]interface{}{"output": ""}
 			}
-			vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
-				Role: "user",
-				Parts: []*genai.Part{{
-					FunctionResponse: &genai.FunctionResponse{
-						Name:     funcName,
-						Response: responseData,
-					},
-				}},
+			pendingToolParts = append(pendingToolParts, &genai.Part{
+				FunctionResponse: &genai.FunctionResponse{
+					Name:     funcName,
+					Response: responseData,
+				},
 			})
 		default:
 			role := msg.Role
@@ -94,12 +123,16 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			if len(msg.ToolCalls) > 0 && role == "model" {
 				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
 			}
+			if parts == nil {
+				parts = []*genai.Part{} // avoid nil parts
+			}
 			vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
 				Role:  role,
 				Parts: parts,
 			})
 		}
 	}
+	flushPendingToolParts()
 
 	// Tools
 	var hasUserFunctions bool

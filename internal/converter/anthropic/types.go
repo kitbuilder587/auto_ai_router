@@ -76,6 +76,7 @@ type AnthropicTool struct {
 type AnthropicThinking struct {
 	Type         string `json:"type"`                    // "enabled" or "disabled"
 	BudgetTokens int    `json:"budget_tokens,omitempty"` // token budget when enabled
+	Display      string `json:"display,omitempty"`       // "full", "minimal", "none" (controls thinking block visibility)
 }
 
 // AnthropicMetadata carries per-request metadata sent to Anthropic.
@@ -143,6 +144,9 @@ type AnthropicStreamEvent struct {
 
 	// message_delta usage (output_tokens)
 	Usage *AnthropicStreamUsage `json:"usage,omitempty"`
+
+	// error event
+	Error *AnthropicError `json:"error,omitempty"`
 }
 
 // AnthropicStreamMessage is the message skeleton delivered in the message_start event.
@@ -168,6 +172,12 @@ type AnthropicStreamDelta struct {
 	// message_delta
 	StopReason   string `json:"stop_reason,omitempty"`
 	StopSequence string `json:"stop_sequence,omitempty"`
+}
+
+// AnthropicError represents an error object in Anthropic streaming error events.
+type AnthropicError struct {
+	Type    string `json:"type"`    // e.g. "overloaded_error", "rate_limit_error"
+	Message string `json:"message"` // human-readable error message
 }
 
 // AnthropicStreamUsage carries token counts in message_delta events.
