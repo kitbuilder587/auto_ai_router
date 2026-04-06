@@ -288,6 +288,49 @@ func TestReplaceBodyParam_O3(t *testing.T) {
 	}
 }
 
+func TestReplaceBodyParam_O4(t *testing.T) {
+	models := []string{"o4-mini", "o4"}
+
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			body := makeBody(t, map[string]any{
+				"model":             model,
+				"max_tokens":        1000,
+				"temperature":       0.7,
+				"top_p":             0.9,
+				"frequency_penalty": 0.5,
+				"presence_penalty":  0.3,
+				"logprobs":          true,
+				"top_logprobs":      5,
+				"reasoning_effort":  "high",
+				"messages":          []any{},
+			})
+
+			result := bodyToMap(t, ReplaceBodyParam(model, body))
+
+			// Should be renamed
+			if _, ok := result["max_tokens"]; ok {
+				t.Error("max_tokens should be renamed")
+			}
+			if v := result["max_completion_tokens"]; v != float64(1000) {
+				t.Errorf("max_completion_tokens = %v, want 1000", v)
+			}
+
+			// Should be removed
+			for _, key := range []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "logprobs", "top_logprobs"} {
+				if _, ok := result[key]; ok {
+					t.Errorf("%s should be removed for o4", key)
+				}
+			}
+
+			// Should be preserved
+			if _, ok := result["reasoning_effort"]; !ok {
+				t.Error("reasoning_effort should be preserved for o4")
+			}
+		})
+	}
+}
+
 func TestReplaceBodyParam_GPT5(t *testing.T) {
 	models := []string{"gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "gpt-5.2"}
 

@@ -91,6 +91,15 @@ var mimeTypeMap = map[string]string{
 }
 
 // isPrivateURL checks if a URL points to a private/internal network address.
+//
+// When the hostname is not a literal IP, it is resolved once via net.LookupIP
+// and the result is checked against private ranges.  This is vulnerable to DNS
+// rebinding: an attacker can serve a public IP during this check and then flip
+// the DNS record to a private address before Vertex AI makes its own request.
+// The risk is accepted because (a) Vertex AI fetches the URL server-side and
+// may apply its own protections, and (b) exploitation requires the attacker to
+// control DNS with a very short TTL.  Do not rely on this function as the sole
+// SSRF defence in higher-trust environments.
 func isPrivateURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
