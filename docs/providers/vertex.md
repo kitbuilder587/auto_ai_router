@@ -100,17 +100,17 @@ For thinking-capable Gemini models, the router treats "thinking depth" and "thou
 
 Additional parameters can be passed via `extra_body` for Vertex-specific features:
 
-| Parameter                                          | Description                                                                                       |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `extra_body.generation_config.top_k`               | Top-K sampling                                                                                    |
-| `extra_body.generation_config.response_modalities` | Output modalities (`["TEXT"]`, `["IMAGE"]`, `["AUDIO"]`)                                          |
-| `extra_body.generation_config.temperature`         | Override temperature                                                                              |
-| `extra_body.audio`                                 | Audio output config (see [Audio Output](#audio-output))                                           |
-| `extra_body.thinking_config`                       | Gemini-native thinking config (see [Thinking](#reasoning--thinking))                              |
-| `extra_body.thinking_budget`                       | Gemini 2.5 token budget shorthand (see [Thinking](#reasoning--thinking))                          |
-| `extra_body.thinking_level`                        | Gemini 3+ level shorthand: `minimal`/`low`/`medium`/`high` (see [Thinking](#reasoning--thinking)) |
-| `extra_body.thinking`                              | Anthropic-style thinking config (see [Thinking](#reasoning--thinking))                            |
-| `extra_body.reasoning_effort`                      | OpenAI-style effort: `low`/`medium`/`high`/`disable` (see [Thinking](#reasoning--thinking))       |
+| Parameter                                          | Description                                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `extra_body.generation_config.top_k`               | Top-K sampling                                                                                   |
+| `extra_body.generation_config.response_modalities` | Output modalities (`["TEXT"]`, `["IMAGE"]`, `["AUDIO"]`)                                         |
+| `extra_body.generation_config.temperature`         | Override temperature                                                                             |
+| `extra_body.audio`                                 | Audio output config (see [Audio Output](#audio-output))                                          |
+| `extra_body.thinking_config`                       | Gemini-native thinking config (see [Thinking](#reasoning-thinking))                              |
+| `extra_body.thinking_budget`                       | Gemini 2.5 token budget shorthand (see [Thinking](#reasoning-thinking))                          |
+| `extra_body.thinking_level`                        | Gemini 3+ level shorthand: `minimal`/`low`/`medium`/`high` (see [Thinking](#reasoning-thinking)) |
+| `extra_body.thinking`                              | Anthropic-style thinking config (see [Thinking](#reasoning-thinking))                            |
+| `extra_body.reasoning_effort`                      | OpenAI-style effort: `low`/`medium`/`high`/`disable` (see [Thinking](#reasoning-thinking))       |
 
 #### Unsupported Parameters
 

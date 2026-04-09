@@ -37,7 +37,7 @@ See the [Vertex AI documentation](vertex.md) for the full reference on:
 
 - [Supported parameters](vertex.md#supported-parameters)
 - [Tool calling](vertex.md#tool-calling)
-- [Reasoning / Thinking](vertex.md#reasoning--thinking)
+- [Reasoning / Thinking](vertex.md#reasoning-thinking)
 - [Content types](vertex.md#content-types) (text, images, audio, video)
 - [Audio output](vertex.md#audio-output)
 - [Structured output](vertex.md#structured-output)
