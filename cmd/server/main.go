@@ -175,11 +175,15 @@ func main() {
 		PriceRegistry:          priceRegistry,
 		MaxProviderRetries:     cfg.Server.MaxProviderRetries,
 		ResponseStore:          respStore,
+		SessionStickyEnabled:   cfg.Server.SessionStickyEnabled,
+		SessionStoreTTL:        time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
 	})
 
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
+
+	prx.Start(bgCtx)
 
 	var wg sync.WaitGroup
 	var updateMutex sync.Mutex

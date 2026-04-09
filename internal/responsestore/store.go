@@ -17,6 +17,7 @@ import (
 type StoredEntry struct {
 	ResponseID       string              `json:"response_id"`
 	APIKeyHash       string              `json:"api_key_hash"`
+	CredentialName   string              `json:"credential_name,omitempty"`
 	Model            string              `json:"model"`
 	CreatedAt        int64               `json:"created_at"`
 	ExpiresAt        int64               `json:"expires_at"` // 0 = never expires
@@ -37,6 +38,7 @@ type Store interface {
 		metadata map[string]string,
 		ttlSeconds int,
 		accumulatedInput json.RawMessage,
+		credentialName string,
 	) error
 
 	// GetResponse returns the response if it exists, is not expired, and the
@@ -102,6 +104,7 @@ func (s *bboltStore) SaveResponse(
 	metadata map[string]string,
 	ttlSeconds int,
 	accumulatedInput json.RawMessage,
+	credentialName string,
 ) error {
 	if resp == nil {
 		return fmt.Errorf("responsestore: response is nil")
@@ -109,6 +112,7 @@ func (s *bboltStore) SaveResponse(
 	entry := StoredEntry{
 		ResponseID:       resp.ID,
 		APIKeyHash:       apiKeyHash,
+		CredentialName:   credentialName,
 		Model:            resp.Model,
 		CreatedAt:        resp.CreatedAt,
 		ExpiresAt:        0,

@@ -69,13 +69,13 @@ func TestRedisStore_SaveResponse_NilResponse(t *testing.T) {
 	if addr == "" {
 		// test nil guard without a real connection — the nil check is before any I/O
 		s := &redisStore{}
-		err := s.SaveResponse(context.Background(), "hash", nil, nil, 0, nil)
+		err := s.SaveResponse(context.Background(), "hash", nil, nil, 0, nil, "cred-1")
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "nil")
 		return
 	}
 	store := redisStoreForTest(t, "test:nil:")
-	err := store.SaveResponse(context.Background(), "hash", nil, nil, 0, nil)
+	err := store.SaveResponse(context.Background(), "hash", nil, nil, 0, nil, "cred-1")
 	assert.Error(t, err)
 }
 
@@ -86,7 +86,7 @@ func TestRedisStore_Integration_SaveAndGetResponse(t *testing.T) {
 	ctx := context.Background()
 
 	resp := createTestResponse("redis-sg-1")
-	err := store.SaveResponse(ctx, "hash-sg1", resp, nil, 0, nil)
+	err := store.SaveResponse(ctx, "hash-sg1", resp, nil, 0, nil, "cred-1")
 	require.NoError(t, err)
 
 	got, err := store.GetResponse(ctx, "redis-sg-1", "hash-sg1")
@@ -109,7 +109,7 @@ func TestRedisStore_Integration_GetResponse_Unauthorized(t *testing.T) {
 	ctx := context.Background()
 
 	resp := createTestResponse("redis-auth-1")
-	require.NoError(t, store.SaveResponse(ctx, "correct-hash", resp, nil, 0, nil))
+	require.NoError(t, store.SaveResponse(ctx, "correct-hash", resp, nil, 0, nil, "cred-1"))
 
 	_, err := store.GetResponse(ctx, "redis-auth-1", "wrong-hash")
 	assert.Error(t, err)
@@ -121,7 +121,7 @@ func TestRedisStore_Integration_GetResponseByID(t *testing.T) {
 	ctx := context.Background()
 
 	resp := createTestResponse("redis-byid-1")
-	require.NoError(t, store.SaveResponse(ctx, "some-hash", resp, nil, 0, nil))
+	require.NoError(t, store.SaveResponse(ctx, "some-hash", resp, nil, 0, nil, "cred-1"))
 
 	got, err := store.GetResponseByID(ctx, "redis-byid-1")
 	require.NoError(t, err)
@@ -144,13 +144,14 @@ func TestRedisStore_Integration_GetEntry_WithMetadata(t *testing.T) {
 	meta := map[string]string{"key": "value", "env": "test"}
 	accInput := json.RawMessage(`{"role":"user","content":"hello"}`)
 
-	require.NoError(t, store.SaveResponse(ctx, "entry-hash", resp, meta, 0, accInput))
+	require.NoError(t, store.SaveResponse(ctx, "entry-hash", resp, meta, 0, accInput, "cred-1"))
 
 	entry, err := store.GetEntry(ctx, "redis-entry-1", "entry-hash")
 	require.NoError(t, err)
 	require.NotNil(t, entry)
 	assert.Equal(t, "redis-entry-1", entry.ResponseID)
 	assert.Equal(t, "entry-hash", entry.APIKeyHash)
+	assert.Equal(t, "cred-1", entry.CredentialName)
 	assert.Equal(t, "value", entry.Metadata["key"])
 	assert.Equal(t, "test", entry.Metadata["env"])
 	assert.NotEmpty(t, entry.AccumulatedInput)
@@ -161,7 +162,7 @@ func TestRedisStore_Integration_GetEntry_Unauthorized(t *testing.T) {
 	ctx := context.Background()
 
 	resp := createTestResponse("redis-entry-auth")
-	require.NoError(t, store.SaveResponse(ctx, "owner-hash", resp, nil, 0, nil))
+	require.NoError(t, store.SaveResponse(ctx, "owner-hash", resp, nil, 0, nil, "cred-1"))
 
 	_, err := store.GetEntry(ctx, "redis-entry-auth", "other-hash")
 	assert.Error(t, err)
@@ -174,7 +175,7 @@ func TestRedisStore_Integration_TTL_Expired(t *testing.T) {
 
 	resp := createTestResponse("redis-ttl-1")
 	// TTL=1 second — Redis will expire the key
-	require.NoError(t, store.SaveResponse(ctx, "ttl-hash", resp, nil, 1, nil))
+	require.NoError(t, store.SaveResponse(ctx, "ttl-hash", resp, nil, 1, nil, "cred-1"))
 
 	// should be readable immediately
 	got, err := store.GetResponse(ctx, "redis-ttl-1", "ttl-hash")
@@ -194,7 +195,7 @@ func TestRedisStore_Integration_TTL_NotExpired(t *testing.T) {
 
 	resp := createTestResponse("redis-ttl-2")
 	// TTL=30 seconds — should not expire during test
-	require.NoError(t, store.SaveResponse(ctx, "ttl-hash2", resp, nil, 30, nil))
+	require.NoError(t, store.SaveResponse(ctx, "ttl-hash2", resp, nil, 30, nil, "cred-1"))
 
 	got, err := store.GetResponse(ctx, "redis-ttl-2", "ttl-hash2")
 	require.NoError(t, err)
@@ -206,7 +207,7 @@ func TestRedisStore_Integration_NoTTL(t *testing.T) {
 	ctx := context.Background()
 
 	resp := createTestResponse("redis-no-ttl")
-	require.NoError(t, store.SaveResponse(ctx, "no-ttl-hash", resp, nil, 0, nil))
+	require.NoError(t, store.SaveResponse(ctx, "no-ttl-hash", resp, nil, 0, nil, "cred-1"))
 
 	got, err := store.GetResponse(ctx, "redis-no-ttl", "no-ttl-hash")
 	require.NoError(t, err)
@@ -221,7 +222,7 @@ func TestRedisStore_Integration_MultipleResponses(t *testing.T) {
 	ids := []string{"r1", "r2", "r3", "r4", "r5"}
 	for _, id := range ids {
 		resp := createTestResponse(id)
-		require.NoError(t, store.SaveResponse(ctx, hash, resp, nil, 0, nil))
+		require.NoError(t, store.SaveResponse(ctx, hash, resp, nil, 0, nil, "cred-1"))
 	}
 
 	for _, id := range ids {
@@ -242,7 +243,7 @@ func TestRedisStore_Integration_Overwrite(t *testing.T) {
 		CreatedAt: time.Now().Unix(),
 		Status:    "completed",
 	}
-	require.NoError(t, store.SaveResponse(ctx, "hash", resp1, nil, 0, nil))
+	require.NoError(t, store.SaveResponse(ctx, "hash", resp1, nil, 0, nil, "cred-1"))
 
 	// Overwrite with v2
 	resp2 := &responses.Response{
@@ -251,7 +252,7 @@ func TestRedisStore_Integration_Overwrite(t *testing.T) {
 		CreatedAt: time.Now().Unix(),
 		Status:    "completed",
 	}
-	require.NoError(t, store.SaveResponse(ctx, "hash", resp2, nil, 0, nil))
+	require.NoError(t, store.SaveResponse(ctx, "hash", resp2, nil, 0, nil, "cred-2"))
 
 	got, err := store.GetResponseByID(ctx, "redis-overwrite")
 	require.NoError(t, err)

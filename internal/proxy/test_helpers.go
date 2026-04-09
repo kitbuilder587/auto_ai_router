@@ -87,18 +87,20 @@ func createTestBalancer(baseURL string) (*balancer.RoundRobin, *ratelimit.RPMLim
 
 // TestProxyConfig holds configuration for building a test proxy instance.
 type TestProxyConfig struct {
-	Credentials    []config.CredentialConfig
-	Logger         *slog.Logger
-	Balancer       *balancer.RoundRobin
-	RateLimiter    *ratelimit.RPMLimiter
-	Metrics        *monitoring.Metrics
-	TokenManager   *auth.VertexTokenManager
-	ModelManager   *models.Manager
-	MasterKey      string
-	MaxBodySizeMB  int
-	RequestTimeout time.Duration
-	Version        string
-	Commit         string
+	Credentials          []config.CredentialConfig
+	Logger               *slog.Logger
+	Balancer             *balancer.RoundRobin
+	RateLimiter          *ratelimit.RPMLimiter
+	Metrics              *monitoring.Metrics
+	TokenManager         *auth.VertexTokenManager
+	ModelManager         *models.Manager
+	MasterKey            string
+	MaxBodySizeMB        int
+	RequestTimeout       time.Duration
+	Version              string
+	Commit               string
+	SessionStickyEnabled bool
+	SessionStoreTTL      time.Duration
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -208,6 +210,13 @@ func (b *TestProxyBuilder) WithRequestTimeout(timeout time.Duration) *TestProxyB
 	return b
 }
 
+// WithSessionSticky enables session-sticky credential routing with the given TTL.
+func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilder {
+	b.config.SessionStickyEnabled = true
+	b.config.SessionStoreTTL = ttl
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -221,17 +230,19 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
 	return New(&Config{
-		Balancer:       b.config.Balancer,
-		Logger:         b.config.Logger,
-		MaxBodySizeMB:  b.config.MaxBodySizeMB,
-		RequestTimeout: b.config.RequestTimeout,
-		Metrics:        b.config.Metrics,
-		MasterKey:      b.config.MasterKey,
-		RateLimiter:    b.config.RateLimiter,
-		TokenManager:   b.config.TokenManager,
-		ModelManager:   b.config.ModelManager,
-		Version:        b.config.Version,
-		Commit:         b.config.Commit,
+		Balancer:             b.config.Balancer,
+		Logger:               b.config.Logger,
+		MaxBodySizeMB:        b.config.MaxBodySizeMB,
+		RequestTimeout:       b.config.RequestTimeout,
+		Metrics:              b.config.Metrics,
+		MasterKey:            b.config.MasterKey,
+		RateLimiter:          b.config.RateLimiter,
+		TokenManager:         b.config.TokenManager,
+		ModelManager:         b.config.ModelManager,
+		Version:              b.config.Version,
+		Commit:               b.config.Commit,
+		SessionStickyEnabled: b.config.SessionStickyEnabled,
+		SessionStoreTTL:      b.config.SessionStoreTTL,
 	})
 }
 

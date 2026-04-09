@@ -33,6 +33,9 @@ nav = [
   { "Advanced" = [
     { "Security" = "advanced/security.md" },
     { "Load Balancing" = "advanced/balancing.md" },
+    { "Session-Sticky Routing" = "advanced/session_sticky.md" },
+    { "Responses API" = "advanced/responses.md" },
+    { "Redis / Valkey" = "advanced/redis.md" },
     { "Model Aliases" = "advanced/model_alias.md" },
     { "Troubleshooting" = "advanced/troubleshooting.md" },
   ]},

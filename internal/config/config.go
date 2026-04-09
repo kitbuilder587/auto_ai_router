@@ -343,6 +343,8 @@ type ServerConfig struct {
 	WriteTimeout           time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 60s)
 	IdleTimeout            time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 2*write_timeout)
 	MaxProviderRetries     int           `yaml:"max_provider_retries"`        // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
+	SessionStickyEnabled   bool          `yaml:"session_sticky_enabled"`      // Enable session-sticky credential routing (default: true)
+	SessionStickyTTL       int           `yaml:"session_sticky_ttl_minutes"`  // Session binding TTL in minutes (0 = default 6)
 	ModelPricesLink        string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
@@ -377,6 +379,8 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		WriteTimeout           string `yaml:"write_timeout"`
 		IdleTimeout            string `yaml:"idle_timeout"`
 		MaxProviderRetries     string `yaml:"max_provider_retries"`
+		SessionStickyEnabled   string `yaml:"session_sticky_enabled"`
+		SessionStickyTTL       string `yaml:"session_sticky_ttl_minutes"`
 		ModelPricesLink        string `yaml:"model_prices_link,omitempty"`
 	}
 
@@ -424,6 +428,12 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Max provider retries (default: 2 = 3 total attempts)
 	if s.MaxProviderRetries, err = parseField(temp.MaxProviderRetries, 2, strconv.Atoi, "max_provider_retries"); err != nil {
+		return err
+	}
+	if s.SessionStickyEnabled, err = parseField(temp.SessionStickyEnabled, true, strconv.ParseBool, "session_sticky_enabled"); err != nil {
+		return err
+	}
+	if s.SessionStickyTTL, err = parseField(temp.SessionStickyTTL, 0, strconv.Atoi, "session_sticky_ttl_minutes"); err != nil {
 		return err
 	}
 
@@ -917,6 +927,9 @@ func (c *Config) Validate() error {
 	// Validate MaxProviderRetries
 	if c.Server.MaxProviderRetries < 0 {
 		return fmt.Errorf("invalid max_provider_retries: %d (must be >= 0)", c.Server.MaxProviderRetries)
+	}
+	if c.Server.SessionStickyTTL < 0 {
+		return fmt.Errorf("invalid session_sticky_ttl_minutes: %d (must be >= 0)", c.Server.SessionStickyTTL)
 	}
 
 	// Validate IdleTimeout against WriteTimeout

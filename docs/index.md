@@ -48,3 +48,13 @@ graph LR
 1. [Installation](getting-started/installation.md) — build from source or use Docker
 2. [Configuration](getting-started/configuration.md) — set up providers and credentials
 3. [API Usage](getting-started/api.md) — make your first request
+
+## Advanced
+
+- [Load Balancing](advanced/balancing.md) — round-robin, fallback credentials
+- [Session-Sticky Routing](advanced/session_sticky.md) — cache affinity for multi-turn conversations
+- [Responses API](advanced/responses.md) — multi-turn support, passthrough models
+- [Redis / Valkey](advanced/redis.md) — distributed rate limiting and response store
+- [Security](advanced/security.md) — master key, token auth
+- [Model Aliases](advanced/model_alias.md) — routing by alias
+- [Troubleshooting](advanced/troubleshooting.md)

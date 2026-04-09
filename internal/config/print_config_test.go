@@ -31,6 +31,8 @@ func TestPrintConfig(t *testing.T) {
 			IdleConnTimeout:        30 * time.Second,
 			ModelPricesLink:        "https://example.com/prices.json",
 			MaxProviderRetries:     3,
+			SessionStickyEnabled:   true,
+			SessionStickyTTL:       6,
 		},
 		Monitoring: MonitoringConfig{
 			PrometheusEnabled: true,
@@ -89,6 +91,8 @@ func TestPrintConfig(t *testing.T) {
 	output := buf.String()
 	assert.NotEmpty(t, output)
 	assert.Contains(t, output, "Configuration Loaded")
+	assert.Contains(t, output, "session_sticky_enabled")
+	assert.Contains(t, output, "session_sticky_ttl_minutes")
 }
 
 func TestPrintConfig_DisabledLiteLLMDB(t *testing.T) {

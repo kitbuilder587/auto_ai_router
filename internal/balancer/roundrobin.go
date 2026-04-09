@@ -146,6 +146,35 @@ func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.Credenti
 	return r.next(modelID, true, true)
 }
 
+// NextSpecific tries to return a specific credential by name without advancing the
+// round-robin state. It still applies model availability, ban, and rate-limit checks.
+func (r *RoundRobin) NextSpecific(credentialName, modelID string) (*config.CredentialConfig, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	idx, ok := r.credentialIndex[credentialName]
+	if !ok {
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	cred := &r.credentials[idx]
+	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+		if !r.modelChecker.HasModel(credentialName, modelID) {
+			return nil, ErrNoCredentialsAvailable
+		}
+	}
+
+	if r.fail2ban.IsBanned(credentialName, modelID) {
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	if !r.rateLimiter.TryAllowAll(credentialName, modelID) {
+		return nil, ErrRateLimitExceeded
+	}
+
+	return cred, nil
+}
+
 func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool) (*config.CredentialConfig, error) {
 	return r.nextExcluding(modelID, allowOnlyFallback, allowOnlyProxy, "", nil)
 }

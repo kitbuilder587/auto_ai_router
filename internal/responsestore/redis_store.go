@@ -42,6 +42,7 @@ func (s *redisStore) SaveResponse(
 	metadata map[string]string,
 	ttlSeconds int,
 	accumulatedInput json.RawMessage,
+	credentialName string,
 ) error {
 	if resp == nil {
 		return fmt.Errorf("responsestore: response is nil")
@@ -50,6 +51,7 @@ func (s *redisStore) SaveResponse(
 	entry := StoredEntry{
 		ResponseID:       resp.ID,
 		APIKeyHash:       apiKeyHash,
+		CredentialName:   credentialName,
 		Model:            resp.Model,
 		CreatedAt:        resp.CreatedAt,
 		ExpiresAt:        0,

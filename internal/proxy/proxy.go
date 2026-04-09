@@ -63,6 +63,7 @@ type RequestLogContext struct {
 	Logged               bool                     // True if already logged (prevents duplicate logging)
 	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
 	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
+	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
 }
 
 // HealthChecker provides cached database health status
@@ -92,6 +93,8 @@ type Config struct {
 	PriceRegistry          *models.ModelPriceRegistry // Model pricing information (optional)
 	MaxProviderRetries     int                        // Max same-type credential retries (default: 2)
 	ResponseStore          responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled   bool
+	SessionStoreTTL        time.Duration
 }
 
 type Proxy struct {
@@ -112,6 +115,7 @@ type Proxy struct {
 	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
 	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	sessionStore        *SessionStore              // Optional: session-sticky credential routing
 }
 
 var (
@@ -157,6 +161,15 @@ func New(cfg *Config) *Proxy {
 	}
 	maxResponseBodySize := int64(cfg.MaxBodySizeMB) * int64(multiplier) * 1024 * 1024
 
+	var sessionStore *SessionStore
+	if cfg.SessionStickyEnabled {
+		ttl := cfg.SessionStoreTTL
+		if ttl == 0 {
+			ttl = 6 * time.Minute
+		}
+		sessionStore = NewSessionStore(ttl)
+	}
+
 	return &Proxy{
 		balancer:            cfg.Balancer,
 		logger:              cfg.Logger,
@@ -174,8 +187,30 @@ func New(cfg *Config) *Proxy {
 		priceRegistry:       cfg.PriceRegistry,
 		maxProviderRetries:  cfg.MaxProviderRetries,
 		responseStore:       cfg.ResponseStore,
+		sessionStore:        sessionStore,
 		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
+}
+
+// Start launches background workers owned by Proxy.
+func (p *Proxy) Start(ctx context.Context) {
+	if p.sessionStore != nil {
+		go p.sessionStore.StartCleanup(ctx, 2*time.Minute)
+	}
+}
+
+func (p *Proxy) setSessionBinding(sessionID, modelID, credentialName string) {
+	if p.sessionStore == nil || sessionID == "" || modelID == "" || credentialName == "" {
+		return
+	}
+	p.sessionStore.Set(sessionID, modelID, credentialName)
+}
+
+func (p *Proxy) clearSessionBinding(sessionID, modelID string) {
+	if p.sessionStore == nil || sessionID == "" || modelID == "" {
+		return
+	}
+	p.sessionStore.Delete(sessionID, modelID)
 }
 
 // GetMasterKey returns the proxy master key.
@@ -330,6 +365,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			logCtx.Logged = true
 		}
+		if !logCtx.RequestCompleted {
+			p.clearSessionBinding(logCtx.SessionID, logCtx.ModelID)
+		}
 	}()
 
 	prepared, ok := p.orchestrateRequest(w, r, logCtx)
@@ -361,7 +399,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			applyResponsesMetadata(resp, meta)
 			if err := p.responseStore.SaveResponse(
-				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput,
+				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput, cred.Name,
 			); err != nil {
 				p.logger.Warn("Failed to save response to store", "id", resp.ID, "error", err)
 			} else {
@@ -484,6 +522,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if proxyResp.IsStreaming {
 			p.logger.Debug("Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
+			streamCompleted := false
 
 			if prepared.convertedResp {
 				// Proxy streaming + Responses API: need to convert Chat Completions SSE
@@ -504,6 +543,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
 					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
+				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			} else if prepared.passthroughResponses {
 				// Codex passthrough: provider returns native Responses API SSE — stream as-is.
@@ -522,12 +563,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
 					p.logger.Error("Failed to handle proxy passthrough Responses API streaming", "error", err)
+				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			} else {
 				totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
 				if err != nil {
 					p.logger.Error("Failed to write streaming proxy response",
 						"credential", cred.Name, "error", err)
+				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					streamCompleted = true
 				}
 				if totalTokens > 0 {
 					p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
@@ -537,6 +582,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					p.logger.Debug("Proxy streaming token usage recorded",
 						"credential", cred.Name, "model", modelID, "tokens", totalTokens)
 				}
+			}
+			if streamCompleted {
+				logCtx.RequestCompleted = true
+				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 			}
 		} else {
 			// Save passthrough Responses API response or convert Chat Completions response if needed
@@ -588,6 +637,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				p.logger.Debug("Proxy token usage recorded",
 					"credential", cred.Name, "model", modelID, "tokens", tokens)
+			}
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				logCtx.RequestCompleted = true
+				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 			}
 		}
 
@@ -1039,7 +1092,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.Status = "failure"
 			logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
 		}
-
 		if logCtx.Token != "" && logCtx.Credential != nil {
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 				p.logger.Warn("Failed to queue spend log",
@@ -1072,6 +1124,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			"resp_content_type", resp.Header.Get("Content-Type"),
 			"resp_status", resp.StatusCode)
 
+		streamCompleted := false
 		if prepared.convertedResp {
 			// For Responses API: only transform successful responses (2xx status).
 			// For error responses (4xx/5xx), pass through the provider error as-is.
@@ -1083,6 +1136,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					// Note: finalizeStreamingLog inside handleTransformedStreaming already
 					// logged the spend. We only update error metadata here for the defer
 					// safety net, but don't reset Logged to avoid double logging.
+				} else {
+					streamCompleted = true
 				}
 			} else {
 				// Error response: stream using provider's native format instead
@@ -1091,22 +1146,30 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle vertex streaming response", "error", err)
+					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						streamCompleted = true
 					}
 				case config.ProviderTypeAnthropic:
 					err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle anthropic streaming response", "error", err)
+					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						streamCompleted = true
 					}
 				case config.ProviderTypeBedrock:
 					err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						streamCompleted = true
 					}
 				default:
 					// For passthrough providers, stream error as-is
 					err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle streaming response", "error", err)
+					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+						streamCompleted = true
 					}
 				}
 			}
@@ -1115,12 +1178,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				if err := p.handlePassthroughResponsesStreaming(w, resp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
 					p.logger.Error("Failed to handle passthrough Responses API streaming", "error", err)
+				} else {
+					streamCompleted = true
 				}
 			} else {
 				// Error response: stream as-is
 				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle streaming response", "error", err)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			}
 		} else {
@@ -1129,23 +1196,35 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle vertex streaming response", "error", err)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			case config.ProviderTypeAnthropic:
 				err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle anthropic streaming response", "error", err)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			case config.ProviderTypeBedrock:
 				err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			default:
 				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle streaming response", "error", err)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			}
+		}
+		if streamCompleted {
+			logCtx.RequestCompleted = true
+			p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 		}
 
 	} else {
@@ -1180,6 +1259,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				p.logger.Error("Failed to copy response body", "error", err)
 			}
+		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			logCtx.RequestCompleted = true
+			p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 		}
 	}
 }

@@ -61,7 +61,7 @@ func TestBboltStore_SaveAndGetResponse(t *testing.T) {
 	resp := createTestResponse("test-response-id")
 
 	// Save response
-	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil)
+	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil, "cred-1")
 	if err != nil {
 		t.Fatalf("failed to save response: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestBboltStore_GetResponse_Unauthorized(t *testing.T) {
 	apiKeyHash := "correct-hash"
 	resp := createTestResponse("auth-test-id")
 
-	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil)
+	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil, "cred-1")
 	if err != nil {
 		t.Fatalf("failed to save response: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestBboltStore_GetResponseByID(t *testing.T) {
 	apiKeyHash := "test-hash"
 	resp := createTestResponse("by-id-test")
 
-	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil)
+	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil, "cred-1")
 	if err != nil {
 		t.Fatalf("failed to save response: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestBboltStore_GetEntry(t *testing.T) {
 	metadata := map[string]string{"key": "value"}
 	accumulatedInput := json.RawMessage(`{"test": true}`)
 
-	err = store.SaveResponse(ctx, apiKeyHash, resp, metadata, 0, accumulatedInput)
+	err = store.SaveResponse(ctx, apiKeyHash, resp, metadata, 0, accumulatedInput, "cred-1")
 	if err != nil {
 		t.Fatalf("failed to save response: %v", err)
 	}
@@ -184,6 +184,9 @@ func TestBboltStore_GetEntry(t *testing.T) {
 
 	if entry.APIKeyHash != apiKeyHash {
 		t.Errorf("expected APIKeyHash %s, got %s", apiKeyHash, entry.APIKeyHash)
+	}
+	if entry.CredentialName != "cred-1" {
+		t.Errorf("expected CredentialName cred-1, got %s", entry.CredentialName)
 	}
 
 	if entry.Metadata == nil || entry.Metadata["key"] != "value" {
@@ -216,7 +219,7 @@ func TestBboltStore_SaveResponse_NilResponse(t *testing.T) {
 
 	ctx := context.Background()
 
-	err = store.SaveResponse(ctx, "hash", nil, nil, 0, nil)
+	err = store.SaveResponse(ctx, "hash", nil, nil, 0, nil, "cred-1")
 	if err == nil {
 		t.Error("expected error for nil response")
 	}
@@ -281,7 +284,7 @@ func TestBboltStore_Expires(t *testing.T) {
 	resp := createTestResponse("expire-test-id")
 
 	// Save with TTL of 2 seconds (to account for second-level precision)
-	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 2, nil)
+	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 2, nil, "cred-1")
 	if err != nil {
 		t.Fatalf("failed to save response: %v", err)
 	}
@@ -320,7 +323,7 @@ func TestBboltStore_CleanupExpired(t *testing.T) {
 
 	// Save a response with TTL=0 (no expiry)
 	resp := createTestResponse("cleanup-test-id")
-	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil)
+	err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil, "cred-1")
 	if err != nil {
 		t.Fatalf("failed to save response: %v", err)
 	}
@@ -354,7 +357,7 @@ func TestBboltStore_MultipleResponses(t *testing.T) {
 	// Save multiple responses
 	for i := 0; i < 10; i++ {
 		resp := createTestResponse("multi-" + string(rune('0'+i)))
-		err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil)
+		err = store.SaveResponse(ctx, apiKeyHash, resp, nil, 0, nil, "cred-1")
 		if err != nil {
 			t.Fatalf("failed to save response %d: %v", i, err)
 		}
