@@ -6,15 +6,16 @@ Session-sticky routing ensures that requests belonging to the same conversation 
 
 Modern LLM providers maintain an internal prompt cache. When consecutive turns of a conversation reach the same model instance behind the same API key, the provider can reuse the cached KV-state of the prefix and charge only for new tokens:
 
-| Scenario | Without sticky routing | With sticky routing |
-|----------|----------------------|---------------------|
-| Turn 1 (10 000 tokens) | cred_A, full cost | cred_A, full cost |
-| Turn 2 (10 200 tokens) | cred_B, full cost | cred_A, 200 new tokens billed |
-| Turn 3 (10 400 tokens) | cred_A, full cost | cred_A, 200 new tokens billed |
+| Scenario               | Without sticky routing | With sticky routing           |
+| ---------------------- | ---------------------- | ----------------------------- |
+| Turn 1 (10 000 tokens) | cred_A, full cost      | cred_A, full cost             |
+| Turn 2 (10 200 tokens) | cred_B, full cost      | cred_A, 200 new tokens billed |
+| Turn 3 (10 400 tokens) | cred_A, full cost      | cred_A, 200 new tokens billed |
 
 The savings scale with context length. For long conversations the effective cost can drop by 80–90 %.
 
 Sticky routing also helps providers that require continuity for features like:
+
 - Vertex AI `thoughtSignature` (reasoning continuation)
 - Anthropic extended thinking across turns
 
@@ -139,15 +140,15 @@ Key consequences:
 
 The proxy extracts a session ID from the request body in the following priority order:
 
-| Field | Location |
-|-------|----------|
-| `extra_body.litellm_session_id` | nested in `extra_body` |
-| `extra_body.chat_id` | nested in `extra_body` |
-| `extra_body.session_id` | nested in `extra_body` |
-| `session_id` | top-level field |
-| `user` | top-level field (OpenAI standard) |
-| `safety_identifier` | top-level field |
-| `prompt_cache_key` | top-level field |
+| Field                           | Location                          |
+| ------------------------------- | --------------------------------- |
+| `extra_body.litellm_session_id` | nested in `extra_body`            |
+| `extra_body.chat_id`            | nested in `extra_body`            |
+| `extra_body.session_id`         | nested in `extra_body`            |
+| `session_id`                    | top-level field                   |
+| `user`                          | top-level field (OpenAI standard) |
+| `safety_identifier`             | top-level field                   |
+| `prompt_cache_key`              | top-level field                   |
 
 The simplest approach — compatible with the standard OpenAI SDK — is to pass `user`:
 
@@ -185,11 +186,11 @@ server:
 
 Choose a TTL that matches your conversation cadence:
 
-| Use case | Recommended TTL |
-|----------|----------------|
-| Interactive chat (fast turns) | 5–10 minutes (default) |
-| Agentic / slow workflows | 30–60 minutes |
-| Batch processing with breaks | disable sticky or use a very long TTL |
+| Use case                      | Recommended TTL                       |
+| ----------------------------- | ------------------------------------- |
+| Interactive chat (fast turns) | 5–10 minutes (default)                |
+| Agentic / slow workflows      | 30–60 minutes                         |
+| Batch processing with breaks  | disable sticky or use a very long TTL |
 
 Negative values are rejected at startup.
 
@@ -252,20 +253,20 @@ r2 = client.responses.create(
 
 ## Edge Cases
 
-| Scenario | Behaviour |
-|----------|-----------|
-| `session_sticky_enabled: false` | Plain round-robin, no binding stored |
-| No `user` / `session_id` in request | No binding attempted, plain round-robin |
-| First request for a session | Round-robin selects credential; binding written only on success |
-| Bound credential is banned | Graceful fallback to round-robin; binding is NOT cleared (still valid for other models) |
-| Bound credential is rate-limited | Same as banned — fallback, binding kept |
-| Bound credential removed from config | `NextSpecific` returns not-found; fallback to round-robin |
-| Request fails (5xx / disconnect) | Binding is cleared by `defer` in `ProxyRequest` |
-| Streaming failure mid-stream | `streamCompleted = false` → binding cleared |
-| Same-type retry succeeds on cred B | Binding updated to cred B |
-| Fallback proxy succeeds | Binding updated to fallback credential |
-| TTL expired between turns | Binding treated as absent; next round-robin result starts a new binding |
-| One `sessionID`, multiple models | Independent bindings per `{sessionID, modelID}` pair |
+| Scenario                             | Behaviour                                                                               |
+| ------------------------------------ | --------------------------------------------------------------------------------------- |
+| `session_sticky_enabled: false`      | Plain round-robin, no binding stored                                                    |
+| No `user` / `session_id` in request  | No binding attempted, plain round-robin                                                 |
+| First request for a session          | Round-robin selects credential; binding written only on success                         |
+| Bound credential is banned           | Graceful fallback to round-robin; binding is NOT cleared (still valid for other models) |
+| Bound credential is rate-limited     | Same as banned — fallback, binding kept                                                 |
+| Bound credential removed from config | `NextSpecific` returns not-found; fallback to round-robin                               |
+| Request fails (5xx / disconnect)     | Binding is cleared by `defer` in `ProxyRequest`                                         |
+| Streaming failure mid-stream         | `streamCompleted = false` → binding cleared                                             |
+| Same-type retry succeeds on cred B   | Binding updated to cred B                                                               |
+| Fallback proxy succeeds              | Binding updated to fallback credential                                                  |
+| TTL expired between turns            | Binding treated as absent; next round-robin result starts a new binding                 |
+| One `sessionID`, multiple models     | Independent bindings per `{sessionID, modelID}` pair                                    |
 
 ## Performance Notes
 
