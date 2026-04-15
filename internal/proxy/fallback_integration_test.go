@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -508,33 +509,43 @@ func TestFallbackPath_HeadersPreserved(t *testing.T) {
 	assert.Equal(t, "application/json", fallbackHeaders.Get("Content-Type"))
 }
 
-// TestProxyChain_PrimaryFailsFallbackSucceeds_PrimaryCalledOnce tests the distributed
-// proxy chain scenario:
-//
-//	router01 receives request
-//	  └─► router02 (primary proxy) → returns 429
-//	      └─► router01 detects retryable error
-//	          └─► router03 (fallback proxy) → success
-//
-// Critical invariant: router02 must be called exactly ONCE.
-// Before the fix (missing triedCreds[cred.Name]=true at loop start), router02 was
-// re-selected on the first same-type retry because it was not yet in the exclude set,
-// causing it to be called 2–3 times before the fallback was reached.
-func TestProxyChain_PrimaryFailsFallbackSucceeds_PrimaryCalledOnce(t *testing.T) {
-	var router02Calls, router03Calls int32
+// callRecorder is a thread-safe ordered log of which upstream was hit.
+// Used in proxy chain tests to assert both the call count AND the exact sequence.
+type callRecorder struct {
+	mu  sync.Mutex
+	log []string
+}
 
-	// router02: primary proxy, always returns 429
-	router02 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&router02Calls, 1)
+func (c *callRecorder) record(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.log = append(c.log, name)
+}
+
+func (c *callRecorder) snapshot() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.log))
+	copy(out, c.log)
+	return out
+}
+
+// buildProxyChain returns (primary httptest.Server, fallback httptest.Server, *Proxy).
+// primary always returns primaryStatus; fallback always returns 200 with a JSON body.
+// maxRetries is passed directly to WithMaxProviderRetries so the test controls
+// how many same-type retry attempts are made.
+func buildProxyChain(t *testing.T, rec *callRecorder, primaryStatus int, maxRetries int) (*httptest.Server, *httptest.Server, *Proxy) {
+	t.Helper()
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record("router02")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
+		w.WriteHeader(primaryStatus)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream_error"})
 	}))
-	defer router02.Close()
 
-	// router03: fallback proxy, returns success
-	router03 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&router03Calls, 1)
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record("router03")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -545,16 +556,14 @@ func TestProxyChain_PrimaryFailsFallbackSucceeds_PrimaryCalledOnce(t *testing.T)
 			},
 		})
 	}))
-	defer router03.Close()
 
-	// router01 configuration: router02 as primary, router03 as fallback
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
 				Name:       "router02",
 				Type:       config.ProviderTypeProxy,
 				APIKey:     "router02-key",
-				BaseURL:    router02.URL,
+				BaseURL:    primary.URL,
 				RPM:        100,
 				TPM:        10000,
 				IsFallback: false,
@@ -563,130 +572,119 @@ func TestProxyChain_PrimaryFailsFallbackSucceeds_PrimaryCalledOnce(t *testing.T)
 				Name:       "router03",
 				Type:       config.ProviderTypeProxy,
 				APIKey:     "router03-key",
-				BaseURL:    router03.URL,
+				BaseURL:    fallback.URL,
 				RPM:        100,
 				TPM:        10000,
 				IsFallback: true,
 			},
 		).
+		WithMaxProviderRetries(maxRetries).
 		Build()
 
-	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	prx.ProxyRequest(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK from router03 fallback")
-	assert.Contains(t, w.Body.String(), "router03", "Expected response from router03")
-
-	// Primary (router02) must be called exactly once — not re-selected by same-type retry loop.
-	// With the bug (missing triedCreds[cred.Name]=true), router02 was called 2+ times.
-	assert.Equal(t, int32(1), router02Calls, "router02 must be called exactly once")
-	assert.Equal(t, int32(1), router03Calls, "router03 (fallback) must be called exactly once")
+	return primary, fallback, prx
 }
 
-// TestProxyChain_PrimaryFailsWith500_FallbackSucceeds tests the same chain
-// with a 5xx server error from the primary proxy.
-func TestProxyChain_PrimaryFailsWith500_FallbackSucceeds(t *testing.T) {
-	var router02Calls, router03Calls int32
-
-	router02 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&router02Calls, 1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream_error"})
-	}))
-	defer router02.Close()
-
-	router03 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&router03Calls, 1)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":     "chatcmpl-router03-500",
-			"object": "chat.completion",
-			"choices": []map[string]interface{}{
-				{"message": map[string]string{"role": "assistant", "content": "Recovered via router03"}},
-			},
-		})
-	}))
-	defer router03.Close()
-
-	prx := NewTestProxyBuilder().
-		WithCredentials(
-			config.CredentialConfig{
-				Name:       "router02",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "router02-key",
-				BaseURL:    router02.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
-			},
-			config.CredentialConfig{
-				Name:       "router03",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "router03-key",
-				BaseURL:    router03.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
-			},
-		).
-		Build()
-
-	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+// doChainRequest fires a single POST /v1/chat/completions at prx and returns the recorder.
+func doChainRequest(prx *Proxy) *httptest.ResponseRecorder {
+	body := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-
 	prx.ProxyRequest(w, req)
+	return w
+}
 
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "router03")
-	assert.Equal(t, int32(1), router02Calls, "router02 must be called exactly once")
-	assert.Equal(t, int32(1), router03Calls, "router03 (fallback) must be called exactly once")
+// TestProxyChain_PrimaryFailsFallbackSucceeds_429 tests the distributed proxy chain:
+//
+//	router01 receives request
+//	  └─► router02 (primary proxy) → 429 rate-limit
+//	      └─► router01 detects retryable error
+//	          └─► router03 (fallback proxy) → 200 success
+//
+// Verified invariants:
+//  1. Final response is 200 from router03.
+//  2. The exact call sequence is ["router02", "router03"] — router02 is called
+//     once before router03, never a second time.
+//
+// Without the fix (missing triedCreds[cred.Name]=true at loop start) and with
+// maxProviderRetries=2, the balancer re-selects router02 on attempt=1 because
+// triedCreds was empty. The recorded sequence would be
+// ["router02", "router02", "router03"], causing this test to fail.
+func TestProxyChain_PrimaryFailsFallbackSucceeds_429(t *testing.T) {
+	rec := &callRecorder{}
+	primary, fallback, prx := buildProxyChain(t, rec, http.StatusTooManyRequests, 2)
+	defer primary.Close()
+	defer fallback.Close()
+
+	w := doChainRequest(prx)
+
+	require.Equal(t, http.StatusOK, w.Code, "final response must be 200 from router03")
+	require.Contains(t, w.Body.String(), "router03")
+
+	calls := rec.snapshot()
+	require.Equal(t, []string{"router02", "router03"}, calls,
+		"expected exactly [router02 → router03]; got %v\n"+
+			"if router02 appears twice the triedCreds fix is missing", calls)
+}
+
+// TestProxyChain_PrimaryFailsFallbackSucceeds_500 tests the same chain
+// with a 5xx server error from the primary proxy.
+//
+// Same invariants as the 429 test; only the triggering status code differs.
+func TestProxyChain_PrimaryFailsFallbackSucceeds_500(t *testing.T) {
+	rec := &callRecorder{}
+	primary, fallback, prx := buildProxyChain(t, rec, http.StatusInternalServerError, 2)
+	defer primary.Close()
+	defer fallback.Close()
+
+	w := doChainRequest(prx)
+
+	require.Equal(t, http.StatusOK, w.Code, "final response must be 200 from router03")
+	require.Contains(t, w.Body.String(), "router03")
+
+	calls := rec.snapshot()
+	require.Equal(t, []string{"router02", "router03"}, calls,
+		"expected exactly [router02 → router03]; got %v", calls)
 }
 
 // TestProxyChain_NoFallback_ErrorPropagated tests that when there is no fallback
-// configured on the chain, the original error from the primary is returned to the client.
+// configured, the original error is returned to the client.
+//
+// With maxProviderRetries=2 and only one primary credential:
+//   - With the fix:    router02 is added to triedCreds immediately → tried once → error returned.
+//   - Without the fix: triedCreds is empty on attempt=1, so the balancer re-selects router02
+//     → tried twice before the loop exits — the call log would be ["router02", "router02"].
 func TestProxyChain_NoFallback_ErrorPropagated(t *testing.T) {
-	var router02Calls int32
+	rec := &callRecorder{}
 
-	router02 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&router02Calls, 1)
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record("router02")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
 	}))
-	defer router02.Close()
+	defer primary.Close()
 
 	prx := NewTestProxyBuilder().
-		WithCredentials(
-			config.CredentialConfig{
-				Name:       "router02",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "router02-key",
-				BaseURL:    router02.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
-			},
-		).
+		WithCredentials(config.CredentialConfig{
+			Name:       "router02",
+			Type:       config.ProviderTypeProxy,
+			APIKey:     "router02-key",
+			BaseURL:    primary.URL,
+			RPM:        100,
+			TPM:        10000,
+			IsFallback: false,
+		}).
+		WithMaxProviderRetries(2).
 		Build()
 
-	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
-	req.Header.Set("Authorization", "Bearer master-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+	w := doChainRequest(prx)
 
-	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusTooManyRequests, w.Code, "original error must be propagated")
 
-	assert.Equal(t, http.StatusTooManyRequests, w.Code, "Original error must propagate when no fallback exists")
-	assert.Equal(t, int32(1), router02Calls, "router02 must be called exactly once")
+	calls := rec.snapshot()
+	require.Equal(t, []string{"router02"}, calls,
+		"router02 must be called exactly once; got %v\n"+
+			"if router02 appears twice the triedCreds fix is missing", calls)
 }
