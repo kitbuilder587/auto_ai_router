@@ -382,6 +382,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Handle proxy credential type with same-type retry + fallback
 	if cred.Type == config.ProviderTypeProxy {
 		triedCreds := GetTried(r.Context())
+		triedCreds[cred.Name] = true // mark initial credential as tried to prevent re-selection on first retry
 		var proxyResp *ProxyResponse
 		var lastProxyErr error
 		var shouldRetry bool

@@ -8,20 +8,8 @@ package proxy
 // 2. Primary returns 5xx (server error) -> fallback should handle
 // 3. Both primary and fallback fail -> original error returned
 // 4. Request body and headers are preserved during fallback
-//
-// CURRENT STATUS: Tests reveal a critical gap in the implementation:
-// - Fallback retry WORKS for non-proxy credentials (Vertex, Anthropic, OpenAI)
-// - Fallback retry FAILS for proxy-type credentials (Type: "proxy")
-//
-// Root Cause: In proxy.go:309-311, when credential type is ProviderTypeProxy,
-// the proxy.forwardToProxy() function is called and immediately returns WITHOUT
-// checking for fallback retry. The fallback retry logic (lines 493-513) is only
-// implemented for the non-proxy credential path.
-//
-// Impact: Proxy-chain deployments with fallback proxies won't actually fallback
-// when primary returns errors, compromising high-availability design.
-//
-// See fallback_retry_analysis.md for detailed analysis and implementation plan.
+// 5. Proxy chain: router01 → router02 (primary) fails → router03 (fallback) succeeds,
+//    router02 is called exactly once (not re-selected by the same-type retry loop)
 
 import (
 	"encoding/json"
@@ -39,15 +27,6 @@ import (
 
 // TestFallbackPath_PrimaryReturns429 tests that when primary credential returns 429,
 // the request is retried with fallback credential and response is returned correctly.
-//
-// NOTE: This test is currently EXPECTED TO FAIL - it reveals a critical gap in the
-// implementation. Proxy-type credentials don't support fallback retry, even though
-// the ShouldRetryWithFallback() and TryFallbackProxy() logic exists.
-// See fallback_retry_analysis.md for details.
-//
-// The issue is in proxy.go:309-311 where proxy credentials are handled with
-// immediate return without fallback retry logic. This needs to be fixed to match
-// the non-proxy credential path (lines 493-513).
 func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 	// Track which server was called and how many times
 	var primaryCalls, fallbackCalls int32
@@ -527,4 +506,187 @@ func TestFallbackPath_HeadersPreserved(t *testing.T) {
 	assert.Equal(t, "test-value", fallbackHeaders.Get("X-Custom-Header"))
 	// Content-Type should be preserved
 	assert.Equal(t, "application/json", fallbackHeaders.Get("Content-Type"))
+}
+
+// TestProxyChain_PrimaryFailsFallbackSucceeds_PrimaryCalledOnce tests the distributed
+// proxy chain scenario:
+//
+//	router01 receives request
+//	  └─► router02 (primary proxy) → returns 429
+//	      └─► router01 detects retryable error
+//	          └─► router03 (fallback proxy) → success
+//
+// Critical invariant: router02 must be called exactly ONCE.
+// Before the fix (missing triedCreds[cred.Name]=true at loop start), router02 was
+// re-selected on the first same-type retry because it was not yet in the exclude set,
+// causing it to be called 2–3 times before the fallback was reached.
+func TestProxyChain_PrimaryFailsFallbackSucceeds_PrimaryCalledOnce(t *testing.T) {
+	var router02Calls, router03Calls int32
+
+	// router02: primary proxy, always returns 429
+	router02 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&router02Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
+	}))
+	defer router02.Close()
+
+	// router03: fallback proxy, returns success
+	router03 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&router03Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":     "chatcmpl-router03",
+			"object": "chat.completion",
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"role": "assistant", "content": "Response from router03"}},
+			},
+		})
+	}))
+	defer router03.Close()
+
+	// router01 configuration: router02 as primary, router03 as fallback
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "router02",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "router02-key",
+				BaseURL:    router02.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "router03",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "router03-key",
+				BaseURL:    router03.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
+
+	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK from router03 fallback")
+	assert.Contains(t, w.Body.String(), "router03", "Expected response from router03")
+
+	// Primary (router02) must be called exactly once — not re-selected by same-type retry loop.
+	// With the bug (missing triedCreds[cred.Name]=true), router02 was called 2+ times.
+	assert.Equal(t, int32(1), router02Calls, "router02 must be called exactly once")
+	assert.Equal(t, int32(1), router03Calls, "router03 (fallback) must be called exactly once")
+}
+
+// TestProxyChain_PrimaryFailsWith500_FallbackSucceeds tests the same chain
+// with a 5xx server error from the primary proxy.
+func TestProxyChain_PrimaryFailsWith500_FallbackSucceeds(t *testing.T) {
+	var router02Calls, router03Calls int32
+
+	router02 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&router02Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream_error"})
+	}))
+	defer router02.Close()
+
+	router03 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&router03Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":     "chatcmpl-router03-500",
+			"object": "chat.completion",
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"role": "assistant", "content": "Recovered via router03"}},
+			},
+		})
+	}))
+	defer router03.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "router02",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "router02-key",
+				BaseURL:    router02.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "router03",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "router03-key",
+				BaseURL:    router03.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true,
+			},
+		).
+		Build()
+
+	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "router03")
+	assert.Equal(t, int32(1), router02Calls, "router02 must be called exactly once")
+	assert.Equal(t, int32(1), router03Calls, "router03 (fallback) must be called exactly once")
+}
+
+// TestProxyChain_NoFallback_ErrorPropagated tests that when there is no fallback
+// configured on the chain, the original error from the primary is returned to the client.
+func TestProxyChain_NoFallback_ErrorPropagated(t *testing.T) {
+	var router02Calls int32
+
+	router02 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&router02Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
+	}))
+	defer router02.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "router02",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "router02-key",
+				BaseURL:    router02.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+		).
+		Build()
+
+	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code, "Original error must propagate when no fallback exists")
+	assert.Equal(t, int32(1), router02Calls, "router02 must be called exactly once")
 }
