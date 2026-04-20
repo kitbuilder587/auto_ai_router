@@ -381,6 +381,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Handle proxy credential type with same-type retry + fallback
 	if cred.Type == config.ProviderTypeProxy {
+		logCtx.Credential = cred
 		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
 		var lastProxyErr error
@@ -524,18 +525,27 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					p.logger.Error("Failed to handle proxy passthrough Responses API streaming", "error", err)
 				}
 			} else {
-				totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
 				if err != nil {
 					p.logger.Error("Failed to write streaming proxy response",
 						"credential", cred.Name, "error", err)
 				}
-				if totalTokens > 0 {
-					p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
-					if modelID != "" {
-						p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+				if streamUsage != nil {
+					logCtx.TokenUsage = streamUsage
+					p.metrics.RecordTokenUsage(cred.Name, modelID,
+						streamUsage.PromptTokens, streamUsage.CompletionTokens,
+						streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
+					totalTokens := streamUsage.Total()
+					if totalTokens > 0 {
+						p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
+						if modelID != "" {
+							p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+						}
 					}
 					p.logger.Debug("Proxy streaming token usage recorded",
-						"credential", cred.Name, "model", modelID, "tokens", totalTokens)
+						"credential", cred.Name, "model", modelID,
+						"prompt_tokens", streamUsage.PromptTokens,
+						"completion_tokens", streamUsage.CompletionTokens)
 				}
 			}
 		} else {
@@ -598,6 +608,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
+		if !proxyResp.IsStreaming {
+			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
+			if logCtx.TokenUsage != nil {
+				p.metrics.RecordTokenUsage(cred.Name, modelID,
+					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
+					logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
+				if logCtx.IsImageGeneration {
+					logCtx.TokenUsage.ImageCount = logCtx.ImageCount
+				}
+			}
+			if proxyResp.StatusCode >= 400 {
+				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
+			}
+		}
 		return
 	}
 

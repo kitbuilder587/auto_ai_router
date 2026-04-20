@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
@@ -99,7 +100,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 
 	// Build metadata with optional alias fields from tokenInfo
 	// Add error field if request failed
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus)
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage)
 
 	// Determine end user - prefer user email from tokenInfo
 	endUser := extractEndUser(logCtx.Request)
@@ -160,16 +161,21 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
+	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
+	if customLLMProvider == "proxy" {
+		customLLMProvider = string(config.ProviderTypeOpenAI)
+	}
+
 	return p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
 		RequestID:         logCtx.RequestID,
 		StartTime:         logCtx.StartTime,
 		EndTime:           utils.NowUTC(),
 		CallType:          logCtx.Request.URL.Path,
 		APIBase:           apiBase,
-		Model:             logCtx.ModelID,                                               // Model name
-		ModelID:           modelIDFormatted,                                             // credential.name:model_name
-		ModelGroup:        logCtx.ModelID,                                               // Model name
-		CustomLLMProvider: strings.Replace(string(logCtx.Credential.Type), "-", "_", 1), // Provider type as string
+		Model:             logCtx.ModelID,    // Model name
+		ModelID:           modelIDFormatted,  // credential.name:model_name
+		ModelGroup:        logCtx.ModelID,    // Model name
+		CustomLLMProvider: customLLMProvider, // Provider type as string
 		PromptTokens:      logCtx.TokenUsage.PromptTokens,
 		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
 		TotalTokens:       logCtx.TokenUsage.Total(),

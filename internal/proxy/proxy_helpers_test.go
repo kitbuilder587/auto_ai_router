@@ -191,7 +191,7 @@ func TestGetClientIP(t *testing.T) {
 
 func TestBuildMetadata(t *testing.T) {
 	t.Run("nil_tokenInfo", func(t *testing.T) {
-		result := buildMetadata("hashed123", nil, "", 0)
+		result := buildMetadata("hashed123", nil, "", 0, nil)
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestBuildMetadata(t *testing.T) {
 			UserAlias:      "my-user",
 			TeamAlias:      "my-team",
 		}
-		result := buildMetadata("hashed456", tokenInfo, "", 0)
+		result := buildMetadata("hashed456", tokenInfo, "", 0, nil)
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -223,7 +223,7 @@ func TestBuildMetadata(t *testing.T) {
 	})
 
 	t.Run("with_error_info", func(t *testing.T) {
-		result := buildMetadata("hashed789", nil, "rate limit exceeded", http.StatusTooManyRequests)
+		result := buildMetadata("hashed789", nil, "rate limit exceeded", http.StatusTooManyRequests, nil)
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)

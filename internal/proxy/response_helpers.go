@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
 type usageTotalTokens struct {
@@ -56,6 +57,24 @@ func extractTokensFromStreamingChunk(chunk string) int {
 		}
 	}
 	return 0
+}
+
+// extractTokenUsageFromStreamingChunk parses full TokenUsage (prompt+completion+details)
+// from an SSE chunk. Returns nil if no usage data is found.
+func extractTokenUsageFromStreamingChunk(chunk string) *converter.TokenUsage {
+	lines := strings.Split(chunk, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data: ") {
+			jsonData := strings.TrimPrefix(line, "data: ")
+			if jsonData == "[DONE]" {
+				continue
+			}
+			if usage := converter.ExtractTokenUsage([]byte(jsonData)); usage != nil {
+				return usage
+			}
+		}
+	}
+	return nil
 }
 
 // extractMetadataFromBody extracts the model ID and session ID from the request body

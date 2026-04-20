@@ -305,10 +305,14 @@ type tokenCapturingWriter struct {
 }
 
 func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
-	// Extract tokens from the data being written
+	// Extract tokens from the data being written.
+	// Use assignment (not +=) because Vertex/Gemini include cumulative total_tokens in every
+	// streaming chunk. Accumulating across chunks would multiply the real count by the number
+	// of chunks (e.g. 50 chunks × 1000 tokens = 50 000 instead of 1 000).
+	// OpenAI only emits total_tokens in the final usage chunk, so assignment is equivalent there.
 	tokens := extractTokensFromStreamingChunk(string(p))
 	if tokens > 0 {
-		*tcw.tokens += tokens
+		*tcw.tokens = tokens
 	}
 
 	// Invoke callback if provided (used to capture last chunk for usage extraction)
