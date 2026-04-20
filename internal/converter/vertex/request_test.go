@@ -532,3 +532,176 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyContent(t *testing.T) {
 		t.Fatalf("expected response = {output: ''}, got %v", fr.Response)
 	}
 }
+
+// TestOpenAIToVertex_ReasoningContent verifies that assistant messages with
+// reasoning_content are converted to a Thought=true Part prepended before the
+// regular text Part. This is required for Gemini 2.5/3 multi-turn reasoning.
+func TestOpenAIToVertex_ReasoningContent(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []openai.OpenAIMessage{
+			{Role: "user", Content: "Solve 2+2"},
+			{
+				Role:             "assistant",
+				Content:          "The answer is 4.",
+				ReasoningContent: "Let me think: 2+2=4",
+			},
+			{Role: "user", Content: "And 3+3?"},
+		},
+	}
+
+	body, _ := json.Marshal(req)
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	// Contents: [0]=user, [1]=model(thought+text), [2]=user
+	if len(vertexReq.Contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d", len(vertexReq.Contents))
+	}
+	modelContent := vertexReq.Contents[1]
+	if modelContent.Role != "model" {
+		t.Fatalf("expected role model, got %s", modelContent.Role)
+	}
+	if len(modelContent.Parts) < 2 {
+		t.Fatalf("expected at least 2 parts (thought + text), got %d", len(modelContent.Parts))
+	}
+	// First part must be Thought=true
+	if !modelContent.Parts[0].Thought {
+		t.Fatalf("first part must have Thought=true (reasoning content)")
+	}
+	if modelContent.Parts[0].Text != "Let me think: 2+2=4" {
+		t.Fatalf("thought text mismatch: %q", modelContent.Parts[0].Text)
+	}
+	// Second part is regular text
+	if modelContent.Parts[1].Thought {
+		t.Fatalf("second part must not have Thought=true")
+	}
+	if modelContent.Parts[1].Text != "The answer is 4." {
+		t.Fatalf("text part mismatch: %q", modelContent.Parts[1].Text)
+	}
+}
+
+// TestOpenAIToVertex_UserMediaOnlyBlankText verifies that a user message with only
+// images (no text) gets a blank text Part appended. Gemini rejects user content
+// without at least one text Part ("must have a text parameter" error).
+// Uses a gs:// URI so no DNS resolution is attempted (avoids network in unit tests).
+func TestOpenAIToVertex_UserMediaOnlyBlankText(t *testing.T) {
+	content := []interface{}{
+		map[string]interface{}{
+			"type":      "image_url",
+			"image_url": map[string]interface{}{"url": "gs://my-bucket/image.jpg"},
+		},
+	}
+	req := openai.OpenAIRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []openai.OpenAIMessage{
+			{Role: "user", Content: content},
+		},
+	}
+
+	body, _ := json.Marshal(req)
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	if len(vertexReq.Contents) == 0 {
+		t.Fatal("expected at least one content block")
+	}
+
+	userParts := vertexReq.Contents[0].Parts
+	hasText := false
+	for _, p := range userParts {
+		if p != nil && p.Text != "" {
+			hasText = true
+			break
+		}
+	}
+	if !hasText {
+		t.Fatalf("user content with only image should have a blank text Part appended, parts=%+v", userParts)
+	}
+}
+
+// TestOpenAIToVertex_SystemOnlyFallback verifies that a request with only system
+// messages generates a minimal user turn so Vertex doesn't reject empty Contents.
+func TestOpenAIToVertex_SystemOnlyFallback(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []openai.OpenAIMessage{
+			{Role: "system", Content: "You are a helpful assistant."},
+		},
+	}
+
+	body, _ := json.Marshal(req)
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	if vertexReq.SystemInstruction == nil {
+		t.Fatal("expected SystemInstruction to be set")
+	}
+	if len(vertexReq.Contents) == 0 {
+		t.Fatal("expected a fallback user content when only system messages present")
+	}
+	if vertexReq.Contents[0].Role != "user" {
+		t.Fatalf("fallback content must have role=user, got %q", vertexReq.Contents[0].Role)
+	}
+}
+
+// TestOpenAIToVertex_FunctionRole verifies that the deprecated role:"function"
+// (old OpenAI function-calling API) is treated the same as role:"tool".
+func TestOpenAIToVertex_FunctionRole(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []openai.OpenAIMessage{
+			{Role: "user", Content: "What is the weather?"},
+			{
+				Role:    "function",
+				Name:    "get_weather",
+				Content: `{"temperature": 25}`,
+			},
+		},
+	}
+
+	body, _ := json.Marshal(req)
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	// Should produce: [0]=user, [1]=user(functionResponse) - tool parts flushed as user role
+	found := false
+	for _, c := range vertexReq.Contents {
+		for _, p := range c.Parts {
+			if p.FunctionResponse != nil && p.FunctionResponse.Name == "get_weather" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected FunctionResponse with name get_weather from function-role message")
+	}
+}

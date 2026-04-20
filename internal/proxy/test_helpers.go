@@ -87,18 +87,19 @@ func createTestBalancer(baseURL string) (*balancer.RoundRobin, *ratelimit.RPMLim
 
 // TestProxyConfig holds configuration for building a test proxy instance.
 type TestProxyConfig struct {
-	Credentials    []config.CredentialConfig
-	Logger         *slog.Logger
-	Balancer       *balancer.RoundRobin
-	RateLimiter    *ratelimit.RPMLimiter
-	Metrics        *monitoring.Metrics
-	TokenManager   *auth.VertexTokenManager
-	ModelManager   *models.Manager
-	MasterKey      string
-	MaxBodySizeMB  int
-	RequestTimeout time.Duration
-	Version        string
-	Commit         string
+	Credentials        []config.CredentialConfig
+	Logger             *slog.Logger
+	Balancer           *balancer.RoundRobin
+	RateLimiter        *ratelimit.RPMLimiter
+	Metrics            *monitoring.Metrics
+	TokenManager       *auth.VertexTokenManager
+	ModelManager       *models.Manager
+	MasterKey          string
+	MaxBodySizeMB      int
+	RequestTimeout     time.Duration
+	Version            string
+	Commit             string
+	MaxProviderRetries int
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -208,6 +209,16 @@ func (b *TestProxyBuilder) WithRequestTimeout(timeout time.Duration) *TestProxyB
 	return b
 }
 
+// WithMaxProviderRetries sets the maximum number of same-type credential retries.
+// This mirrors the production Config.MaxProviderRetries (default: 2).
+// Use this in tests that need to validate retry/fallback behavior under realistic
+// retry counts — without it, maxProviderRetries defaults to 0 and the retry loop
+// only runs once, masking bugs in the retry logic.
+func (b *TestProxyBuilder) WithMaxProviderRetries(n int) *TestProxyBuilder {
+	b.config.MaxProviderRetries = n
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -221,17 +232,18 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
 	return New(&Config{
-		Balancer:       b.config.Balancer,
-		Logger:         b.config.Logger,
-		MaxBodySizeMB:  b.config.MaxBodySizeMB,
-		RequestTimeout: b.config.RequestTimeout,
-		Metrics:        b.config.Metrics,
-		MasterKey:      b.config.MasterKey,
-		RateLimiter:    b.config.RateLimiter,
-		TokenManager:   b.config.TokenManager,
-		ModelManager:   b.config.ModelManager,
-		Version:        b.config.Version,
-		Commit:         b.config.Commit,
+		Balancer:           b.config.Balancer,
+		Logger:             b.config.Logger,
+		MaxBodySizeMB:      b.config.MaxBodySizeMB,
+		RequestTimeout:     b.config.RequestTimeout,
+		Metrics:            b.config.Metrics,
+		MasterKey:          b.config.MasterKey,
+		RateLimiter:        b.config.RateLimiter,
+		TokenManager:       b.config.TokenManager,
+		ModelManager:       b.config.ModelManager,
+		Version:            b.config.Version,
+		Commit:             b.config.Commit,
+		MaxProviderRetries: b.config.MaxProviderRetries,
 	})
 }
 

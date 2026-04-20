@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 )
 
@@ -105,7 +106,7 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 }
 
 // buildMetadata builds metadata JSON with user/team alias and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int) string {
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage) string {
 	// Extract user info from tokenInfo (or use empty strings as fallback)
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
@@ -117,14 +118,42 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	// Base metadata always includes additional_usage_values
 	metadata := map[string]interface{}{
 		"additional_usage_values": map[string]interface{}{
-			"prompt_tokens_details":     nil,
+			"prompt_tokens_details":     nil, // {"text_tokens": null, "audio_tokens": null, "image_tokens": null, "reasoning_tokens": 127, "accepted_prediction_tokens": null, "rejected_prediction_tokens": null}
 			"completion_tokens_details": nil,
 		},
 		"user_api_key":         hashedToken,
 		"user_api_key_org_id":  organizationID,
 		"user_api_key_team_id": teamID,
 		"user_api_key_user_id": userID,
+		"usage_object":         nil,
 		"status":               "success",
+	}
+
+	if usage != nil {
+		prompt_tokens_details := map[string]interface{}{
+			"text_tokens":                  usage.PromptTokens + usage.CompletionTokens,
+			"audio_tokens":                 usage.AudioInputTokens + usage.AudioOutputTokens,
+			"image_tokens":                 usage.ImageTokens,
+			"reasoning_tokens":             usage.ReasoningTokens,
+			"accepted_prediction_tokens":   nil,
+			"rejected_prediction_tokens":   nil,
+			"web_search_requests":          nil,
+			"character_count":              nil,
+			"image_count":                  usage.ImageCount,
+			"video_length_seconds":         nil,
+			"cache_creation_tokens":        usage.CacheCreationTokens,
+			"cache_creation_token_details": nil,
+		}
+
+		if details, ok := metadata["additional_usage_values"].(map[string]interface{}); ok {
+			details["prompt_tokens_details"] = prompt_tokens_details
+		}
+		if usage_object, ok := metadata["usage_object"].(map[string]interface{}); ok {
+			usage_object["completion_tokens_details"] = prompt_tokens_details
+			usage_object["total_tokens"] = usage.Total()
+			usage_object["prompt_tokens"] = usage.PromptTokens
+			usage_object["completion_tokens"] = usage.CompletionTokens
+		}
 	}
 
 	// Add aliases from tokenInfo if available

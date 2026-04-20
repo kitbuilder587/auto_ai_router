@@ -61,7 +61,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
-		if msg.Role != "tool" {
+		if msg.Role != "tool" && msg.Role != "function" {
 			flushPendingToolParts()
 		}
 		switch msg.Role {
@@ -76,8 +76,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 					Parts: []*genai.Part{{Text: content}},
 				}
 			}
-		case "tool":
+		case "tool", "function":
 			// OpenAI tool result: {role: "tool", tool_call_id: "call_xyz", name: "func_name", content: "..."}
+			// role: "function" is the deprecated OpenAI function-calling API; treat the same way.
 			// Vertex expects all responses for a single model tool-call turn to be grouped
 			// in one user content with multiple functionResponse parts.
 			funcName := msg.Name
@@ -112,16 +113,35 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 				role = "model"
 			}
 			var parts []*genai.Part
+			// For assistant/model turns: prepend reasoning_content as a Thought=true Part.
+			// Gemini 2.5/3 multi-turn conversations return reasoning_content in assistant
+			// messages; sending it back as Thought=true preserves the reasoning context.
+			// (Matches LiteLLM: assistant_msg.get("reasoning_content") → PartType(thought=True, text=...))
+			if role == "model" && msg.ReasoningContent != "" {
+				parts = append(parts, &genai.Part{
+					Thought: true,
+					Text:    msg.ReasoningContent,
+				})
+			}
 			// Only add text parts if content is non-nil and non-empty.
 			// Assistant messages with tool_calls often have content: null or content: ""
 			// which would produce a "<nil>" text part via fmt.Sprintf.
 			if msg.Content != nil {
 				if s, ok := msg.Content.(string); !ok || s != "" {
-					parts = convertContentToParts(msg.Content)
+					parts = append(parts, convertContentToParts(msg.Content)...)
 				}
 			}
 			if len(msg.ToolCalls) > 0 && role == "model" {
 				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
+			}
+			// Gemini requires at least one text Part in user-role content.
+			// Multimodal messages with only images/audio/files will fail with
+			// "Unable to submit request because it must have a text parameter".
+			// Add a blank space Part as fallback (matches LiteLLM _check_text_in_content).
+			// Note: check even when parts is empty — a media-only block that failed to
+			// parse still needs a text anchor so the resulting content is not rejected.
+			if role == "user" && !partsHaveText(parts) {
+				parts = append(parts, &genai.Part{Text: " "})
 			}
 			if parts == nil {
 				parts = []*genai.Part{} // avoid nil parts
@@ -133,6 +153,16 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 		}
 	}
 	flushPendingToolParts()
+
+	// If all messages were system instructions and no user/assistant messages remain,
+	// Vertex API will reject an empty Contents array. Add a minimal user turn as fallback.
+	// (Matches LiteLLM _default_user_message_when_system_message_passed logic.)
+	if len(vertexReq.Contents) == 0 && vertexReq.SystemInstruction != nil {
+		vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
+			Role:  "user",
+			Parts: []*genai.Part{{Text: "."}},
+		})
+	}
 
 	// Tools
 	var hasUserFunctions bool
@@ -151,6 +181,18 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 	}
 
 	return json.Marshal(vertexReq)
+}
+
+// partsHaveText reports whether any Part in the slice contains a non-empty Text field.
+// Used to detect user messages that consist only of media (images, audio, files) with no
+// accompanying text — Gemini rejects such messages unless a text Part is present.
+func partsHaveText(parts []*genai.Part) bool {
+	for _, p := range parts {
+		if p != nil && p.Text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // findFunctionNameByToolCallID searches assistant messages' tool_calls for a matching
