@@ -117,6 +117,247 @@ func TestConvertVertexUsageMetadata_CachedContentTokens(t *testing.T) {
 	}
 }
 
+// TestConvertVertexUsageMetadata_AudioInputTokens verifies that audio tokens
+// from PromptTokensDetails are mapped to PromptTokensDetails.AudioTokens.
+func TestConvertVertexUsageMetadata_AudioInputTokens(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     100,
+		CandidatesTokenCount: 30,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityText, TokenCount: 70},
+			{Modality: genai.MediaModalityAudio, TokenCount: 30},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokensDetails == nil {
+		t.Fatal("expected PromptTokensDetails to be non-nil")
+	}
+	if usage.PromptTokensDetails.AudioTokens != 30 {
+		t.Fatalf("expected AudioTokens = 30, got %d", usage.PromptTokensDetails.AudioTokens)
+	}
+	// Text modality has no dedicated OpenAI field — only audio is extracted
+	if usage.PromptTokens != 100 {
+		t.Fatalf("expected PromptTokens = 100, got %d", usage.PromptTokens)
+	}
+}
+
+// TestConvertVertexUsageMetadata_AudioOutputTokens verifies that audio tokens
+// from CandidatesTokensDetails are mapped to CompletionTokensDetails.AudioTokens.
+func TestConvertVertexUsageMetadata_AudioOutputTokens(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     50,
+		CandidatesTokenCount: 80,
+		CandidatesTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityText, TokenCount: 30},
+			{Modality: genai.MediaModalityAudio, TokenCount: 50},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.CompletionTokensDetails == nil {
+		t.Fatal("expected CompletionTokensDetails to be non-nil")
+	}
+	if usage.CompletionTokensDetails.AudioTokens != 50 {
+		t.Fatalf("expected AudioTokens = 50, got %d", usage.CompletionTokensDetails.AudioTokens)
+	}
+	if usage.CompletionTokens != 80 {
+		t.Fatalf("expected CompletionTokens = 80, got %d", usage.CompletionTokens)
+	}
+}
+
+// TestConvertVertexUsageMetadata_AudioInputAndOutput verifies both input and output
+// audio tokens are correctly mapped when present simultaneously.
+func TestConvertVertexUsageMetadata_AudioInputAndOutput(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     100,
+		CandidatesTokenCount: 60,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 40},
+		},
+		CandidatesTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 20},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.AudioTokens != 40 {
+		t.Fatalf("expected input AudioTokens = 40, got %v", usage.PromptTokensDetails)
+	}
+	if usage.CompletionTokensDetails == nil || usage.CompletionTokensDetails.AudioTokens != 20 {
+		t.Fatalf("expected output AudioTokens = 20, got %v", usage.CompletionTokensDetails)
+	}
+}
+
+// TestConvertVertexUsageMetadata_ToolUseAudioTokens verifies that audio tokens
+// from ToolUsePromptTokensDetails are added to PromptTokensDetails.AudioTokens.
+func TestConvertVertexUsageMetadata_ToolUseAudioTokens(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        100,
+		ToolUsePromptTokenCount: 50,
+		CandidatesTokenCount:    30,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 20},
+		},
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 10},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokens != 150 {
+		t.Fatalf("expected PromptTokens = 150, got %d", usage.PromptTokens)
+	}
+	if usage.PromptTokensDetails == nil {
+		t.Fatal("expected PromptTokensDetails to be non-nil")
+	}
+	// Both prompt and tool-use audio tokens accumulate
+	if usage.PromptTokensDetails.AudioTokens != 30 {
+		t.Fatalf("expected AudioTokens = 30 (20+10), got %d", usage.PromptTokensDetails.AudioTokens)
+	}
+}
+
+// TestConvertVertexUsageMetadata_CachedAudioSubtraction verifies the billing-correct
+// behavior: cached audio tokens are subtracted from audio_tokens so that
+// CalculateTokenCosts can bill them at the cached rate (not the audio rate).
+//
+// NOTE: This means audio_tokens in the response reflects NON-CACHED audio only.
+// From OpenAI spec, audio_tokens should be total audio — but keeping it non-cached
+// is necessary for correct billing since CalculateTokenCosts formula is:
+//
+//	regularInputTokens = PromptTokens - AudioInputTokens - CachedInputTokens
+//
+// If AudioInputTokens included cached audio, cached audio would be double-subtracted.
+func TestConvertVertexUsageMetadata_CachedAudioSubtraction(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        200,
+		CandidatesTokenCount:    30,
+		CachedContentTokenCount: 80, // 40 text cached + 40 audio cached
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 100}, // 60 non-cached + 40 cached
+		},
+		CacheTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 40},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokensDetails == nil {
+		t.Fatal("expected PromptTokensDetails to be non-nil")
+	}
+	// audio_tokens = total(100) - cached(40) = 60 non-cached audio
+	// This enables correct billing: 60 at audio rate + 80 at cached rate
+	if usage.PromptTokensDetails.AudioTokens != 60 {
+		t.Fatalf("expected AudioTokens = 60 (non-cached only), got %d", usage.PromptTokensDetails.AudioTokens)
+	}
+	if usage.PromptTokensDetails.CachedTokens != 80 {
+		t.Fatalf("expected CachedTokens = 80, got %d", usage.PromptTokensDetails.CachedTokens)
+	}
+
+	// Verify billing math: regularInputTokens = 200 - 60 - 80 = 60 (text tokens)
+	// This is the invariant that CalculateTokenCosts depends on.
+	regularInputTokens := usage.PromptTokens - usage.PromptTokensDetails.AudioTokens - usage.PromptTokensDetails.CachedTokens
+	if regularInputTokens != 60 {
+		t.Fatalf("billing invariant broken: regularInputTokens = %d, want 60", regularInputTokens)
+	}
+}
+
+// TestConvertVertexUsageMetadata_AllAudioCached verifies that when all audio is cached,
+// audio_tokens becomes 0. This is billing-correct (no audio billed at audio rate),
+// but users may see audio_tokens=0 even though audio was sent (all from cache).
+func TestConvertVertexUsageMetadata_AllAudioCached(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        100,
+		CandidatesTokenCount:    20,
+		CachedContentTokenCount: 60, // 60 cached audio
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 60},
+		},
+		CacheTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 60},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokensDetails == nil {
+		t.Fatal("expected PromptTokensDetails to be non-nil (CachedTokens must be set)")
+	}
+	// All audio is cached → audio_tokens = 0 (billed at cached rate only)
+	if usage.PromptTokensDetails.AudioTokens != 0 {
+		t.Fatalf("expected AudioTokens = 0 (all cached), got %d", usage.PromptTokensDetails.AudioTokens)
+	}
+	if usage.PromptTokensDetails.CachedTokens != 60 {
+		t.Fatalf("expected CachedTokens = 60, got %d", usage.PromptTokensDetails.CachedTokens)
+	}
+}
+
+// TestConvertVertexUsageMetadata_NilModalityEntries verifies that nil entries
+// in modality detail slices are safely skipped without panicking.
+func TestConvertVertexUsageMetadata_NilModalityEntries(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     100,
+		CandidatesTokenCount: 50,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			nil,
+			{Modality: genai.MediaModalityAudio, TokenCount: 25},
+			nil,
+		},
+		CandidatesTokensDetails: []*genai.ModalityTokenCount{
+			nil,
+			{Modality: genai.MediaModalityAudio, TokenCount: 15},
+		},
+	}
+
+	// Must not panic
+	usage := convertVertexUsageMetadata(meta)
+
+	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.AudioTokens != 25 {
+		t.Fatalf("expected input AudioTokens = 25, got %v", usage.PromptTokensDetails)
+	}
+	if usage.CompletionTokensDetails == nil || usage.CompletionTokensDetails.AudioTokens != 15 {
+		t.Fatalf("expected output AudioTokens = 15, got %v", usage.CompletionTokensDetails)
+	}
+}
+
+// TestConvertVertexUsageMetadata_ImageVideoTokensIgnored verifies that image and video
+// tokens in modality details are not mapped to any OpenAI field (no dedicated field exists).
+func TestConvertVertexUsageMetadata_ImageVideoTokensIgnored(t *testing.T) {
+	meta := &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     200,
+		CandidatesTokenCount: 50,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityImage, TokenCount: 100},
+			{Modality: genai.MediaModalityVideo, TokenCount: 50},
+			{Modality: genai.MediaModalityText, TokenCount: 50},
+		},
+		CandidatesTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityImage, TokenCount: 30},
+			{Modality: genai.MediaModalityVideo, TokenCount: 20},
+		},
+	}
+
+	usage := convertVertexUsageMetadata(meta)
+
+	// Image/video have no OpenAI field → PromptTokensDetails has no audio entry
+	if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.AudioTokens != 0 {
+		t.Fatalf("expected no audio tokens from image/video, got %d", usage.PromptTokensDetails.AudioTokens)
+	}
+	// CompletionTokensDetails may be nil or have zero audio tokens
+	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.AudioTokens != 0 {
+		t.Fatalf("expected no audio output tokens from image/video, got %d", usage.CompletionTokensDetails.AudioTokens)
+	}
+	// Total tokens still correct
+	if usage.PromptTokens != 200 || usage.CompletionTokens != 50 {
+		t.Fatalf("token totals wrong: prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
 // TestMapFinishReason verifies Vertex finish reason mapping to OpenAI format.
 func TestMapFinishReason(t *testing.T) {
 	tests := []struct {

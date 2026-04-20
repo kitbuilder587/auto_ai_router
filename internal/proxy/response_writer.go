@@ -3,6 +3,8 @@ package proxy
 import (
 	"io"
 	"net/http"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
 // writeProxyResponse writes raw upstream proxy response to client.
@@ -86,9 +88,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	resp *ProxyResponse,
 	clientReq *http.Request,
 	credName string,
-) (int, error) {
+) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
-		return 0, nil
+		return nil, nil
 	}
 	defer func() {
 		if closeErr := resp.StreamBody.Close(); closeErr != nil {
@@ -113,26 +115,25 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	w.WriteHeader(resp.StatusCode)
 
-	totalTokens := 0
+	var lastUsage *converter.TokenUsage
 	onChunk := func(chunk []byte) {
-		tokens := extractTokensFromStreamingChunk(string(chunk))
-		if tokens > 0 {
-			totalTokens += tokens
+		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
+			lastUsage = usage
 		}
 	}
 
 	if _, ok := w.(http.Flusher); ok {
 		if err := p.streamToClient(w, resp.StreamBody, credName, onChunk, nil); err != nil {
-			return totalTokens, err
+			return lastUsage, err
 		}
-		return totalTokens, nil
+		return lastUsage, nil
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
 	if _, err := io.Copy(w, resp.StreamBody); err != nil {
-		return totalTokens, err
+		return lastUsage, err
 	}
-	return totalTokens, nil
+	return lastUsage, nil
 }
 
 // itoa avoids fmt.Sprintf for a hot path.

@@ -219,6 +219,10 @@ func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilde
 }
 
 // WithMaxProviderRetries sets the maximum number of same-type credential retries.
+// This mirrors the production Config.MaxProviderRetries (default: 2).
+// Use this in tests that need to validate retry/fallback behavior under realistic
+// retry counts — without it, maxProviderRetries defaults to 0 and the retry loop
+// only runs once, masking bugs in the retry logic.
 func (b *TestProxyBuilder) WithMaxProviderRetries(n int) *TestProxyBuilder {
 	b.config.MaxProviderRetries = n
 	return b

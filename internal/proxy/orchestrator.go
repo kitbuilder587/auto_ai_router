@@ -14,6 +14,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -232,6 +234,7 @@ func (p *Proxy) authenticateRequest(
 	}
 
 	if token == p.masterKey {
+		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
 		return true
 	}
 

@@ -821,3 +821,69 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 	assert.Greater(t, logCtx.TokenUsage.CompletionTokens, 0,
 		"CompletionTokens should be > 0 from streaming count or extracted usage")
 }
+
+// TestTokenCapturingWriter_CumulativeTokens verifies that tokenCapturingWriter does NOT
+// accumulate total_tokens across chunks. Vertex/Gemini include a cumulative total_tokens in
+// every streaming chunk; naively adding them up multiplies the real count by N (the number of
+// chunks). The writer must keep only the last non-zero value.
+func TestTokenCapturingWriter_CumulativeTokens(t *testing.T) {
+	t.Run("vertex/gemini cumulative pattern - same value in every chunk", func(t *testing.T) {
+		var total int
+		w := &tokenCapturingWriter{
+			writer: io.Discard,
+			tokens: &total,
+		}
+
+		// Simulate 5 Vertex/Gemini chunks each reporting the same cumulative total_tokens=1000.
+		// With accumulation the result would be 5000; with assignment it stays 1000.
+		chunk := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"total_tokens\":1000}}\n\n")
+		for range 5 {
+			_, err := w.Write(chunk)
+			require.NoError(t, err)
+		}
+
+		assert.Equal(t, 1000, total,
+			"cumulative total_tokens must not be accumulated across chunks — expected 1000, not 5000")
+	})
+
+	t.Run("openai pattern - total_tokens only in last chunk", func(t *testing.T) {
+		var total int
+		w := &tokenCapturingWriter{
+			writer: io.Discard,
+			tokens: &total,
+		}
+
+		// OpenAI emits usage only in the final chunk.
+		contentChunk := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		usageChunk := []byte("data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"total_tokens\":750}}\n\n")
+
+		for range 4 {
+			_, _ = w.Write(contentChunk)
+		}
+		_, err := w.Write(usageChunk)
+		require.NoError(t, err)
+
+		assert.Equal(t, 750, total,
+			"single total_tokens from final chunk must be preserved unchanged")
+	})
+
+	t.Run("growing cumulative values keep the last one", func(t *testing.T) {
+		var total int
+		w := &tokenCapturingWriter{
+			writer: io.Discard,
+			tokens: &total,
+		}
+
+		// Each chunk has a slightly larger cumulative count (typical for streaming models
+		// that update the running total as tokens are generated).
+		values := []int{100, 250, 500, 800, 1000}
+		for _, v := range values {
+			chunk := []byte(fmt.Sprintf("data: {\"usage\":{\"total_tokens\":%d}}\n\n", v))
+			_, err := w.Write(chunk)
+			require.NoError(t, err)
+		}
+
+		assert.Equal(t, 1000, total,
+			"must keep the last (largest) cumulative total, not the sum of all values")
+	})
+}
