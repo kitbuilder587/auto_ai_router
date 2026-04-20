@@ -101,6 +101,7 @@ type TestProxyConfig struct {
 	Commit               string
 	SessionStickyEnabled bool
 	SessionStoreTTL      time.Duration
+	MaxProviderRetries   int
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -217,6 +218,12 @@ func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilde
 	return b
 }
 
+// WithMaxProviderRetries sets the maximum number of same-type credential retries.
+func (b *TestProxyBuilder) WithMaxProviderRetries(n int) *TestProxyBuilder {
+	b.config.MaxProviderRetries = n
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -243,6 +250,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		Commit:               b.config.Commit,
 		SessionStickyEnabled: b.config.SessionStickyEnabled,
 		SessionStoreTTL:      b.config.SessionStoreTTL,
+		MaxProviderRetries:   b.config.MaxProviderRetries,
 	})
 }
 
