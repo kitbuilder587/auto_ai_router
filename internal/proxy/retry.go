@@ -278,6 +278,16 @@ func (p *Proxy) TryFallbackProxy(
 			logCtx.Status = "failure"
 		}
 		logCtx.HTTPStatus = proxyResp.StatusCode
+		if logCtx.Status == "success" {
+			logCtx.RequestCompleted = true
+			p.setSessionBinding(logCtx.SessionID, modelID, fallbackCred.Name)
+			p.logger.Debug("Session-sticky routing: updated session after failover",
+				"session_id", logCtx.SessionID,
+				"old_credential", originalCredName,
+				"new_credential", fallbackCred.Name,
+				"model", modelID,
+			)
+		}
 		logCtx.Logged = true
 
 		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
+	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
@@ -55,7 +56,31 @@ func (p *Proxy) orchestrateRequest(
 	// Detect Responses API requests and select credential before conversion.
 	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
 
-	cred, ok := p.selectCredentialForModel(w, modelID, logCtx)
+	convertedResp := false
+	passthroughResponses := false
+	var responsesMetadata *responses.ResponsesMetadata
+	var prevEntry *responsestore.StoredEntry
+	preferredCredentialName := ""
+
+	if isResponsesAPI {
+		// Extract Responses-API-only metadata before the fields are deleted.
+		meta := responses.ExtractResponsesMetadata(body)
+		responsesMetadata = &meta
+
+		if meta.PreviousResponseID != "" && p.responseStore != nil {
+			apiKeyHash := litellmdb.HashToken(logCtx.Token)
+			entry, loadErr := p.responseStore.GetEntry(r.Context(), meta.PreviousResponseID, apiKeyHash)
+			if loadErr != nil {
+				p.logger.Warn("Could not load previous_response_id, proceeding without history",
+					"id", meta.PreviousResponseID, "error", loadErr)
+			} else {
+				prevEntry = entry
+				preferredCredentialName = entry.CredentialName
+			}
+		}
+	}
+
+	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, logCtx)
 	if !ok {
 		return nil, false
 	}
@@ -67,40 +92,27 @@ func (p *Proxy) orchestrateRequest(
 		"streaming", streaming,
 		"url_path", r.URL.Path)
 
-	convertedResp := false
-	passthroughResponses := false
-	var responsesMetadata *responses.ResponsesMetadata
-
 	if isResponsesAPI {
-		// Extract Responses-API-only metadata before the fields are deleted.
-		meta := responses.ExtractResponsesMetadata(body)
-		responsesMetadata = &meta
-
 		// Handle previous_response_id: load the previous entry and prepend its
 		// accumulated input + output so the model sees the full conversation history.
 		prevEntryHandled := false
-		if meta.PreviousResponseID != "" && p.responseStore != nil {
-			apiKeyHash := litellmdb.HashToken(logCtx.Token)
-			prevEntry, loadErr := p.responseStore.GetEntry(r.Context(), meta.PreviousResponseID, apiKeyHash)
-			if loadErr != nil {
-				p.logger.Warn("Could not load previous_response_id, proceeding without history",
-					"id", meta.PreviousResponseID, "error", loadErr)
-			} else if prevEntry != nil && prevEntry.ResponseJSON != nil {
-				var accInput json.RawMessage
-				if prevEntry.AccumulatedInput != nil {
-					accInput = prevEntry.AccumulatedInput
-				}
-				newBody, prependErr := responses.PrependHistoryToInput(body, accInput, prevEntry.ResponseJSON.Output)
-				if prependErr != nil {
-					p.logger.Warn("Failed to prepend previous response history, ignoring",
-						"id", meta.PreviousResponseID, "error", prependErr)
-				} else {
-					body = newBody
-					prevEntryHandled = true
-					p.logger.Debug("Prepended previous response history to input",
-						"previous_response_id", meta.PreviousResponseID,
-						"output_items", len(prevEntry.ResponseJSON.Output))
-				}
+		if responsesMetadata.PreviousResponseID != "" && prevEntry != nil && prevEntry.ResponseJSON != nil {
+			var accInput json.RawMessage
+			if prevEntry.AccumulatedInput != nil {
+				accInput = prevEntry.AccumulatedInput
+			}
+			newBody, prependErr := responses.PrependHistoryToInput(body, accInput, prevEntry.ResponseJSON.Output)
+			if prependErr != nil {
+				p.logger.Warn("Failed to prepend previous response history, ignoring",
+					"id", responsesMetadata.PreviousResponseID, "error", prependErr)
+			} else {
+				body = newBody
+				prevEntryHandled = true
+				p.logger.Debug("Prepended previous response history to input",
+					"previous_response_id", responsesMetadata.PreviousResponseID,
+					"output_items", len(prevEntry.ResponseJSON.Output),
+					"credential", preferredCredentialName,
+				)
 			}
 		}
 
@@ -335,8 +347,48 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 func (p *Proxy) selectCredentialForModel(
 	w http.ResponseWriter,
 	modelID string,
+	sessionID string,
+	preferredCredentialName string,
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
+	if preferredCredentialName != "" {
+		cred, err := p.balancer.NextSpecific(preferredCredentialName, modelID)
+		if err == nil {
+			p.logger.Debug("Responses API sticky routing: using credential from previous_response_id",
+				"credential", cred.Name,
+				"model", modelID,
+			)
+			return cred, true
+		}
+
+		p.logger.Debug("Responses API sticky routing: previous_response credential unavailable, falling back to standard selection",
+			"credential", preferredCredentialName,
+			"model", modelID,
+			"error", err,
+		)
+	}
+
+	if sessionID != "" && p.sessionStore != nil {
+		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
+			cred, err := p.balancer.NextSpecific(credName, modelID)
+			if err == nil {
+				p.logger.Debug("Session-sticky routing: using cached credential",
+					"session_id", sessionID,
+					"credential", cred.Name,
+					"model", modelID,
+				)
+				return cred, true
+			}
+
+			p.logger.Debug("Session-sticky routing: cached credential unavailable, falling back to standard selection",
+				"session_id", sessionID,
+				"credential", credName,
+				"model", modelID,
+				"error", err,
+			)
+		}
+	}
+
 	cred, err := p.balancer.NextForModel(modelID)
 	if err == nil {
 		return cred, true

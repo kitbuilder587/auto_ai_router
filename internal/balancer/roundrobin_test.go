@@ -2,6 +2,7 @@ package balancer
 
 import (
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
@@ -1109,6 +1110,64 @@ func TestNextSameTypeForModelExcluding_NoSameTypeAvailable(t *testing.T) {
 	// All proxy credentials excluded
 	exclude := map[string]bool{"proxy1": true}
 	_, err := bal.NextSameTypeForModelExcluding("", config.ProviderTypeProxy, exclude)
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+}
+
+func TestNextSpecific_ReturnsNamedCredentialWithoutAdvancingRoundRobin(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 100},
+		{Name: "cred2", Type: config.ProviderTypeOpenAI, RPM: 100},
+		{Name: "cred3", Type: config.ProviderTypeOpenAI, RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextSpecific("cred2", "")
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+
+	next, err := bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "cred1", next.Name, "NextSpecific must not advance round-robin state")
+}
+
+func TestNextSpecific_NotFound(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	bal := New([]config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 100},
+	}, f2b, rl)
+
+	_, err := bal.NextSpecific("missing", "")
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+}
+
+func TestNextSpecific_RespectsModelCheckerBanAndRateLimit(t *testing.T) {
+	f2b := fail2ban.New(1, time.Minute, []int{429})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cred1", "model-a")
+	bal.SetModelChecker(mc)
+
+	_, err := bal.NextSpecific("cred1", "model-b")
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+
+	cred, err := bal.NextSpecific("cred1", "model-a")
+	require.NoError(t, err)
+	assert.Equal(t, "cred1", cred.Name)
+
+	_, err = bal.NextSpecific("cred1", "model-a")
+	assert.ErrorIs(t, err, ErrRateLimitExceeded)
+
+	f2b.RecordResponse("cred1", "model-a", 429)
+	_, err = bal.NextSpecific("cred1", "model-a")
 	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
 

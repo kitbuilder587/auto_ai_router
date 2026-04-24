@@ -90,6 +90,8 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"idle_conn_timeout", cfg.Server.IdleConnTimeout.String(),
 		"model_prices_link", cfg.Server.ModelPricesLink,
 		"max_provider_retries", cfg.Server.MaxProviderRetries,
+		"session_sticky_enabled", cfg.Server.SessionStickyEnabled,
+		"session_sticky_ttl_minutes", cfg.Server.SessionStickyTTL,
 	)
 
 	// Monitoring config

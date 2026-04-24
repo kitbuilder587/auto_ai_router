@@ -995,6 +995,78 @@ monitoring:
 	assert.Equal(t, 5, cfg.Server.MaxProviderRetries, "Custom MaxProviderRetries should be 5")
 }
 
+func TestLoad_SessionStickyDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.True(t, cfg.Server.SessionStickyEnabled)
+	assert.Equal(t, 0, cfg.Server.SessionStickyTTL)
+}
+
+func TestLoad_SessionStickyCustom(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+  session_sticky_enabled: false
+  session_sticky_ttl_minutes: 15
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.False(t, cfg.Server.SessionStickyEnabled)
+	assert.Equal(t, 15, cfg.Server.SessionStickyTTL)
+}
+
 func TestLoad_ModelAlias(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
