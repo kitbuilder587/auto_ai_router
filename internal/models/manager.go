@@ -404,6 +404,24 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 		}
 	}
 
+	// Register non-proxy credentials that have no models with an explicit empty list.
+	// HasModel has a fallback "return true" for credentials not present in credentialModels;
+	// that fallback is intentional for proxy credentials whose model list is fetched dynamically,
+	// but it incorrectly allows non-proxy credentials (e.g. openai_backup with no models:)
+	// to match any model when static models are configured for other credentials.
+	for _, cred := range credentials {
+		if cred.Type == config.ProviderTypeProxy {
+			continue // proxy models are fetched dynamically via GetAllModels
+		}
+		if _, exists := m.credentialModels[cred.Name]; !exists {
+			m.credentialModels[cred.Name] = []string{}
+			m.logger.Debug("Registered non-proxy credential with no models",
+				"credential", cred.Name,
+				"type", cred.Type,
+			)
+		}
+	}
+
 	m.logger.Info("Loaded models from config",
 		"credential_specific", credentialSpecificCount,
 		"global_models", globalModelsCount,
@@ -507,6 +525,16 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 						credName, modelName)
 				}
 			}
+		}
+	}
+
+	// Register non-proxy credentials with no models — same logic as in LoadModelsFromConfig.
+	for _, c := range allCreds {
+		if c.Type == config.ProviderTypeProxy {
+			continue
+		}
+		if _, exists := newCredentialModels[c.Name]; !exists {
+			newCredentialModels[c.Name] = []string{}
 		}
 	}
 

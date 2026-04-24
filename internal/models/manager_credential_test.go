@@ -344,3 +344,46 @@ func TestGetRemoteModels_ProxyCredentialWrongType(t *testing.T) {
 		})
 	}
 }
+
+// TestHasModel_NonProxyCredentialWithNoModels verifies that a non-proxy credential
+// without any configured models is never selected for model routing when static
+// models exist for other credentials.
+//
+// Regression test for: openai_backup (type=openai, no models:) was incorrectly
+// matching all dynamically-fetched proxy models because HasModel fell through to
+// the "allow all" fallback for credentials absent from credentialModels.
+func TestHasModel_NonProxyCredentialWithNoModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// gemini_studio has explicit models; openai_backup has none (commented out in config).
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gemini-2.5-flash", RPM: 100, Credential: "gemini_studio"},
+		{Name: "gemini-2.5-pro", RPM: 100, Credential: "gemini_studio"},
+	}
+	manager := New(logger, 50, staticModels)
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai_backup", Type: config.ProviderTypeOpenAI}, // no models
+		{Name: "pol1_proxy", Type: config.ProviderTypeProxy},     // dynamic models
+		{Name: "gemini_studio", Type: config.ProviderTypeGemini}, // has static models
+	}
+	manager.LoadModelsFromConfig(credentials)
+
+	// gemini_studio should serve its own models.
+	assert.True(t, manager.HasModel("gemini_studio", "gemini-2.5-flash"))
+	assert.True(t, manager.HasModel("gemini_studio", "gemini-2.5-pro"))
+
+	// openai_backup has no models configured — must NOT be selected for anything,
+	// even for a model not yet fetched from the proxy (the pre-fix bug).
+	assert.False(t, manager.HasModel("openai_backup", "gemini-2.5-flash"), "openai_backup must not match gemini models")
+	assert.False(t, manager.HasModel("openai_backup", "gpt-4o"), "openai_backup must not match unfetched proxy models")
+	assert.False(t, manager.HasModel("openai_backup", "some-random-model"), "openai_backup must not match any model")
+
+	// Proxy credential without fetched models should still be allowed (dynamic fetch pending).
+	assert.True(t, manager.HasModel("pol1_proxy", "gpt-4o"), "proxy credential must be allowed for unfetched models")
+
+	// After proxy models are registered via AddModel, the mapping should be respected.
+	manager.AddModel("pol1_proxy", "gpt-4o")
+	assert.True(t, manager.HasModel("pol1_proxy", "gpt-4o"))
+	assert.False(t, manager.HasModel("openai_backup", "gpt-4o"), "openai_backup must not match even after proxy model is known")
+}
