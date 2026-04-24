@@ -437,7 +437,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				cred = nextCred
 				triedCreds[cred.Name] = true
 				logCtx.Credential = cred
-				p.logger.Info("Retrying with next same-type proxy credential",
+				p.logger.Warn("Retrying with next same-type proxy credential",
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 					"retry_reason", retryReason)
@@ -465,10 +465,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 
-			p.logger.Info("Proxy credential returned retryable error",
+			p.logger.Error("Proxy credential returned retryable error",
 				"credential", cred.Name, "status", proxyResp.StatusCode,
 				"reason", retryReason, "model", modelID,
-				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1)
+				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
+				"response_body", logger.TruncateLongFields(string(proxyResp.Body), 500))
 		}
 
 		// After retry loop: try fallback proxy as last resort
@@ -946,10 +947,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		p.logger.Info("Provider returned retryable error",
+		p.logger.Error("Provider returned retryable error",
 			"credential", cred.Name, "status", resp.StatusCode,
 			"reason", retryReason, "model", modelID,
-			"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1)
+			"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
+			"response_body", logger.TruncateLongFields(string(responseBody), 500))
 	}
 
 	// After retry loop: try proxy fallback as last resort
