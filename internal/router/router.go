@@ -39,6 +39,18 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Router chain trace (JSON)
+	if req.URL.Path == "/trace" {
+		r.handleTrace(w, req)
+		return
+	}
+
+	// Router chain trace (visual HTML)
+	if req.URL.Path == "/vtrace" {
+		r.handleVisualTrace(w, req)
+		return
+	}
+
 	if req.URL.Path == "/health/readiness" {
 		r.handleReadiness(w, req)
 		return

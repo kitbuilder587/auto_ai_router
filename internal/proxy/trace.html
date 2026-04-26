@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Router Chain Trace</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg: #f4f7f6; --card: #ffffff; --text: #2d3436;
+            --border: #dfe6e9; --text-secondary: #636e72; --text-muted: #b2bec3;
+            --accent: #00b894; --accent-err: #d63031;
+            --healthy: #22c55e; --degraded: #f59e0b; --unhealthy: #ef4444; --unknown: #94a3b8;
+        }
+        [data-theme="dark"] {
+            --bg: #1e1e1e; --card: #2d2d2d; --text: #e0e0e0;
+            --border: #404040; --text-secondary: #a0a0a0; --text-muted: #707070;
+        }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 2rem; transition: background 0.3s ease, color 0.3s ease; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
+        header h1 { margin: 0; font-size: 1.5rem; }
+        .header-actions { display: flex; align-items: center; gap: 1rem; }
+        .badge { padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.8rem; font-weight: 600; color: white; }
+        .badge-healthy { background: var(--healthy); }
+        .badge-degraded { background: var(--degraded); }
+        .badge-unhealthy { background: var(--unhealthy); }
+        .badge-unknown { background: var(--unknown); }
+        button { padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; font-size: 0.9rem; }
+        button:hover { background: var(--border); }
+        .theme-toggle { padding: 0.5rem 1rem; border-radius: 20px; background: var(--card); border: 1px solid var(--border); cursor: pointer; font-size: 1.2rem; transition: all 0.3s ease; display: flex; align-items: center; gap: 0.5rem; }
+        .theme-toggle:hover { transform: scale(1.05); }
+        .theme-icon { transition: transform 0.3s ease; }
+        .theme-toggle:hover .theme-icon { transform: rotate(20deg); }
+        .card { background: var(--card); border-radius: 12px; border: 1px solid var(--border); padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .card h2 { margin: 0 0 1rem 0; font-size: 1rem; color: var(--text-secondary); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        #diagram-wrap { overflow-x: auto; text-align: center; min-height: 120px; }
+        #diagram-wrap svg { max-width: 100%; }
+        .error-msg { color: var(--accent-err); font-size: 0.9rem; padding: 1rem; }
+        .router-section { margin-bottom: 1rem; }
+        .router-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+        .router-name { font-weight: 700; font-size: 1rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+        th { text-align: left; padding: 0.5rem 0.75rem; background: var(--bg); color: var(--text-secondary); font-weight: 600; border-bottom: 2px solid var(--border); }
+        td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+        tr:last-child td { border-bottom: none; }
+        .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+        .dot-healthy { background: var(--healthy); }
+        .dot-degraded { background: var(--degraded); }
+        .dot-unhealthy { background: var(--unhealthy); }
+        .dot-banned { background: var(--unhealthy); }
+        .dot-ok { background: var(--healthy); }
+        .dot-gray { background: var(--unknown); }
+        .err-codes { font-size: 0.8rem; color: var(--accent-err); }
+        .countdown { font-size: 0.8rem; color: var(--text-muted); }
+        .fetch-err { font-size: 0.82rem; color: var(--accent-err); font-style: italic; }
+        .section-gap { margin-top: 0.75rem; }
+    </style>
+</head>
+<body data-theme="dark">
+<div class="container">
+    <header>
+        <h1>🔗 Router Chain Trace</h1>
+        <div class="header-actions">
+            <span class="countdown" id="countdown"></span>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <span class="theme-icon" id="themeIcon">🌙</span>
+            </button>
+            <button onclick="loadTrace(true)">↺ Refresh</button>
+        </div>
+    </header>
+
+    <div class="card">
+        <h2>Chain Diagram</h2>
+        <div id="diagram-wrap"><p style="color:var(--text-muted);padding:1rem">Loading…</p></div>
+    </div>
+
+    <div class="card">
+        <h2>Router & Credential Details</h2>
+        <div id="details"><p style="color:var(--text-muted)">Loading…</p></div>
+    </div>
+</div>
+
+<script>
+mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: {
+        primaryColor: '#475569',
+        primaryTextColor: '#fff',
+        primaryBorderColor: 'transparent',
+        lineColor: '#94a3b8',
+        background: 'transparent',
+        fontSize: '14px',
+    },
+    flowchart: { htmlLabels: true, curve: 'basis' },
+});
+
+let refreshTimer = null;
+let countdownSecs = 30;
+let countdownInterval = null;
+
+function toggleTheme() {
+    const body = document.body;
+    const themeIcon = document.getElementById('themeIcon');
+    const newTheme = body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    body.setAttribute('data-theme', newTheme);
+    themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
+    localStorage.setItem('theme', newTheme);
+}
+
+function loadTheme() {
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    document.body.setAttribute('data-theme', savedTheme);
+    document.getElementById('themeIcon').textContent = savedTheme === 'dark' ? '🌙' : '☀️';
+}
+
+function sanitizeId(s) {
+    return s.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+function escLabel(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '#quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function fmtErrors(counts) {
+    if (!counts || Object.keys(counts).length === 0) return '';
+    return Object.entries(counts)
+        .map(([code, n]) => `${n}×${code}`)
+        .join(' ');
+}
+
+function statusColor(s) {
+    return { healthy: '#22c55e', degraded: '#f59e0b', unhealthy: '#ef4444' }[s] || '#94a3b8';
+}
+
+function buildMermaid(trace) {
+    const nodeDefs = [];
+    const edgeDefs = [];
+    const styleDefs = [];
+    const defined = new Set();
+    let nc = 0;
+    const idMap = new Map();
+
+    function nid(key) {
+        if (!idMap.has(key)) idMap.set(key, 'n' + (nc++));
+        return idMap.get(key);
+    }
+
+    function addRouter(t) {
+        const rid = nid('r:' + t.router_id);
+        if (defined.has(rid)) return rid;
+        defined.add(rid);
+
+        const creds = t.credentials || {};
+        const total = Object.keys(creds).length;
+        const banned = Object.values(creds).filter(c => c.is_banned).length;
+        const lbl = `🖥 ${escLabel(t.router_id)}<br/>${escLabel(t.status)}<br/>${total - banned}/${total} OK`;
+        nodeDefs.push(`    ${rid}["${lbl}"]`);
+        styleDefs.push(`    style ${rid} fill:${statusColor(t.status)},color:#fff,stroke:#fff`);
+
+        // Leaf credentials (non-proxy)
+        for (const [name, cred] of Object.entries(creds)) {
+            if (cred.type === 'proxy') continue;
+            const lid = nid('c:' + t.router_id + ':' + name);
+            const errs = fmtErrors(cred.banned_error_counts);
+            const icon = cred.is_banned ? '✗' : '✓';
+            const credLbl = `${icon} ${escLabel(name)}<br/>${escLabel(cred.type)}${errs ? '<br/>' + escLabel(errs) : ''}`;
+            nodeDefs.push(`    ${lid}["${credLbl}"]`);
+            styleDefs.push(`    style ${lid} fill:${cred.is_banned ? '#ef4444' : '#475569'},color:#fff,stroke:none`);
+            edgeDefs.push(`    ${rid} --> ${lid}`);
+        }
+
+        // Upstream proxy routers
+        for (const [credName, up] of Object.entries(t.upstreams || {})) {
+            if (up.fetch_error) {
+                const eid = nid('e:' + t.router_id + ':' + credName);
+                nodeDefs.push(`    ${eid}["⚠ ${escLabel(credName)}<br/>unreachable"]`);
+                styleDefs.push(`    style ${eid} fill:#94a3b8,color:#fff,stroke:none`);
+                edgeDefs.push(`    ${rid} -->|"${escLabel(credName)}"| ${eid}`);
+            } else {
+                const uid = addRouter(up);
+                edgeDefs.push(`    ${rid} -->|"${escLabel(credName)}"| ${uid}`);
+            }
+        }
+
+        return rid;
+    }
+
+    addRouter(trace);
+    return ['flowchart LR', ...nodeDefs, ...edgeDefs, ...styleDefs].join('\n');
+}
+
+async function renderMermaid(diagramText) {
+    const wrap = document.getElementById('diagram-wrap');
+    try {
+        const id = 'trace_diagram_' + Date.now();
+        const { svg } = await mermaid.render(id, diagramText);
+        wrap.innerHTML = svg;
+    } catch (e) {
+        wrap.innerHTML = `<pre class="error-msg">${e.message}\n\n${diagramText}</pre>`;
+    }
+}
+
+function buildDetails(trace, container) {
+    const routers = [];
+
+    function collect(t, via) {
+        routers.push({ trace: t, via });
+        for (const [credName, up] of Object.entries(t.upstreams || {})) {
+            if (!up.fetch_error) collect(up, credName);
+        }
+    }
+    collect(trace, null);
+
+    let html = '';
+    for (const { trace: t, via } of routers) {
+        const statusDot = `<span class="dot dot-${t.status || 'gray'}"></span>`;
+        const viaLabel = via ? `<span style="font-size:0.8rem;color:var(--text-muted)"> via ${via}</span>` : '';
+        html += `<div class="router-section">
+            <div class="router-header">
+                ${statusDot}<span class="router-name">${t.router_id}</span>
+                <span class="badge badge-${t.status || 'unknown'}">${t.status || 'unknown'}</span>
+                ${viaLabel}
+            </div>
+            <table>
+                <thead><tr><th>Credential</th><th>Type</th><th>Status</th><th>RPM</th><th>TPM</th><th>Errors</th></tr></thead>
+                <tbody>`;
+
+        for (const [name, cred] of Object.entries(t.credentials || {}).sort()) {
+            const dot = cred.is_banned ? 'banned' : 'ok';
+            const status = cred.is_banned ? 'banned' : 'ok';
+            const errs = Object.entries(cred.banned_error_counts || {})
+                .map(([c, n]) => `<span>${n}×${c}</span>`).join(' ');
+            const rpmStr = cred.limit_rpm > 0 ? `${cred.current_rpm}/${cred.limit_rpm}` : (cred.current_rpm > 0 ? `${cred.current_rpm}/∞` : '—');
+            const tpmStr = cred.limit_tpm > 0 ? `${cred.current_tpm}/${cred.limit_tpm}` : (cred.current_tpm > 0 ? `${cred.current_tpm}/∞` : '—');
+            html += `<tr>
+                <td><span class="dot dot-${dot}"></span>${name}</td>
+                <td>${cred.type || '—'}</td>
+                <td>${status}</td>
+                <td>${rpmStr}</td>
+                <td>${tpmStr}</td>
+                <td class="err-codes">${errs || '—'}</td>
+            </tr>`;
+        }
+
+        // Show unreachable upstreams
+        for (const [credName, up] of Object.entries(t.upstreams || {})) {
+            if (up.fetch_error) {
+                html += `<tr>
+                    <td><span class="dot dot-gray"></span>${credName}</td>
+                    <td>proxy</td>
+                    <td colspan="3" class="fetch-err">unreachable: ${up.fetch_error}</td>
+                    <td>—</td>
+                </tr>`;
+            }
+        }
+
+        html += '</tbody></table></div>';
+
+        if (routers.indexOf(routers.find(r => r.trace === t)) < routers.length - 1) {
+            html += '<hr style="border:none;border-top:1px solid var(--border);margin:1rem 0">';
+        }
+    }
+
+    container.innerHTML = html;
+}
+
+async function loadTrace(manual = false) {
+    clearTimeout(refreshTimer);
+    clearInterval(countdownInterval);
+
+    try {
+        const resp = await fetch('/trace');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const trace = await resp.json();
+
+        const diagram = buildMermaid(trace);
+        await renderMermaid(diagram);
+        buildDetails(trace, document.getElementById('details'));
+    } catch (e) {
+        document.getElementById('diagram-wrap').innerHTML = `<p class="error-msg">Failed to load trace: ${e.message}</p>`;
+        document.getElementById('details').innerHTML = '';
+    }
+
+    // Restart countdown
+    countdownSecs = 30;
+    updateCountdown();
+    countdownInterval = setInterval(() => {
+        countdownSecs--;
+        updateCountdown();
+        if (countdownSecs <= 0) {
+            clearInterval(countdownInterval);
+            loadTrace();
+        }
+    }, 1000);
+}
+
+function updateCountdown() {
+    document.getElementById('countdown').textContent = `Auto-refresh in ${countdownSecs}s`;
+}
+
+loadTheme();
+loadTrace();
+</script>
+</body>
+</html>

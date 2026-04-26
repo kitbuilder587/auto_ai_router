@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -95,6 +96,7 @@ type Config struct {
 	ResponseStore          responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled   bool
 	SessionStoreTTL        time.Duration
+	RouterID               string // Human-readable name for this router (shown in /trace); defaults to hostname
 }
 
 type Proxy struct {
@@ -108,6 +110,7 @@ type Proxy struct {
 	masterKey           string
 	rateLimiter         *ratelimit.RPMLimiter
 	tokenManager        *auth.VertexTokenManager
+	routerID            string                     // Identifier for this router used in /trace responses
 	healthTemplate      *template.Template         // Cached template
 	modelManager        *models.Manager            // Model manager for getting configured models
 	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration
@@ -161,6 +164,15 @@ func New(cfg *Config) *Proxy {
 	}
 	maxResponseBodySize := int64(cfg.MaxBodySizeMB) * int64(multiplier) * 1024 * 1024
 
+	routerID := cfg.RouterID
+	if routerID == "" {
+		if h, err := os.Hostname(); err == nil {
+			routerID = h
+		} else {
+			routerID = "unknown"
+		}
+	}
+
 	var sessionStore *SessionStore
 	if cfg.SessionStickyEnabled {
 		ttl := cfg.SessionStoreTTL
@@ -171,6 +183,7 @@ func New(cfg *Config) *Proxy {
 	}
 
 	return &Proxy{
+		routerID:            routerID,
 		balancer:            cfg.Balancer,
 		logger:              cfg.Logger,
 		maxBodySizeMB:       cfg.MaxBodySizeMB,
@@ -378,6 +391,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	r = prepared.request
 	logCtx.Request = r
 	body := prepared.body
+	proxyBody := prepared.proxyBody
 	modelID := prepared.modelID
 	realModelID := prepared.realModelID
 	streaming := prepared.streaming
@@ -446,7 +460,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			shouldRetry = false
 
-			proxyResp, lastProxyErr = p.forwardToProxy(w, r, modelID, cred, body, start)
+			proxyResp, lastProxyErr = p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
 			if lastProxyErr != nil {
 				shouldRetry = true
 				retryReason = RetryReasonNetErr
@@ -487,7 +501,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.Info("All same-type proxy credentials exhausted, attempting fallback",
 				"credential", cred.Name, "model", modelID,
 				"last_status", fallbackStatus, "reason", retryReason)
-			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, body, start, logCtx)
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
 			if success {
 				return
 			}
@@ -969,7 +983,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.logger.Info("All same-type credentials exhausted, attempting fallback proxy",
 			"credential", cred.Name, "model", modelID,
 			"last_status", fallbackStatus, "reason", retryReason)
-		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, body, start, logCtx)
+		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
 		if success {
 			if closeBody != nil {
 				closeBody()
