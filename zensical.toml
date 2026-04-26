@@ -24,6 +24,7 @@ nav = [
   { "Monitoring" = [
     { "Prometheus" = "monitoring/prometheus.md" },
     { "Health Endpoints" = "monitoring/health.md" },
+    { "Router Chain Trace" = "monitoring/trace.md" },
     { "Grafana" = "monitoring/grafana.md" },
   ]},
   { "LiteLLM Integration" = "litellm-integration/litellm_db.md" },
