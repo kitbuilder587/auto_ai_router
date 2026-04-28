@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -73,28 +74,30 @@ type HealthChecker interface {
 
 // Config holds all configuration needed to create a Proxy
 type Config struct {
-	Balancer               *balancer.RoundRobin
-	Logger                 *slog.Logger
-	MaxBodySizeMB          int
-	ResponseBodyMultiplier int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
-	RequestTimeout         time.Duration
-	MaxIdleConns           int
-	MaxIdleConnsPerHost    int
-	IdleConnTimeout        time.Duration
-	Metrics                *monitoring.Metrics
-	MasterKey              string
-	RateLimiter            *ratelimit.RPMLimiter
-	TokenManager           *auth.VertexTokenManager
-	ModelManager           *models.Manager
-	Version                string
-	Commit                 string
-	LiteLLMDB              litellmdb.Manager          // LiteLLM database integration (optional)
-	HealthChecker          HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	PriceRegistry          *models.ModelPriceRegistry // Model pricing information (optional)
-	MaxProviderRetries     int                        // Max same-type credential retries (default: 2)
-	ResponseStore          responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	SessionStickyEnabled   bool
-	SessionStoreTTL        time.Duration
+	Balancer                   *balancer.RoundRobin
+	Logger                     *slog.Logger
+	MaxBodySizeMB              int
+	ResponseBodyMultiplier     int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
+	RequestTimeout             time.Duration
+	MaxIdleConns               int
+	MaxIdleConnsPerHost        int
+	IdleConnTimeout            time.Duration
+	Metrics                    *monitoring.Metrics
+	MasterKey                  string
+	RateLimiter                *ratelimit.RPMLimiter
+	TokenManager               *auth.VertexTokenManager
+	ModelManager               *models.Manager
+	Version                    string
+	Commit                     string
+	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
+	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
+	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
+	MaxProviderRetries         int                        // Max same-type credential retries (default: 2)
+	ResponseStore              responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled       bool
+	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStoreTTL            time.Duration
+	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 }
 
 type Proxy struct {
@@ -108,6 +111,7 @@ type Proxy struct {
 	masterKey           string
 	rateLimiter         *ratelimit.RPMLimiter
 	tokenManager        *auth.VertexTokenManager
+	routerID            string                     // Identifier for this router used in /trace responses
 	healthTemplate      *template.Template         // Cached template
 	modelManager        *models.Manager            // Model manager for getting configured models
 	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration
@@ -116,6 +120,7 @@ type Proxy struct {
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
 	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 	sessionStore        *SessionStore              // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl bool                       // Auto-inject Anthropic cache_control when session is active
 }
 
 var (
@@ -161,6 +166,15 @@ func New(cfg *Config) *Proxy {
 	}
 	maxResponseBodySize := int64(cfg.MaxBodySizeMB) * int64(multiplier) * 1024 * 1024
 
+	routerID := cfg.RouterID
+	if routerID == "" {
+		if h, err := os.Hostname(); err == nil {
+			routerID = h
+		} else {
+			routerID = "unknown"
+		}
+	}
+
 	var sessionStore *SessionStore
 	if cfg.SessionStickyEnabled {
 		ttl := cfg.SessionStoreTTL
@@ -171,6 +185,7 @@ func New(cfg *Config) *Proxy {
 	}
 
 	return &Proxy{
+		routerID:            routerID,
 		balancer:            cfg.Balancer,
 		logger:              cfg.Logger,
 		maxBodySizeMB:       cfg.MaxBodySizeMB,
@@ -188,6 +203,7 @@ func New(cfg *Config) *Proxy {
 		maxProviderRetries:  cfg.MaxProviderRetries,
 		responseStore:       cfg.ResponseStore,
 		sessionStore:        sessionStore,
+		stickyAutoCacheCtrl: cfg.SessionStickyAutoCacheCtrl,
 		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
 }
@@ -378,6 +394,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	r = prepared.request
 	logCtx.Request = r
 	body := prepared.body
+	proxyBody := prepared.proxyBody
 	modelID := prepared.modelID
 	realModelID := prepared.realModelID
 	streaming := prepared.streaming
@@ -446,7 +463,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			shouldRetry = false
 
-			proxyResp, lastProxyErr = p.forwardToProxy(w, r, modelID, cred, body, start)
+			proxyResp, lastProxyErr = p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
 			if lastProxyErr != nil {
 				shouldRetry = true
 				retryReason = RetryReasonNetErr
@@ -487,7 +504,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.Info("All same-type proxy credentials exhausted, attempting fallback",
 				"credential", cred.Name, "model", modelID,
 				"last_status", fallbackStatus, "reason", retryReason)
-			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, body, start, logCtx)
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
 			if success {
 				return
 			}
@@ -969,7 +986,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.logger.Info("All same-type credentials exhausted, attempting fallback proxy",
 			"credential", cred.Name, "model", modelID,
 			"last_status", fallbackStatus, "reason", retryReason)
-		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, body, start, logCtx)
+		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
 		if success {
 			if closeBody != nil {
 				closeBody()

@@ -27,7 +27,9 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 			case "text":
 				text, _ := blockMap["text"].(string)
 				if text != "" {
-					blocks = append(blocks, ContentBlock{Type: "text", Text: text})
+					cb := ContentBlock{Type: "text", Text: text}
+					cb.CacheControl = blockMap["cache_control"]
+					blocks = append(blocks, cb)
 				}
 
 			case "image_url":
@@ -40,6 +42,7 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 					continue
 				}
 				if cb := convertImageURLToAnthropic(url); cb != nil {
+					cb.CacheControl = blockMap["cache_control"]
 					blocks = append(blocks, *cb)
 				}
 
@@ -67,6 +70,7 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 				// Data-URL files can be forwarded as Anthropic document blocks.
 				if strings.HasPrefix(fileID, "data:") {
 					if cb := convertDataURLToDocument(fileID); cb != nil {
+						cb.CacheControl = blockMap["cache_control"]
 						blocks = append(blocks, *cb)
 					}
 				} else {

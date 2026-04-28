@@ -79,6 +79,7 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 				} else {
 					tool.InputSchema = map[string]interface{}{"type": "object"}
 				}
+				tool.CacheControl = toolMap["cache_control"]
 				tools = append(tools, tool)
 			}
 		case "computer_use":

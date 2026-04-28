@@ -107,14 +107,19 @@ func mapAnthropicStopReason(reason string) string {
 }
 
 // convertAnthropicUsageToOpenAI converts Anthropic usage to the OpenAI usage struct.
+//
+// Anthropic's input_tokens is exclusive of cache tokens:
+//
+//	total_input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
 func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 	if usage == nil {
 		return nil
 	}
+	totalInputTokens := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
 	result := &openai.OpenAIUsage{
-		PromptTokens:     usage.InputTokens,
+		PromptTokens:     totalInputTokens,
 		CompletionTokens: usage.OutputTokens,
-		TotalTokens:      usage.InputTokens + usage.OutputTokens,
+		TotalTokens:      totalInputTokens + usage.OutputTokens,
 	}
 	// map cache_read + cache_creation tokens to prompt_tokens_details
 	if usage.CacheReadInputTokens > 0 || usage.CacheCreationInputTokens > 0 {

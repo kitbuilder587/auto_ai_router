@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -23,7 +24,8 @@ import (
 
 type orchestratedRequest struct {
 	request              *http.Request
-	body                 []byte
+	body                 []byte // body with realModelID substituted (for non-proxy providers)
+	proxyBody            []byte // body with original modelID alias (for proxy forwarding)
 	modelID              string // alias name (for rate limiting, credential lookup, logging)
 	realModelID          string // real model name sent to provider (equals modelID if no alias configured)
 	streaming            bool
@@ -51,6 +53,15 @@ func (p *Proxy) orchestrateRequest(
 	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
 		return nil, false
+	}
+
+	// proxyBody: body with the original alias restored.
+	// Proxy credentials handle their own model routing, so they must receive the
+	// alias ("anthropic/claude-sonnet-4.6"), not the provider-specific real name
+	// ("global.anthropic.claude-sonnet-4-6") that was substituted for direct providers.
+	proxyBody := body
+	if modelID != realModelID {
+		proxyBody = openai.ReplaceModelInBody(body, realModelID, modelID)
 	}
 
 	// Detect Responses API requests and select credential before conversion.
@@ -83,6 +94,14 @@ func (p *Proxy) orchestrateRequest(
 	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, logCtx)
 	if !ok {
 		return nil, false
+	}
+
+	// Auto-inject Anthropic prompt-caching markers when a session is active.
+	// This maximises cache hit rate when session-sticky routing keeps traffic on one credential.
+	if p.stickyAutoCacheCtrl &&
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeBedrock) &&
+		(logCtx.SessionID != "" || preferredCredentialName != "") {
+		body = anthropicconv.InjectCacheControl(body)
 	}
 
 	p.logger.Debug("Responses API detection",
@@ -170,6 +189,7 @@ func (p *Proxy) orchestrateRequest(
 	return &orchestratedRequest{
 		request:              r,
 		body:                 body,
+		proxyBody:            proxyBody,
 		modelID:              modelID,
 		realModelID:          realModelID,
 		streaming:            streaming,

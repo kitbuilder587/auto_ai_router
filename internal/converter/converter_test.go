@@ -216,7 +216,8 @@ func TestProviderConverter_ResponseTo_Anthropic(t *testing.T) {
 	if msg.Content != "hello" || msg.ReasoningContent != "hmm" || len(msg.ToolCalls) != 1 {
 		t.Fatalf("unexpected message: %+v", msg)
 	}
-	if resp.Usage == nil || resp.Usage.PromptTokens != 5 || resp.Usage.CompletionTokens != 7 || resp.Usage.TotalTokens != 12 {
+	// PromptTokens = InputTokens + CacheReadInputTokens + CacheCreationInputTokens = 5 + 2 + 0 = 7
+	if resp.Usage == nil || resp.Usage.PromptTokens != 7 || resp.Usage.CompletionTokens != 7 || resp.Usage.TotalTokens != 14 {
 		t.Fatalf("unexpected usage: %+v", resp.Usage)
 	}
 	if resp.Usage.PromptTokensDetails == nil || resp.Usage.PromptTokensDetails.CachedTokens != 2 {

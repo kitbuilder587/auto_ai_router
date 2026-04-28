@@ -329,23 +329,24 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type ServerConfig struct {
-	Port                   int           `yaml:"port"`
-	MaxBodySizeMB          int           `yaml:"max_body_size_mb"`
-	ResponseBodyMultiplier int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
-	RequestTimeout         time.Duration `yaml:"request_timeout"`
-	LoggingLevel           string        `yaml:"logging_level"`
-	MasterKey              string        `yaml:"master_key"`
-	DefaultModelsRPM       int           `yaml:"default_models_rpm"`
-	MaxIdleConns           int           `yaml:"max_idle_conns"`
-	MaxIdleConnsPerHost    int           `yaml:"max_idle_conns_per_host"`
-	IdleConnTimeout        time.Duration `yaml:"idle_conn_timeout"`
-	ReadTimeout            time.Duration `yaml:"-"`                           // HTTP server read timeout (equals request_timeout, not configurable via YAML)
-	WriteTimeout           time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 60s)
-	IdleTimeout            time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 2*write_timeout)
-	MaxProviderRetries     int           `yaml:"max_provider_retries"`        // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
-	SessionStickyEnabled   bool          `yaml:"session_sticky_enabled"`      // Enable session-sticky credential routing (default: true)
-	SessionStickyTTL       int           `yaml:"session_sticky_ttl_minutes"`  // Session binding TTL in minutes (0 = default 6)
-	ModelPricesLink        string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	Port                       int           `yaml:"port"`
+	MaxBodySizeMB              int           `yaml:"max_body_size_mb"`
+	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	RequestTimeout             time.Duration `yaml:"request_timeout"`
+	LoggingLevel               string        `yaml:"logging_level"`
+	MasterKey                  string        `yaml:"master_key"`
+	DefaultModelsRPM           int           `yaml:"default_models_rpm"`
+	MaxIdleConns               int           `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost        int           `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout            time.Duration `yaml:"idle_conn_timeout"`
+	ReadTimeout                time.Duration `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
+	WriteTimeout               time.Duration `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
+	IdleTimeout                time.Duration `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
+	MaxProviderRetries         int           `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
+	SessionStickyEnabled       bool          `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
+	SessionStickyTTL           int           `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
+	SessionStickyAutoCacheCtrl bool          `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
+	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -366,22 +367,23 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port                   string `yaml:"port"`
-		MaxBodySizeMB          string `yaml:"max_body_size_mb"`
-		ResponseBodyMultiplier string `yaml:"response_body_multiplier"`
-		RequestTimeout         string `yaml:"request_timeout"`
-		LoggingLevel           string `yaml:"logging_level"`
-		MasterKey              string `yaml:"master_key"`
-		DefaultModelsRPM       string `yaml:"default_models_rpm"`
-		MaxIdleConns           string `yaml:"max_idle_conns"`
-		MaxIdleConnsPerHost    string `yaml:"max_idle_conns_per_host"`
-		IdleConnTimeout        string `yaml:"idle_conn_timeout"`
-		WriteTimeout           string `yaml:"write_timeout"`
-		IdleTimeout            string `yaml:"idle_timeout"`
-		MaxProviderRetries     string `yaml:"max_provider_retries"`
-		SessionStickyEnabled   string `yaml:"session_sticky_enabled"`
-		SessionStickyTTL       string `yaml:"session_sticky_ttl_minutes"`
-		ModelPricesLink        string `yaml:"model_prices_link,omitempty"`
+		Port                       string `yaml:"port"`
+		MaxBodySizeMB              string `yaml:"max_body_size_mb"`
+		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
+		RequestTimeout             string `yaml:"request_timeout"`
+		LoggingLevel               string `yaml:"logging_level"`
+		MasterKey                  string `yaml:"master_key"`
+		DefaultModelsRPM           string `yaml:"default_models_rpm"`
+		MaxIdleConns               string `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost        string `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout            string `yaml:"idle_conn_timeout"`
+		WriteTimeout               string `yaml:"write_timeout"`
+		IdleTimeout                string `yaml:"idle_timeout"`
+		MaxProviderRetries         string `yaml:"max_provider_retries"`
+		SessionStickyEnabled       string `yaml:"session_sticky_enabled"`
+		SessionStickyTTL           string `yaml:"session_sticky_ttl_minutes"`
+		SessionStickyAutoCacheCtrl string `yaml:"session_sticky_auto_cache_control"`
+		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
 	}
 
 	var temp tempConfig
@@ -434,6 +436,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyTTL, err = parseField(temp.SessionStickyTTL, 0, strconv.Atoi, "session_sticky_ttl_minutes"); err != nil {
+		return err
+	}
+	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
 		return err
 	}
 

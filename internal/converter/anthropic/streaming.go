@@ -179,13 +179,21 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				reason := mapAnthropicStopReason(event.Delta.StopReason)
 				if event.Usage != nil {
 					completionTokens = event.Usage.OutputTokens
+					// Update cache counts if Anthropic provides them in message_delta too.
+					if event.Usage.CacheReadInputTokens > 0 {
+						cacheReadTokens = event.Usage.CacheReadInputTokens
+					}
+					if event.Usage.CacheCreationInputTokens > 0 {
+						cacheCreationTokens = event.Usage.CacheCreationInputTokens
+					}
 				}
+				// Anthropic's input_tokens excludes cache tokens; add them back for the real total.
+				totalPromptTokens := promptTokens + cacheCreationTokens + cacheReadTokens
 				usage := &openai.OpenAIUsage{
-					PromptTokens:     promptTokens,
+					PromptTokens:     totalPromptTokens,
 					CompletionTokens: completionTokens,
-					TotalTokens:      promptTokens + completionTokens,
+					TotalTokens:      totalPromptTokens + completionTokens,
 				}
-				// L1 — include cache token details in streaming usage
 				if cacheReadTokens > 0 || cacheCreationTokens > 0 {
 					usage.PromptTokensDetails = &openai.TokenDetails{
 						CachedTokens: cacheReadTokens,
