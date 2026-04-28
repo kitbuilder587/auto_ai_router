@@ -74,29 +74,30 @@ type HealthChecker interface {
 
 // Config holds all configuration needed to create a Proxy
 type Config struct {
-	Balancer               *balancer.RoundRobin
-	Logger                 *slog.Logger
-	MaxBodySizeMB          int
-	ResponseBodyMultiplier int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
-	RequestTimeout         time.Duration
-	MaxIdleConns           int
-	MaxIdleConnsPerHost    int
-	IdleConnTimeout        time.Duration
-	Metrics                *monitoring.Metrics
-	MasterKey              string
-	RateLimiter            *ratelimit.RPMLimiter
-	TokenManager           *auth.VertexTokenManager
-	ModelManager           *models.Manager
-	Version                string
-	Commit                 string
-	LiteLLMDB              litellmdb.Manager          // LiteLLM database integration (optional)
-	HealthChecker          HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	PriceRegistry          *models.ModelPriceRegistry // Model pricing information (optional)
-	MaxProviderRetries     int                        // Max same-type credential retries (default: 2)
-	ResponseStore          responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	SessionStickyEnabled   bool
-	SessionStoreTTL        time.Duration
-	RouterID               string // Human-readable name for this router (shown in /trace); defaults to hostname
+	Balancer                   *balancer.RoundRobin
+	Logger                     *slog.Logger
+	MaxBodySizeMB              int
+	ResponseBodyMultiplier     int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
+	RequestTimeout             time.Duration
+	MaxIdleConns               int
+	MaxIdleConnsPerHost        int
+	IdleConnTimeout            time.Duration
+	Metrics                    *monitoring.Metrics
+	MasterKey                  string
+	RateLimiter                *ratelimit.RPMLimiter
+	TokenManager               *auth.VertexTokenManager
+	ModelManager               *models.Manager
+	Version                    string
+	Commit                     string
+	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
+	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
+	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
+	MaxProviderRetries         int                        // Max same-type credential retries (default: 2)
+	ResponseStore              responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled       bool
+	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStoreTTL            time.Duration
+	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 }
 
 type Proxy struct {
@@ -119,6 +120,7 @@ type Proxy struct {
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
 	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 	sessionStore        *SessionStore              // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl bool                       // Auto-inject Anthropic cache_control when session is active
 }
 
 var (
@@ -201,6 +203,7 @@ func New(cfg *Config) *Proxy {
 		maxProviderRetries:  cfg.MaxProviderRetries,
 		responseStore:       cfg.ResponseStore,
 		sessionStore:        sessionStore,
+		stickyAutoCacheCtrl: cfg.SessionStickyAutoCacheCtrl,
 		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
 }

@@ -141,6 +141,17 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 		}
 	}
 
+	// anthropic_beta from extra_body (e.g. ["prompt-caching-2024-07-31"])
+	if req.ExtraBody != nil {
+		if beta, ok := req.ExtraBody["anthropic_beta"].([]interface{}); ok {
+			for _, b := range beta {
+				if s, ok := b.(string); ok {
+					anthropicReq.AnthropicBeta = append(anthropicReq.AnthropicBeta, s)
+				}
+			}
+		}
+	}
+
 	// Messages (system messages are extracted to the top-level system field)
 	systemContent, messages := convertOpenAIMessagesToAnthropic(req.Messages)
 	anthropicReq.Messages = messages
@@ -156,14 +167,14 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 // Tool result messages become user-role messages containing tool_result blocks.
 // Returns (systemContent, messages).
 func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (interface{}, []AnthropicMessage) {
-	var systemTexts []string
+	var allSystemBlocks []ContentBlock
 	var messages []AnthropicMessage
 
 	for _, msg := range openAIMessages {
 		switch msg.Role {
 		case "system", "developer":
-			texts := extractSystemText(msg.Content)
-			systemTexts = append(systemTexts, texts...)
+			sysBlocks := extractSystemBlocks(msg.Content)
+			allSystemBlocks = append(allSystemBlocks, sysBlocks...)
 
 		case "user":
 			blocks := convertOpenAIContentToAnthropic(msg.Content)
@@ -214,8 +225,27 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 	}
 
 	var systemContent interface{}
-	if len(systemTexts) > 0 {
-		systemContent = strings.Join(systemTexts, "\n")
+	if len(allSystemBlocks) > 0 {
+		hasCacheControl := false
+		for _, b := range allSystemBlocks {
+			if b.CacheControl != nil {
+				hasCacheControl = true
+				break
+			}
+		}
+		if hasCacheControl {
+			systemContent = allSystemBlocks
+		} else {
+			texts := make([]string, 0, len(allSystemBlocks))
+			for _, b := range allSystemBlocks {
+				if b.Text != "" {
+					texts = append(texts, b.Text)
+				}
+			}
+			if len(texts) > 0 {
+				systemContent = strings.Join(texts, "\n")
+			}
+		}
 	}
 
 	// Merge consecutive same-role messages into a single message.
@@ -286,25 +316,29 @@ func OpenAIToBedrock(openAIBody []byte, model string) ([]byte, error) {
 	return json.Marshal(body)
 }
 
-// extractSystemText extracts all text strings from a system/developer message content.
-func extractSystemText(content interface{}) []string {
+// extractSystemBlocks extracts system/developer message content into ContentBlocks,
+// preserving cache_control markers for Anthropic prompt caching.
+func extractSystemBlocks(content interface{}) []ContentBlock {
 	switch c := content.(type) {
 	case string:
 		if c != "" {
-			return []string{c}
+			return []ContentBlock{{Type: "text", Text: c}}
 		}
 	case []interface{}:
-		var texts []string
+		var blocks []ContentBlock
 		for _, block := range c {
-			if blockMap, ok := block.(map[string]interface{}); ok {
-				if blockMap["type"] == "text" {
-					if text, ok := blockMap["text"].(string); ok && text != "" {
-						texts = append(texts, text)
-					}
-				}
+			blockMap, ok := block.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if blockMap["type"] == "text" {
+				text, _ := blockMap["text"].(string)
+				cb := ContentBlock{Type: "text", Text: text}
+				cb.CacheControl = blockMap["cache_control"]
+				blocks = append(blocks, cb)
 			}
 		}
-		return texts
+		return blocks
 	}
 	return nil
 }

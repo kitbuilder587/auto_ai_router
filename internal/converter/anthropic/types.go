@@ -16,6 +16,7 @@ type AnthropicRequest struct {
 	ToolChoice    interface{}        `json:"tool_choice,omitempty"`
 	Thinking      *AnthropicThinking `json:"thinking,omitempty"`
 	Metadata      *AnthropicMetadata `json:"metadata,omitempty"`
+	AnthropicBeta []string           `json:"anthropic_beta,omitempty"`
 }
 
 // AnthropicMessage represents a single message in the Anthropic conversation.
@@ -46,6 +47,9 @@ type ContentBlock struct {
 	// thinking block (in responses)
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`
+
+	// prompt caching (requests only)
+	CacheControl interface{} `json:"cache_control,omitempty"`
 }
 
 // MediaSource describes the source of an image or document content block.
@@ -70,6 +74,9 @@ type AnthropicTool struct {
 	// computer_use specific dimensions
 	DisplayWidthPx  int `json:"display_width_px,omitempty"`
 	DisplayHeightPx int `json:"display_height_px,omitempty"`
+
+	// prompt caching
+	CacheControl interface{} `json:"cache_control,omitempty"`
 }
 
 // AnthropicThinking controls extended thinking / reasoning in Anthropic models.

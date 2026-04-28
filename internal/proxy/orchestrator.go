@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -93,6 +94,14 @@ func (p *Proxy) orchestrateRequest(
 	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, logCtx)
 	if !ok {
 		return nil, false
+	}
+
+	// Auto-inject Anthropic prompt-caching markers when a session is active.
+	// This maximises cache hit rate when session-sticky routing keeps traffic on one credential.
+	if p.stickyAutoCacheCtrl &&
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeBedrock) &&
+		(logCtx.SessionID != "" || preferredCredentialName != "") {
+		body = anthropicconv.InjectCacheControl(body)
 	}
 
 	p.logger.Debug("Responses API detection",

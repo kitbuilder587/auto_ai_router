@@ -194,6 +194,47 @@ Choose a TTL that matches your conversation cadence:
 
 Negative values are rejected at startup.
 
+### Automatic Anthropic Prompt Caching
+
+When routing to an **Anthropic** or **Bedrock** credential with an active session, the proxy automatically injects `cache_control: {type: "ephemeral"}` markers into the request body. This converts automatic same-credential affinity into explicit provider-level prompt caching, reducing token costs by up to 90% on long conversations.
+
+**Enabled by default.** To disable:
+
+```yaml
+server:
+  session_sticky_auto_cache_control: false
+```
+
+#### What gets marked
+
+The proxy follows Anthropic's recommended multi-turn caching pattern:
+
+| Position         | What is marked                                            |
+| ---------------- | --------------------------------------------------------- |
+| System message   | Last content block (stable across all turns)              |
+| History boundary | Last content block of the **second-to-last** user message |
+
+```
+system: [large context] ← cache_control: ephemeral
+user:   turn 1          ← cache_control: ephemeral (history boundary)
+asst:   turn 1
+user:   current message   (not marked — changes every turn)
+```
+
+The current user message is intentionally left unmarked because it changes with every request. Marking the boundary of stable history is sufficient for Anthropic to cache the expensive prefix.
+
+#### Interaction with manual cache_control
+
+If the incoming request **already contains** any `cache_control` field anywhere in its content blocks, auto-injection is skipped entirely. Manual markers always take precedence.
+
+#### Trigger conditions
+
+Auto-injection fires when **all** of the following are true:
+
+- `session_sticky_auto_cache_control: true` (default)
+- Credential type is `anthropic` or `bedrock`
+- A session is active: request has a session ID **or** `previous_response_id` resolved to a known credential
+
 ### Full Example
 
 ```yaml
@@ -202,6 +243,7 @@ server:
   master_key: "os.environ/MASTER_KEY"
   session_sticky_enabled: true
   session_sticky_ttl_minutes: 10
+  session_sticky_auto_cache_control: true   # default — explicit for clarity
 
 credentials:
   - name: "vertex_cred_1"
