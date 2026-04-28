@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -200,10 +199,6 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 						CachedTokens: cacheReadTokens,
 					}
 				}
-				fmt.Fprintf(os.Stderr, "[anthropic-stream] final reported: prompt=%d completion=%d total=%d (raw_input=%d cache_read=%d cache_creation=%d)\n",
-					usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
-					promptTokens, cacheReadTokens, cacheCreationTokens,
-				)
 				chunk := buildStreamChunk(chatID, model, timestamp, openai.OpenAIStreamingDelta{}, &reason, usage)
 				if err := writeChunk(output, chunk); err != nil {
 					return err
