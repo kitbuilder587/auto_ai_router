@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,8 +19,53 @@ type RequestMode struct {
 	IsImageEdit       bool   // true for /images/edits requests
 	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
-	ModelID           string // e.g. "gemini-2.0-flash", "claude-opus-4-5"
+	ModelID           string // real provider model name (URL construction, format detection)
+	DisplayModelID    string // alias to echo in responses; falls back to ModelID when empty
 	ContentType       string // original request content type (needed for multipart endpoints)
+}
+
+// responseModel returns the model name to embed in response/streaming output.
+// Uses DisplayModelID (alias) when set, so the client sees the name it requested.
+func (m RequestMode) responseModel() string {
+	if m.DisplayModelID != "" {
+		return m.DisplayModelID
+	}
+	return m.ModelID
+}
+
+// responseModelAliasWriter rewrites complete SSE lines before forwarding them.
+// It buffers incomplete lines so model replacement still works when the JSON payload
+// is split across multiple upstream writes.
+type responseModelAliasWriter struct {
+	w        io.Writer
+	oldModel string
+	newModel string
+	pending  []byte
+}
+
+func (w *responseModelAliasWriter) Write(p []byte) (int, error) {
+	w.pending = append(w.pending, p...)
+	for {
+		lineEnd := bytes.IndexByte(w.pending, '\n')
+		if lineEnd < 0 {
+			break
+		}
+		line := w.pending[:lineEnd+1]
+		if _, err := w.w.Write(openaiconv.ReplaceModelInBody(line, w.oldModel, w.newModel)); err != nil {
+			return 0, err
+		}
+		w.pending = w.pending[lineEnd+1:]
+	}
+	return len(p), nil
+}
+
+func (w *responseModelAliasWriter) Flush() error {
+	if len(w.pending) == 0 {
+		return nil
+	}
+	_, err := w.w.Write(openaiconv.ReplaceModelInBody(w.pending, w.oldModel, w.newModel))
+	w.pending = nil
+	return err
 }
 
 // ProviderConverter performs request/response conversion for a specific provider.
@@ -34,6 +80,13 @@ type ProviderConverter struct {
 	// rewrittenContentType is set by RequestFrom when a multipart body is rewritten
 	// (e.g. for image edits).  Empty string means the original Content-Type is still valid.
 	rewrittenContentType string
+}
+
+// isAnthropicBedrockModel returns true for Anthropic Claude models accessed via Bedrock
+// (model IDs starting with "anthropic."). Other Bedrock-hosted models (GLM, Llama, etc.)
+// use OpenAI-compatible format and must not be wrapped in Anthropic's API envelope.
+func isAnthropicBedrockModel(modelID string) bool {
+	return strings.HasPrefix(modelID, "anthropic.") || strings.Contains(modelID, ".anthropic.")
 }
 
 // New creates a ProviderConverter for the given provider and request mode.
@@ -80,7 +133,10 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		if c.mode.IsImageGeneration {
 			return nil, errors.New("bedrock does not support image generation")
 		}
-		return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
+		if isAnthropicBedrockModel(c.mode.ModelID) {
+			return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
+		}
+		return body, nil
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, and others: convert non-function tools
 		// (web_search, web_search_preview) to web_search_options, then pass through.
@@ -134,9 +190,18 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 			// Imagen: native image generation endpoint
 			return vertex.VertexImageToOpenAI(body)
 		}
-		return vertex.VertexToOpenAI(body, c.mode.ModelID)
-	case config.ProviderTypeAnthropic, config.ProviderTypeBedrock:
-		return anthropic.AnthropicToOpenAI(body, c.mode.ModelID)
+		return vertex.VertexToOpenAI(body, c.mode.responseModel())
+	case config.ProviderTypeAnthropic:
+		return anthropic.AnthropicToOpenAI(body, c.mode.responseModel())
+	case config.ProviderTypeBedrock:
+		if isAnthropicBedrockModel(c.mode.ModelID) {
+			return anthropic.AnthropicToOpenAI(body, c.mode.responseModel())
+		}
+		// OpenAI-compatible passthrough; fix provider's real model ID to the client alias.
+		if c.mode.DisplayModelID != "" && c.mode.DisplayModelID != c.mode.ModelID {
+			return openaiconv.ReplaceModelInBody(body, c.mode.ModelID, c.mode.DisplayModelID), nil
+		}
+		return body, nil
 	default:
 		return body, nil
 	}
@@ -147,17 +212,34 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.ModelID, writer)
+		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.responseModel(), writer)
 	case config.ProviderTypeAnthropic:
-		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.ModelID, writer)
+		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.responseModel(), writer)
 	case config.ProviderTypeBedrock:
 		// Bedrock uses AWS Event Stream binary framing instead of SSE.
-		// Decode to SSE first, then pass through the Anthropic converter.
+		// Decode to SSE first, then route by model family.
 		pr, pw := io.Pipe()
 		go func() {
 			pw.CloseWithError(DecodeEventStreamToSSE(reader, pw))
 		}()
-		return anthropic.TransformAnthropicStreamToOpenAI(pr, c.mode.ModelID, writer)
+		if isAnthropicBedrockModel(c.mode.ModelID) {
+			return anthropic.TransformAnthropicStreamToOpenAI(pr, c.mode.responseModel(), writer)
+		}
+		// Non-Anthropic models on Bedrock (GLM, Llama, etc.) return OpenAI-compatible
+		// SSE chunks after event stream decoding. Replace provider's real model ID with alias.
+		if c.mode.DisplayModelID != "" && c.mode.DisplayModelID != c.mode.ModelID {
+			aliasWriter := &responseModelAliasWriter{
+				w:        writer,
+				oldModel: c.mode.ModelID,
+				newModel: c.mode.DisplayModelID,
+			}
+			if _, err := io.Copy(aliasWriter, pr); err != nil {
+				return err
+			}
+			return aliasWriter.Flush()
+		}
+		_, err := io.Copy(writer, pr)
+		return err
 	default:
 		_, err := io.Copy(writer, reader)
 		return err

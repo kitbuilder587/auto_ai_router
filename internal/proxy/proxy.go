@@ -773,6 +773,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
 			ModelID:           realModelID,
+			DisplayModelID:    modelID,
 			ContentType:       r.Header.Get("Content-Type"),
 		})
 
@@ -1117,7 +1118,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.Debug("Proxy response body",
 				"credential", cred.Name, "content_encoding", contentEncoding,
-				"body", logger.TruncateLongFields(decodedBody, 500))
+				"body", logger.TruncateLongFields(string(finalResponseBody), 500))
 		}
 
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
@@ -1179,7 +1180,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// For error responses (4xx/5xx), pass through the provider error as-is.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				// Transform to Responses API SSE format
-				err := p.handleResponsesAPIStreaming(w, resp, cred, realModelID, logCtx, saveResponseFn, prepared.responsesMetadata)
+				err := p.handleResponsesAPIStreaming(w, resp, cred, modelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
 					p.logger.Error("Failed to handle Responses API streaming", "error", err)
 					// Note: finalizeStreamingLog inside handleTransformedStreaming already
@@ -1190,36 +1191,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				// Error response: stream using provider's native format instead
-				switch cred.Type {
-				case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-					err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
-					if err != nil {
-						p.logger.Error("Failed to handle vertex streaming response", "error", err)
-					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						streamCompleted = true
-					}
-				case config.ProviderTypeAnthropic:
-					err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
-					if err != nil {
-						p.logger.Error("Failed to handle anthropic streaming response", "error", err)
-					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						streamCompleted = true
-					}
-				case config.ProviderTypeBedrock:
-					err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
-					if err != nil {
-						p.logger.Error("Failed to handle bedrock streaming response", "error", err)
-					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						streamCompleted = true
-					}
-				default:
-					// For passthrough providers, stream error as-is
-					err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
-					if err != nil {
-						p.logger.Error("Failed to handle streaming response", "error", err)
-					} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-						streamCompleted = true
-					}
+				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle provider streaming response", "provider", cred.Type, "error", err)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
 				}
 			}
 		} else if prepared.passthroughResponses {
@@ -1240,35 +1216,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			switch cred.Type {
-			case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-				err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
-				if err != nil {
-					p.logger.Error("Failed to handle vertex streaming response", "error", err)
-				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					streamCompleted = true
-				}
-			case config.ProviderTypeAnthropic:
-				err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
-				if err != nil {
-					p.logger.Error("Failed to handle anthropic streaming response", "error", err)
-				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					streamCompleted = true
-				}
-			case config.ProviderTypeBedrock:
-				err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
-				if err != nil {
-					p.logger.Error("Failed to handle bedrock streaming response", "error", err)
-				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					streamCompleted = true
-				}
-			default:
-				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
-				if err != nil {
-					p.logger.Error("Failed to handle streaming response", "error", err)
-				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					streamCompleted = true
-				}
+			err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+			if err != nil {
+				p.logger.Error("Failed to handle provider streaming response", "provider", cred.Type, "error", err)
+			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				streamCompleted = true
 			}
 		}
 		if streamCompleted {
