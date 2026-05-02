@@ -463,12 +463,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			shouldRetry = false
 
-			proxyResp, lastProxyErr = p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
-			if lastProxyErr != nil {
+			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
+			lastProxyErr = fwdErr
+			if fwdErr != nil {
 				shouldRetry = true
 				retryReason = RetryReasonNetErr
 				continue
 			}
+			proxyResp = resp
 
 			if proxyResp.IsStreaming {
 				break // can't retry streaming
@@ -492,13 +494,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// After retry loop: try fallback proxy as last resort
 		if shouldRetry {
 			fallbackStatus := 0
-			if lastProxyErr != nil {
+			if proxyResp != nil {
+				// Prefer the last HTTP status code we actually received.
+				fallbackStatus = proxyResp.StatusCode
+			} else if lastProxyErr != nil {
 				fallbackStatus = http.StatusBadGateway
 				if isTimeoutError(lastProxyErr) {
 					fallbackStatus = http.StatusRequestTimeout
 				}
-			} else if proxyResp != nil {
-				fallbackStatus = proxyResp.StatusCode
 			}
 
 			p.logger.Info("All same-type proxy credentials exhausted, attempting fallback",
@@ -512,8 +515,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"credential", cred.Name, "fallback_reason", fallbackReason)
 		}
 
-		// Handle transport error (no successful response)
-		if lastProxyErr != nil {
+		// Handle transport error (no successful response at all).
+		// If we have a saved proxyResp (e.g. a 429 from an earlier attempt that was
+		// followed by a network error on the retry), fall through to writeProxyResponse
+		// so the real HTTP status is returned to the client instead of 502.
+		if lastProxyErr != nil && proxyResp == nil {
 			statusCode := http.StatusBadGateway
 			statusMessage := "Bad Gateway"
 			errorMsg := fmt.Sprintf("Proxy forward error: %v", lastProxyErr)
