@@ -463,8 +463,13 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 			TPM:        dm.TPM,
 			Credential: dm.Credential,
 		})
+		// Only apply DB real name if not already defined in static config.
+		// Static YAML takes priority: model_table sync must not override
+		// explicitly configured models[].model mappings.
 		if dm.Model != "" && dm.Model != dm.Name {
-			newRealNames[dm.Name] = dm.Model
+			if _, isStatic := m.staticModelRealNames[dm.Name]; !isStatic {
+				newRealNames[dm.Name] = dm.Model
+			}
 		}
 		newDBNames[dm.Name] = true
 	}

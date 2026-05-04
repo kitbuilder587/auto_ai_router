@@ -334,3 +334,133 @@ func TestProxyFallbackOn429_MultipleRetries(t *testing.T) {
 	assert.Equal(t, int32(0), atomic.LoadInt32(&fallback2Calls), "Second fallback should NOT be called")
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// TestProxy_429PreservedOverNetworkError is a regression test for the bug where a 429
+// returned by the first proxy credential was replaced by a 502 when the retry attempt
+// against a second credential produced a network error.
+//
+// Before the fix: proxyResp was overwritten to nil on network error → 502.
+// After the fix:  proxyResp is only updated on a successful HTTP response, so the
+//
+//	saved 429 survives and is returned to the client.
+func TestProxy_429PreservedOverNetworkError(t *testing.T) {
+	var cred1Calls int32
+
+	// cred1 returns 429 (rate-limited).
+	cred1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cred1Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":   "rate_limit_exceeded",
+			"message": "rate limited",
+		})
+	}))
+	defer cred1Server.Close()
+
+	// cred2 is dead (connection refused): create a server and immediately close it.
+	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := deadServer.URL
+	deadServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "cred1",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "key1",
+				BaseURL:    cred1Server.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "cred2",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "key2",
+				BaseURL:    deadURL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+		).
+		WithMasterKey("master-key").
+		WithMaxProviderRetries(1).
+		Build()
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	// The 429 from cred1 must be returned — not a 502 from the network error on cred2.
+	assert.Equal(t, http.StatusTooManyRequests, w.Code,
+		"client must receive 429 from first credential, not 502 from the network error on retry")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&cred1Calls), "cred1 should be called exactly once")
+
+	// Verify the response body still contains the original rate-limit error JSON.
+	var respBody map[string]interface{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&respBody))
+	assert.Equal(t, "rate_limit_exceeded", respBody["error"])
+}
+
+// TestProxy_429PreservedWhenNoFallbackAndNetworkError is similar but without any
+// fallback credential configured, ensuring the same invariant holds in that simpler topology.
+func TestProxy_429PreservedWhenNoFallbackAndNetworkError(t *testing.T) {
+	var cred1Calls int32
+
+	cred1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&cred1Calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":   "rate_limit_exceeded",
+			"message": "too many requests",
+		})
+	}))
+	defer cred1Server.Close()
+
+	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := deadServer.URL
+	deadServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "key",
+				BaseURL:    cred1Server.URL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name:       "secondary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "key2",
+				BaseURL:    deadURL,
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: false,
+			},
+		).
+		WithMasterKey("master-key").
+		WithMaxProviderRetries(1).
+		Build()
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code,
+		"a single-credential 429 followed by a network error must still return 429, not 502")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&cred1Calls))
+}

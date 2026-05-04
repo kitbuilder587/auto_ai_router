@@ -273,24 +273,43 @@ func IsStreamingResponse(resp *http.Response) bool {
 
 type streamTransformer func(io.Reader, string, io.Writer) error
 
-func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	conv := converter.New(config.ProviderTypeVertexAI, converter.RequestMode{ModelID: modelID, IsStreaming: true})
+func (p *Proxy) handleProviderStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	cred *config.CredentialConfig,
+	realModelID, displayModelID string,
+	logCtx *RequestLogContext,
+) error {
+	switch cred.Type {
+	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+		return p.handleVertexStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
+	case config.ProviderTypeAnthropic:
+		return p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
+	case config.ProviderTypeBedrock:
+		return p.handleBedrockStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
+	default:
+		return p.handleStreamingWithTokens(w, resp, cred.Name, displayModelID, logCtx)
+	}
+}
+
+func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
+	conv := converter.New(config.ProviderTypeVertexAI, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", transformer, logCtx)
 }
 
-func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	conv := converter.New(config.ProviderTypeAnthropic, converter.RequestMode{ModelID: modelID, IsStreaming: true})
+func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
+	conv := converter.New(config.ProviderTypeAnthropic, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", transformer, logCtx)
 }
 
-func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	conv := converter.New(config.ProviderTypeBedrock, converter.RequestMode{ModelID: modelID, IsStreaming: true})
+func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
+	conv := converter.New(config.ProviderTypeBedrock, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}

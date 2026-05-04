@@ -805,6 +805,47 @@ func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {
 	assert.Equal(t, "real-static", real)
 }
 
+// TestUpdateDBModels_StaticRealNameNotOverriddenByDB verifies that a static
+// models[].model mapping (e.g. "anthropic/claude-opus-4.7" → "global.anthropic.claude-opus-4-7")
+// is never replaced by a conflicting entry from the LiteLLM DB sync.
+// Regression test: without the fix, UpdateDBModels would overwrite staticModelRealNames
+// with DB values, causing requests to be forwarded with the wrong model name and
+// returning empty responses with 0 tokens after the first sync cycle.
+func TestUpdateDBModels_StaticRealNameNotOverriddenByDB(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "anthropic/claude-opus-4.7", Model: "global.anthropic.claude-opus-4-7", RPM: 1000},
+		{Name: "z-ai/glm-4.7-flash", Model: "zai.glm-4.7-flash", RPM: 1000},
+	}
+	m := New(logger, 100, staticModels)
+
+	staticCreds := []config.CredentialConfig{{Name: "cred-1"}}
+	m.LoadModelsFromConfig(staticCreds)
+
+	// Simulate DB sync where LiteLLM has a conflicting model field
+	// (e.g. the DB stores "claude-opus-4" instead of the correct "global.anthropic.claude-opus-4-7")
+	dbModels := []config.ModelRPMConfig{
+		{Name: "anthropic/claude-opus-4.7", Model: "claude-opus-4", RPM: 500, Credential: "db-cred"},
+		{Name: "z-ai/glm-4.7-flash", Model: "wrong-real-name", RPM: 500, Credential: "db-cred"},
+	}
+	dbCreds := []config.CredentialConfig{{Name: "db-cred"}}
+	allCreds := append(append([]config.CredentialConfig(nil), staticCreds...), dbCreds...)
+
+	m.UpdateDBModels(dbModels, staticCreds, allCreds)
+
+	// Static real names must survive the DB sync unchanged
+	real, ok := m.GetRealModelName("anthropic/claude-opus-4.7")
+	assert.True(t, ok)
+	assert.Equal(t, "global.anthropic.claude-opus-4-7", real,
+		"DB sync must not overwrite static models[].model mapping")
+
+	real, ok = m.GetRealModelName("z-ai/glm-4.7-flash")
+	assert.True(t, ok)
+	assert.Equal(t, "zai.glm-4.7-flash", real,
+		"DB sync must not overwrite static models[].model mapping")
+}
+
 func TestUpdateDBModels_DBOnlyGlobalMapping(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 

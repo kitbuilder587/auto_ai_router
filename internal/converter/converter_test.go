@@ -3,6 +3,7 @@ package converter
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -41,6 +42,43 @@ func TestProviderConverter_RequestFrom_Anthropic(t *testing.T) {
 	}
 	if req.MaxTokens != 4096 {
 		t.Fatalf("expected default max_tokens 4096, got %d", req.MaxTokens)
+	}
+}
+
+func TestProviderConverter_RequestFrom_BedrockAnthropicGlobal(t *testing.T) {
+	body := mustJSON(t, minimalOpenAIChatRequest())
+
+	c := New(config.ProviderTypeBedrock, RequestMode{ModelID: "global.anthropic.claude-opus-4-7"})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(got, &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if req["anthropic_version"] != "bedrock-2023-05-31" {
+		t.Fatalf("expected bedrock anthropic version, got %#v", req["anthropic_version"])
+	}
+	if _, ok := req["model"]; ok {
+		t.Fatalf("bedrock request body must not contain model field: %s", string(got))
+	}
+	if req["max_tokens"] != float64(4096) {
+		t.Fatalf("expected default max_tokens 4096, got %#v", req["max_tokens"])
+	}
+}
+
+func TestProviderConverter_RequestFrom_BedrockOpenAICompatiblePassthrough(t *testing.T) {
+	body := mustJSON(t, minimalOpenAIChatRequest())
+
+	c := New(config.ProviderTypeBedrock, RequestMode{ModelID: "zai.glm-4.7-flash"})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("expected passthrough body, got %s", string(got))
 	}
 }
 
@@ -225,6 +263,57 @@ func TestProviderConverter_ResponseTo_Anthropic(t *testing.T) {
 	}
 }
 
+func TestProviderConverter_ResponseTo_BedrockAnthropicGlobalAlias(t *testing.T) {
+	anthropicResp := anthropic.AnthropicResponse{
+		ID:         "msg_1",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "global.anthropic.claude-opus-4-7",
+		StopReason: "end_turn",
+		Usage: anthropic.AnthropicUsage{
+			InputTokens:  5,
+			OutputTokens: 7,
+		},
+		Content: []anthropic.ContentBlock{
+			{Type: "text", Text: "hello"},
+		},
+	}
+	body := mustJSON(t, anthropicResp)
+
+	c := New(config.ProviderTypeBedrock, RequestMode{
+		ModelID:        "global.anthropic.claude-opus-4-7",
+		DisplayModelID: "anthropic/claude-opus-4.7",
+	})
+	got, err := c.ResponseTo(body)
+	if err != nil {
+		t.Fatalf("ResponseTo error: %v", err)
+	}
+
+	resp := mustUnmarshal[openai.OpenAIResponse](t, got)
+	if resp.Model != "anthropic/claude-opus-4.7" {
+		t.Fatalf("expected alias model in response, got %q", resp.Model)
+	}
+}
+
+func TestProviderConverter_ResponseTo_BedrockOpenAICompatibleAlias(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl-1","model":"zai.glm-4.7-flash","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`)
+
+	c := New(config.ProviderTypeBedrock, RequestMode{
+		ModelID:        "zai.glm-4.7-flash",
+		DisplayModelID: "z-ai/glm-4.7-flash",
+	})
+	got, err := c.ResponseTo(body)
+	if err != nil {
+		t.Fatalf("ResponseTo error: %v", err)
+	}
+	if !strings.Contains(string(got), `"model":"z-ai/glm-4.7-flash"`) {
+		t.Fatalf("expected alias model in response body, got %s", string(got))
+	}
+	if strings.Contains(string(got), `"model":"zai.glm-4.7-flash"`) {
+		t.Fatalf("expected real model id to be replaced, got %s", string(got))
+	}
+}
+
 func TestProviderConverter_StreamTo(t *testing.T) {
 	{
 		c := New(config.ProviderTypeOpenAI, RequestMode{})
@@ -260,6 +349,55 @@ func TestProviderConverter_StreamTo(t *testing.T) {
 		if out.String() != "data: [DONE]\n\n" {
 			t.Fatalf("unexpected output: %q", out.String())
 		}
+	}
+
+	{
+		c := New(config.ProviderTypeBedrock, RequestMode{
+			ModelID:        "zai.glm-4.7-flash",
+			DisplayModelID: "z-ai/glm-4.7-flash",
+			IsStreaming:    true,
+		})
+		frame := buildBedrockEventStreamFrame(t, `{"id":"chatcmpl-1","model":"zai.glm-4.7-flash","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`)
+		var out bytes.Buffer
+		if err := c.StreamTo(bytes.NewReader(frame), &out); err != nil {
+			t.Fatalf("StreamTo error: %v", err)
+		}
+		if !strings.Contains(out.String(), `"model":"z-ai/glm-4.7-flash"`) {
+			t.Fatalf("expected alias model in stream, got %q", out.String())
+		}
+		if strings.Contains(out.String(), `"model":"zai.glm-4.7-flash"`) {
+			t.Fatalf("expected real model id to be replaced, got %q", out.String())
+		}
+	}
+}
+
+func TestResponseModelAliasWriter_SplitModelToken(t *testing.T) {
+	var out bytes.Buffer
+	w := &responseModelAliasWriter{
+		w:        &out,
+		oldModel: "zai.glm-4.7-flash",
+		newModel: "z-ai/glm-4.7-flash",
+	}
+
+	first := []byte("data: {\"model\":\"zai.glm-")
+	second := []byte("4.7-flash\",\"choices\":[]}\n\n")
+
+	if _, err := w.Write(first); err != nil {
+		t.Fatalf("Write first chunk error: %v", err)
+	}
+	if _, err := w.Write(second); err != nil {
+		t.Fatalf("Write second chunk error: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush error: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, `"model":"z-ai/glm-4.7-flash"`) {
+		t.Fatalf("expected alias model after split writes, got %q", got)
+	}
+	if strings.Contains(got, `"model":"zai.glm-4.7-flash"`) {
+		t.Fatalf("expected real model id to be replaced, got %q", got)
 	}
 }
 
@@ -416,4 +554,18 @@ func TestProviderConverter_ResponseTo_VertexImage_Gemini_JSONRoundTrip(t *testin
 	if len(resp.Data) != 1 || resp.Data[0].B64JSON == "" {
 		t.Fatalf("unexpected gemini image response: %+v", resp.Data)
 	}
+}
+
+func buildBedrockEventStreamFrame(t *testing.T, innerJSON string) []byte {
+	t.Helper()
+
+	innerBase64 := base64.StdEncoding.EncodeToString([]byte(innerJSON))
+	payload := []byte(`{"bytes":"` + innerBase64 + `","p":""}`)
+	totalLength := uint32(12 + len(payload) + 4)
+
+	frame := make([]byte, 12+len(payload)+4)
+	binary.BigEndian.PutUint32(frame[0:4], totalLength)
+	binary.BigEndian.PutUint32(frame[4:8], 0)
+	copy(frame[12:], payload)
+	return frame
 }
