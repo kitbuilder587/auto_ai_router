@@ -21,8 +21,28 @@ func generateItemID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 
+// chatToResponseConfig holds optional parameters for ChatToResponse.
+type chatToResponseConfig struct {
+	extraOutputItems []OutputItem
+}
+
+// ChatToResponseOption is a functional option for ChatToResponse.
+type ChatToResponseOption func(*chatToResponseConfig)
+
+// WithExtraOutputItems injects additional OutputItems into the converted response.
+// Used by provider-specific post-processing (e.g. Vertex web search grounding → web_search_call).
+func WithExtraOutputItems(items []OutputItem) ChatToResponseOption {
+	return func(c *chatToResponseConfig) {
+		c.extraOutputItems = append(c.extraOutputItems, items...)
+	}
+}
+
 // ChatToResponse converts a Chat Completions response body to Responses API format.
-func ChatToResponse(body []byte) ([]byte, error) {
+func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
+	cfg := &chatToResponseConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
 	var ccResp struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -65,7 +85,7 @@ func ChatToResponse(body []byte) ([]byte, error) {
 	// Build output items
 	var output []OutputItem
 	status := "completed"
-	var incompleteDetails interface{}
+	var incompleteDetails *IncompleteDetails
 
 	if len(ccResp.Choices) > 0 {
 		for _, choice := range ccResp.Choices {
@@ -73,14 +93,10 @@ func ChatToResponse(body []byte) ([]byte, error) {
 			switch choice.FinishReason {
 			case "length":
 				status = "incomplete"
-				incompleteDetails = map[string]interface{}{
-					"reason": "max_output_tokens",
-				}
+				incompleteDetails = &IncompleteDetails{Reason: "max_output_tokens"}
 			case "content_filter":
 				status = "incomplete"
-				incompleteDetails = map[string]interface{}{
-					"reason": "content_filter",
-				}
+				incompleteDetails = &IncompleteDetails{Reason: "content_filter"}
 			}
 
 			// Add message output item if there's content or refusal
@@ -129,7 +145,7 @@ func ChatToResponse(body []byte) ([]byte, error) {
 					{
 						Type:        "output_text",
 						Text:        "",
-						Annotations: []interface{}{},
+						Annotations: []Annotation{},
 					},
 				},
 			},
@@ -140,15 +156,11 @@ func ChatToResponse(body []byte) ([]byte, error) {
 	var usage *Usage
 	if ccResp.Usage != nil {
 		usage = &Usage{
-			InputTokens:  ccResp.Usage.PromptTokens,
-			OutputTokens: ccResp.Usage.CompletionTokens,
-			TotalTokens:  ccResp.Usage.TotalTokens,
-			InputTokensDetails: &InputDetails{
-				CachedTokens: 0,
-			},
-			OutputTokensDetails: &OutputDetails{
-				ReasoningTokens: 0,
-			},
+			InputTokens:         ccResp.Usage.PromptTokens,
+			OutputTokens:        ccResp.Usage.CompletionTokens,
+			TotalTokens:         ccResp.Usage.TotalTokens,
+			InputTokensDetails:  InputDetails{},
+			OutputTokensDetails: OutputDetails{},
 		}
 		if ccResp.Usage.PromptTokensDetails != nil {
 			usage.InputTokensDetails.CachedTokens = ccResp.Usage.PromptTokensDetails.CachedTokens
@@ -157,6 +169,8 @@ func ChatToResponse(body []byte) ([]byte, error) {
 			usage.OutputTokensDetails.ReasoningTokens = ccResp.Usage.CompletionTokensDetails.ReasoningTokens
 		}
 	}
+
+	output = append(output, cfg.extraOutputItems...)
 
 	resp := Response{
 		ID:                 generateResponseID(),
@@ -194,7 +208,7 @@ func convertChatMessageContent(content interface{}) []OutputContent {
 			{
 				Type:        "output_text",
 				Text:        c,
-				Annotations: []interface{}{},
+				Annotations: []Annotation{},
 			},
 		}
 	case []interface{}:
@@ -211,7 +225,7 @@ func convertChatMessageContent(content interface{}) []OutputContent {
 				out = append(out, OutputContent{
 					Type:        "output_text",
 					Text:        text,
-					Annotations: []interface{}{},
+					Annotations: []Annotation{},
 				})
 			}
 		}

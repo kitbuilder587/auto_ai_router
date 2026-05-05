@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -871,7 +870,7 @@ func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
 	manager := New(logger, 100, []config.ModelRPMConfig{})
 
 	// Create a mock HTTP server that responds with a models list
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			w.Header().Set("Content-Type", "application/json")
 			models := map[string]interface{}{

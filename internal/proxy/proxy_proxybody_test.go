@@ -42,7 +42,7 @@ func buildProxyBodyTestProxyWithFallbackMM(primaryURL, fallbackURL string, mm *m
 func TestProxyBody_NoAlias(t *testing.T) {
 	var receivedBody []byte
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		receivedBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestProxyBody_WithAlias(t *testing.T) {
 
 	var receivedModel string
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 
@@ -139,7 +139,7 @@ func TestProxyBody_FallbackReceivesAlias(t *testing.T) {
 	var primaryCalls int32
 	var fallbackReceivedModel string
 
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -150,7 +150,7 @@ func TestProxyBody_FallbackReceivesAlias(t *testing.T) {
 	}))
 	defer primary.Close()
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
 		var parsed map[string]interface{}
@@ -199,7 +199,7 @@ func TestProxyBody_FallbackReceivesAlias(t *testing.T) {
 func TestProxyBody_NoAlias_FallbackBodyIdentical(t *testing.T) {
 	var primaryBody, fallbackBody []byte
 
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		primaryBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestProxyBody_NoAlias_FallbackBodyIdentical(t *testing.T) {
 	}))
 	defer primary.Close()
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		fallbackBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)

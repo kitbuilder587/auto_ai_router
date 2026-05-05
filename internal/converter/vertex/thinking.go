@@ -147,6 +147,23 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 	return config
 }
 
+// MapReasoningEffortToThinkingConfig maps a Responses API reasoning.effort to a Vertex
+// ThinkingConfig. Exported for use by sub-packages (e.g. vertex/responses).
+func MapReasoningEffortToThinkingConfig(effort, model string) *genai.ThinkingConfig {
+	return mapReasoningEffort(effort, model)
+}
+
+// DefaultThinkingConfig returns the ThinkingConfig for a model when no explicit thinking
+// params are requested. For thinking-capable models this disables autonomous reasoning
+// for predictable latency; for other models it returns nil.
+// Exported for use by sub-packages (e.g. vertex/responses).
+func DefaultThinkingConfig(model string) *genai.ThinkingConfig {
+	if isThinkingCapableModel(model) {
+		return disableThinkingConfig(model)
+	}
+	return nil
+}
+
 // mapNativeThinkingConfig maps Gemini-native thinking_config from extra_body to ThinkingConfig.
 // Format: {"thinking_budget": 1024, "thinking_level": "medium", "include_thoughts": true}
 // thinking_budget is used for Gemini 2.5; thinking_level is used for Gemini 3+.

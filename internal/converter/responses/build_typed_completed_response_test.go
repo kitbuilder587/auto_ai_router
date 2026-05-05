@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildTypedCompletedResponse_BasicText(t *testing.T) {
@@ -136,9 +137,8 @@ func TestBuildTypedCompletedResponse_IncompleteLength(t *testing.T) {
 	resp := buildTypedCompletedResponse(acc)
 
 	assert.Equal(t, "incomplete", resp.Status)
-	assert.NotNil(t, resp.IncompleteDetails)
-	details := resp.IncompleteDetails.(map[string]interface{})
-	assert.Equal(t, "max_output_tokens", details["reason"])
+	require.NotNil(t, resp.IncompleteDetails)
+	assert.Equal(t, "max_output_tokens", resp.IncompleteDetails.Reason)
 }
 
 func TestBuildTypedCompletedResponse_IncompleteContentFilter(t *testing.T) {
@@ -156,9 +156,8 @@ func TestBuildTypedCompletedResponse_IncompleteContentFilter(t *testing.T) {
 	resp := buildTypedCompletedResponse(acc)
 
 	assert.Equal(t, "incomplete", resp.Status)
-	assert.NotNil(t, resp.IncompleteDetails)
-	details := resp.IncompleteDetails.(map[string]interface{})
-	assert.Equal(t, "content_filter", details["reason"])
+	require.NotNil(t, resp.IncompleteDetails)
+	assert.Equal(t, "content_filter", resp.IncompleteDetails.Reason)
 }
 
 func TestBuildTypedCompletedResponse_WithMetadata(t *testing.T) {

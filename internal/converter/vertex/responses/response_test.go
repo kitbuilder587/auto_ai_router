@@ -1,0 +1,148 @@
+package vertexresponses
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
+)
+
+func TestCandidatesToOutputItems_CodeInterpreter_CodeAndResult(t *testing.T) {
+	vertexResp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{ExecutableCode: &genai.ExecutableCode{Code: "print(1+1)", Language: "PYTHON"}},
+						{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: "OUTCOME_OK", Output: "2\n"}},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	output := candidatesToOutputItems(vertexResp)
+	require.Len(t, output, 1)
+
+	ci := output[0]
+	assert.Equal(t, "code_interpreter_call", ci.Type)
+	assert.Equal(t, "completed", ci.Status)
+	assert.Equal(t, "print(1+1)", ci.Code)
+
+	outputs, ok := ci.Outputs.([]map[string]interface{})
+	require.True(t, ok, "Outputs should be []map[string]interface{}")
+	require.Len(t, outputs, 1)
+	assert.Equal(t, "text", outputs[0]["type"])
+	assert.Equal(t, "2\n", outputs[0]["text"])
+}
+
+func TestCandidatesToOutputItems_CodeInterpreter_CodeOnly(t *testing.T) {
+	vertexResp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{ExecutableCode: &genai.ExecutableCode{Code: "x = 42"}},
+					},
+				},
+			},
+		},
+	}
+
+	output := candidatesToOutputItems(vertexResp)
+	require.Len(t, output, 1)
+	assert.Equal(t, "code_interpreter_call", output[0].Type)
+	assert.Equal(t, "x = 42", output[0].Code)
+	assert.Nil(t, output[0].Outputs, "no result yet — Outputs should be nil")
+}
+
+func TestCandidatesToOutputItems_CodeInterpreter_InterleavedWithText(t *testing.T) {
+	// Gemini may return text, then code, then result, then more text.
+	vertexResp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "Let me calculate:"},
+						{ExecutableCode: &genai.ExecutableCode{Code: "2+2"}},
+						{CodeExecutionResult: &genai.CodeExecutionResult{Output: "4"}},
+						{Text: "The answer is 4."},
+					},
+				},
+			},
+		},
+	}
+
+	output := candidatesToOutputItems(vertexResp)
+	// message("Let me calculate:"), code_interpreter_call, message("The answer is 4.")
+	require.Len(t, output, 3)
+
+	assert.Equal(t, "message", output[0].Type)
+	assert.Equal(t, "Let me calculate:", output[0].Content[0].Text)
+
+	assert.Equal(t, "code_interpreter_call", output[1].Type)
+	assert.Equal(t, "2+2", output[1].Code)
+	outputs := output[1].Outputs.([]map[string]interface{})
+	assert.Equal(t, "4", outputs[0]["text"])
+
+	assert.Equal(t, "message", output[2].Type)
+	assert.Equal(t, "The answer is 4.", output[2].Content[0].Text)
+}
+
+func TestCandidatesToOutputItems_GroundingMetadataAddsAnnotationsAndWebSearchCall(t *testing.T) {
+	vertexResp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "Paris is the capital of France."},
+					},
+				},
+				GroundingMetadata: &genai.GroundingMetadata{
+					WebSearchQueries: []string{"capital of france"},
+					GroundingChunks: []*genai.GroundingChunk{
+						{
+							Web: &genai.GroundingChunkWeb{
+								URI:   "https://example.com/paris",
+								Title: "Paris reference",
+							},
+						},
+					},
+					GroundingSupports: []*genai.GroundingSupport{
+						{
+							GroundingChunkIndices: []int32{0},
+							Segment: &genai.Segment{
+								PartIndex:  0,
+								StartIndex: 0,
+								EndIndex:   5,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	output := candidatesToOutputItems(vertexResp)
+	require.Len(t, output, 2)
+
+	require.Equal(t, "message", output[0].Type)
+	require.Len(t, output[0].Content, 1)
+	assert.Equal(t, "output_text", output[0].Content[0].Type)
+	assert.Equal(t, "Paris is the capital of France.", output[0].Content[0].Text)
+	require.Len(t, output[0].Content[0].Annotations, 1)
+	assert.Equal(t, "url_citation", output[0].Content[0].Annotations[0].Type)
+	assert.Equal(t, "https://example.com/paris", output[0].Content[0].Annotations[0].URL)
+	assert.Equal(t, "Paris reference", output[0].Content[0].Annotations[0].Title)
+	assert.Equal(t, 0, output[0].Content[0].Annotations[0].StartIndex)
+	assert.Equal(t, 5, output[0].Content[0].Annotations[0].EndIndex)
+
+	assert.Equal(t, "web_search_call", output[1].Type)
+	assert.Equal(t, []string{"capital of france"}, output[1].Queries)
+}

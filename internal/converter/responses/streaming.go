@@ -427,7 +427,7 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 			Content: []OutputContent{{
 				Type:        "output_text",
 				Text:        acc.fullText,
-				Annotations: []interface{}{},
+				Annotations: []Annotation{},
 			}},
 		})
 	}
@@ -449,21 +449,21 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 			InputTokens:         acc.usage.PromptTokens,
 			OutputTokens:        acc.usage.CompletionTokens,
 			TotalTokens:         acc.usage.TotalTokens,
-			InputTokensDetails:  &InputDetails{CachedTokens: acc.usage.CachedTokens, AudioTokens: acc.usage.AudioInputTokens},
-			OutputTokensDetails: &OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens},
+			InputTokensDetails:  InputDetails{CachedTokens: acc.usage.CachedTokens, AudioTokens: acc.usage.AudioInputTokens},
+			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens},
 		}
 	}
 
 	status := "completed"
-	var incompleteDetails interface{}
+	var incompleteDetails *IncompleteDetails
 	if acc.finishReason != nil {
 		switch *acc.finishReason {
 		case "length":
 			status = "incomplete"
-			incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+			incompleteDetails = &IncompleteDetails{Reason: "max_output_tokens"}
 		case "content_filter":
 			status = "incomplete"
-			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+			incompleteDetails = &IncompleteDetails{Reason: "content_filter"}
 		}
 	}
 

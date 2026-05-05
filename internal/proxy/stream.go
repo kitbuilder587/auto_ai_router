@@ -620,9 +620,16 @@ func (p *Proxy) handleResponsesAPIStreaming(
 	// first transform to OpenAI Chat Completions SSE, then to Responses API SSE.
 	// For OpenAI (passthrough), the stream is already in Chat Completions SSE format.
 
+	// Use realModelID for provider dispatch (e.g. isAnthropicBedrockModel check),
+	// keep modelID (alias) as DisplayModelID so response chunks show the alias.
+	converterModelID := modelID
+	if logCtx != nil && logCtx.RealModelID != "" {
+		converterModelID = logCtx.RealModelID
+	}
 	conv := converter.New(cred.Type, converter.RequestMode{
-		ModelID:     modelID,
-		IsStreaming: true,
+		ModelID:        converterModelID,
+		DisplayModelID: modelID,
+		IsStreaming:    true,
 	})
 
 	// Extract optional metadata for field echoing (nil is fine — echoing is skipped)
@@ -679,6 +686,28 @@ func (p *Proxy) handleResponsesAPIStreaming(
 	}
 
 	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, string(cred.Type), transformer, logCtx)
+}
+
+// handleNativeResponsesStreaming handles Responses API streaming via the Phase 4
+// ProviderResponses converter (Vertex AI, Anthropic). The provider SSE is converted
+// directly to Responses API SSE format by the provider-specific StreamTo implementation.
+func (p *Proxy) handleNativeResponsesStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	provResponses responses.ProviderResponses,
+	modelID string,
+	logCtx *RequestLogContext,
+	onComplete func(*responses.Response),
+	meta *responses.ResponsesMetadata,
+) error {
+	credName := ""
+	if logCtx.Credential != nil {
+		credName = logCtx.Credential.Name
+	}
+	transformer := func(r io.Reader, _ string, ww io.Writer) error {
+		return provResponses.StreamTo(r, ww, modelID, meta, onComplete)
+	}
+	return p.handleTransformedStreaming(w, resp, credName, modelID, "native_responses", transformer, logCtx)
 }
 
 // handlePassthroughResponsesStreaming handles Responses API streaming for codex models

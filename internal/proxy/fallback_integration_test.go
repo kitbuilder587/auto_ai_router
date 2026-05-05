@@ -14,6 +14,7 @@ package proxy
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,6 +27,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("tcp4 listener unavailable in test environment: %v", err)
+	}
+	server := &httptest.Server{
+		Listener: listener,
+		Config:   &http.Server{Handler: handler},
+	}
+	server.Start()
+	return server
+}
+
 // TestFallbackPath_PrimaryReturns429 tests that when primary credential returns 429,
 // the request is retried with fallback credential and response is returned correctly.
 func TestFallbackPath_PrimaryReturns429(t *testing.T) {
@@ -33,7 +49,7 @@ func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
 	// Create primary mock server (returns 429)
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -42,7 +58,7 @@ func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 	defer primaryServer.Close()
 
 	// Create fallback mock server (returns 200 with success)
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -101,7 +117,7 @@ func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 func TestFallbackPath_PrimaryReturns500(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -109,7 +125,7 @@ func TestFallbackPath_PrimaryReturns500(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -164,7 +180,7 @@ func TestFallbackPath_PrimaryReturns500(t *testing.T) {
 func TestFallbackPath_NoFallbackAvailable(t *testing.T) {
 	var primaryCalls int32
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -203,7 +219,7 @@ func TestFallbackPath_NoFallbackAvailable(t *testing.T) {
 func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -211,7 +227,7 @@ func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -261,7 +277,7 @@ func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 func TestFallbackPath_NonRetryableError(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -269,7 +285,7 @@ func TestFallbackPath_NonRetryableError(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -321,7 +337,7 @@ func TestFallbackPath_Streaming_NotSupported(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
 	// Primary returns 500 during streaming
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -329,7 +345,7 @@ func TestFallbackPath_Streaming_NotSupported(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -385,7 +401,7 @@ func TestFallbackPath_Streaming_NotSupported(t *testing.T) {
 func TestFallbackPath_RequestBodyIntegrity(t *testing.T) {
 	var primaryBody, fallbackBody []byte
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		primaryBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -396,7 +412,7 @@ func TestFallbackPath_RequestBodyIntegrity(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		fallbackBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -451,14 +467,14 @@ func TestFallbackPath_RequestBodyIntegrity(t *testing.T) {
 func TestFallbackPath_HeadersPreserved(t *testing.T) {
 	var fallbackHeaders http.Header
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit"})
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fallbackHeaders = r.Header.Clone()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -537,14 +553,14 @@ func (c *callRecorder) snapshot() []string {
 func buildProxyChain(t *testing.T, rec *callRecorder, primaryStatus int, maxRetries int) (*httptest.Server, *httptest.Server, *Proxy) {
 	t.Helper()
 
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.record("router02")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(primaryStatus)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream_error"})
 	}))
 
-	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.record("router03")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -658,7 +674,7 @@ func TestProxyChain_PrimaryFailsFallbackSucceeds_500(t *testing.T) {
 func TestProxyChain_NoFallback_ErrorPropagated(t *testing.T) {
 	rec := &callRecorder{}
 
-	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.record("router02")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)

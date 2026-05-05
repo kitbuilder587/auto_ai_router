@@ -60,7 +60,7 @@ func makeChatRequest(sessionID string) *http.Request {
 // SessionStickyEnabled is false, the proxy creates no session store and
 // requests still succeed via normal round-robin credential selection.
 func TestProxyRequest_StickyDisabled_SessionStoreIsNil(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-1", "response")))
 	}))
@@ -84,13 +84,13 @@ func TestProxyRequest_StickyDisabled_SessionStoreIsNil(t *testing.T) {
 // following round-robin order.
 func TestProxyRequest_StickyEnabled_UsesBindingIfAvailable(t *testing.T) {
 	// server1 answers with "from-cred1"; server2 with "from-cred2".
-	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-cred1", "from-cred1")))
 	}))
 	defer server1.Close()
 
-	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-cred2", "from-cred2")))
 	}))
@@ -125,7 +125,7 @@ func TestProxyRequest_StickyEnabled_UsesBindingIfAvailable(t *testing.T) {
 // by the defer in ProxyRequest (clearSessionBinding when RequestCompleted == false).
 func TestProxyRequest_StickyBinding_ClearedOnFailure(t *testing.T) {
 	// Upstream always returns 500 — request will not be marked as completed.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"server error"}`))
@@ -159,7 +159,7 @@ func TestProxyRequest_StickyBinding_ClearedOnFailure(t *testing.T) {
 func TestProxyRequest_StickyBinding_SetOnSuccess(t *testing.T) {
 	var callCount int32
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&callCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-ok", "ok-response")))
@@ -196,13 +196,13 @@ func TestProxyRequest_StickyBinding_SetOnSuccess(t *testing.T) {
 // renamed), the proxy transparently falls back to normal round-robin selection and
 // still serves the request successfully.
 func TestProxyRequest_StickyCredentialUnavailable_FallsBackToNormalSelection(t *testing.T) {
-	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-cred1", "from-cred1")))
 	}))
 	defer server1.Close()
 
-	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-cred2", "from-cred2")))
 	}))
@@ -239,13 +239,13 @@ func TestProxyRequest_StickyCredentialUnavailable_FallsBackToNormalSelection(t *
 // a session has no pre-existing binding, round-robin selects a credential and the
 // proxy then writes a binding for future requests.
 func TestProxyRequest_StickyEnabled_BindingUpdatedAfterRoundRobin(t *testing.T) {
-	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-rr-1", "rr-response")))
 	}))
 	defer server1.Close()
 
-	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(chatCompletionOKBody("id-rr-2", "rr-response")))
 	}))

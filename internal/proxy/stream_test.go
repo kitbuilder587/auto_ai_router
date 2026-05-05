@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,7 +25,7 @@ import (
 // 4. GetCurrentTPM() и GetCurrentModelTPM() отражают добавленные токены
 func TestHandleStreamingWithTokens(t *testing.T) {
 	// Создаем upstream SSE сервер, который симулирует streaming ответ с tokens
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
@@ -116,7 +119,7 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 // TestHandleStreamingWithTokens_NoTokens проверяет что handleStreamingWithTokens работает
 // с потоком без usage информации (не падает, просто не конумирует токены)
 func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
@@ -180,7 +183,7 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 // из нескольких чанков. Каждый SSE чанк может содержать только одно usage значение,
 // которое будет извлечено и добавлено к total.
 func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
@@ -244,7 +247,7 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 // TestHandleStreamingWithTokens_WithoutModelID проверяет что функция работает
 // даже без modelID (не должна падать)
 func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
@@ -301,7 +304,7 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 // TestHandleStreamingWithTokens_LoggingToLiteLLMDB проверяет что OpenAI streaming
 // responses логируются в LiteLLM DB когда предоставлен logCtx
 func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
@@ -551,7 +554,7 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 }
 
 func TestHandleResponsesAPIStreaming_Passthrough(t *testing.T) {
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
@@ -758,7 +761,7 @@ func TestOpenAIStreamUsageExtractor_MultiPayloadNoStaleData(t *testing.T) {
 // TestHandleStreamingWithTokens_HybridApproach verifies the hybrid approach implementation
 // Tests that usage info is extracted from the last chunk with cached/audio token details
 func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
@@ -886,4 +889,87 @@ func TestTokenCapturingWriter_CumulativeTokens(t *testing.T) {
 		assert.Equal(t, 1000, total,
 			"must keep the last (largest) cumulative total, not the sum of all values")
 	})
+}
+
+// buildBedrockEventFrame creates an AWS EventStream binary frame for testing.
+// Payload is base64-encoded Anthropic SSE JSON wrapped in {"bytes":"<base64>"}.
+// CRC fields are zeroed — DecodeEventStreamToSSE does not validate them.
+func buildBedrockEventFrame(anthropicEvent string) []byte {
+	encoded := base64.StdEncoding.EncodeToString([]byte(anthropicEvent))
+	payload, _ := json.Marshal(map[string]string{"bytes": encoded})
+
+	payloadLength := len(payload)
+	totalLength := 12 + payloadLength + 4 // prelude(12) + payload + msgCRC(4)
+
+	buf := make([]byte, totalLength)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(totalLength))
+	binary.BigEndian.PutUint32(buf[4:8], 0)  // headers length = 0
+	binary.BigEndian.PutUint32(buf[8:12], 0) // prelude CRC (not validated)
+	copy(buf[12:12+payloadLength], payload)
+	binary.BigEndian.PutUint32(buf[12+payloadLength:], 0) // message CRC (not validated)
+	return buf
+}
+
+// TestHandleResponsesAPIStreaming_BedrockAnthropic verifies that Bedrock Anthropic
+// streaming works when modelID is an alias ("anthropic/claude-sonnet-4.5") and
+// logCtx.RealModelID holds the real Bedrock model ID. The bug was that
+// isAnthropicBedrockModel("anthropic/claude-sonnet-4.5") returned false, causing
+// the Anthropic SSE events to be piped through without transformation, resulting
+// in an empty Responses API response with zero tokens.
+func TestHandleResponsesAPIStreaming_BedrockAnthropic(t *testing.T) {
+	anthropicEvents := []string{
+		`{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":16,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"stored"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":4}}`,
+		`{"type":"message_stop"}`,
+	}
+
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+		for _, event := range anthropicEvents {
+			_, _ = w.Write(buildBedrockEventFrame(event))
+			flusher.Flush()
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeBedrock, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+	cred := &config.CredentialConfig{
+		Name: "test",
+		Type: config.ProviderTypeBedrock,
+	}
+
+	// Alias as modelID, real Bedrock model name in logCtx — this is the production scenario
+	// that was broken (isAnthropicBedrockModel failed on the alias).
+	logCtx := &RequestLogContext{
+		ModelID:     "anthropic/claude-sonnet-4.5",
+		RealModelID: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+	}
+
+	err = prx.handleResponsesAPIStreaming(w, resp, cred, "anthropic/claude-sonnet-4.5", logCtx, nil)
+	require.NoError(t, err)
+
+	body := w.Body.String()
+	assert.Contains(t, body, "event: response.created", "should emit response.created event")
+	assert.Contains(t, body, "response.output_text.delta", "should emit text delta event")
+	assert.Contains(t, body, "stored", "should include actual response text")
+	assert.Contains(t, body, "event: response.completed", "should emit response.completed event")
+	assert.NotContains(t, body, `"output_tokens":0`, "should have non-zero token counts")
 }

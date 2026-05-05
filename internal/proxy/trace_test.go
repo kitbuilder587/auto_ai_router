@@ -61,7 +61,7 @@ func openaiCredential(name string) config.CredentialConfig {
 func TestTraceCheck_Depth0_LocalOnly(t *testing.T) {
 	var fetchCalled bool
 	// upstream server must NOT be called when depth=0
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(httputil.ProxyTraceResponse{RouterID: "upstream"})
@@ -110,7 +110,7 @@ func TestTraceCheck_Depth1_UpstreamPopulated(t *testing.T) {
 		},
 	}
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(upstreamTrace)
@@ -137,7 +137,7 @@ func TestTraceCheck_Depth1_UpstreamPopulated(t *testing.T) {
 // FetchError is set on the upstream entry and no panic occurs.
 func TestTraceCheck_Depth1_FetchError(t *testing.T) {
 	// Server that always returns a non-JSON body to force a parse error
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal error"))
 	}))
@@ -161,7 +161,7 @@ func TestTraceCheck_Depth1_FetchError(t *testing.T) {
 // upstream server is unreachable (connection refused / closed server).
 func TestTraceCheck_Depth1_UnreachableUpstream(t *testing.T) {
 	// Start and immediately close the server to get a "connection refused" address.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	closedURL := srv.URL
 	srv.Close()
 
@@ -180,7 +180,7 @@ func TestTraceCheck_Depth1_UnreachableUpstream(t *testing.T) {
 // appear in Upstreams (only proxy-type credentials are fetched).
 func TestTraceCheck_NonProxyCredentials(t *testing.T) {
 	var fetchCalled bool
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		_ = json.NewEncoder(w).Encode(httputil.ProxyTraceResponse{RouterID: "should-not-appear"})
 	}))
@@ -203,7 +203,7 @@ func TestTraceCheck_NonProxyCredentials(t *testing.T) {
 // and appear individually in the Upstreams map.
 func TestTraceCheck_MultipleUpstreams(t *testing.T) {
 	makeUpstream := func(routerID string) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(httputil.ProxyTraceResponse{RouterID: routerID, Status: "healthy"})
 		}))
@@ -268,7 +268,7 @@ func TestHandleTrace_JSON(t *testing.T) {
 // TestHandleTrace_DepthParam_Zero verifies depth=0 causes no upstream fetches.
 func TestHandleTrace_DepthParam_Zero(t *testing.T) {
 	var fetchCalled bool
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchCalled = true
 		_ = json.NewEncoder(w).Encode(httputil.ProxyTraceResponse{RouterID: "up"})
 	}))
