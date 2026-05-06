@@ -45,7 +45,11 @@ type anthropicStreamAccumulator struct {
 	messageStarted     bool
 	messageItemID      string
 	messageOutputIndex int // output_index where the message item was placed
-	sequenceNumber     int
+
+	// Current tool_use block state (set at content_block_start, used through block stop)
+	currentToolItemID      string // pre-generated fc_ ID for output_item.added / done consistency
+	currentToolOutputIndex int    // output_index at which the tool item was announced
+	sequenceNumber         int
 }
 
 // TransformAnthropicStreamToResponses reads Anthropic SSE and writes Responses API SSE events.
@@ -148,11 +152,31 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 
 		case "tool_use":
-			// function_call item will be emitted on block stop
 			if !acc.headerEmitted {
 				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
 					return err
 				}
+			}
+			// Calculate output_index: finalized outputItems + 1 for message (not in slice).
+			outputIdx := len(acc.outputItems)
+			if acc.messageStarted {
+				outputIdx++
+			}
+			acc.currentToolItemID = generateItemID("fc_")
+			acc.currentToolOutputIndex = outputIdx
+			if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
+				"type":         "response.output_item.added",
+				"output_index": outputIdx,
+				"item": map[string]interface{}{
+					"type":      "function_call",
+					"id":        acc.currentToolItemID,
+					"status":    "in_progress",
+					"call_id":   event.ContentBlock.ID,
+					"name":      event.ContentBlock.Name,
+					"arguments": "",
+				},
+			}, acc); err != nil {
+				return err
 			}
 		}
 
@@ -171,6 +195,16 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			acc.currentThinking += event.Delta.Thinking
 		case "input_json_delta":
 			acc.currentToolArgs += event.Delta.PartialJSON
+			if event.Delta.PartialJSON != "" && acc.currentToolItemID != "" {
+				if err := writeAnthropicSSE(w, "response.function_call_arguments.delta", map[string]interface{}{
+					"type":         "response.function_call_arguments.delta",
+					"item_id":      acc.currentToolItemID,
+					"output_index": acc.currentToolOutputIndex,
+					"delta":        event.Delta.PartialJSON,
+				}, acc); err != nil {
+					return err
+				}
+			}
 		}
 
 	case "content_block_stop":
@@ -227,11 +261,12 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		acc.currentText = ""
 
 	case "thinking":
+		itemID := acc.currentReasoningID
+		if itemID == "" {
+			itemID = generateItemID("rs_")
+		}
+		outputIdx := len(acc.outputItems)
 		if acc.currentThinking != "" {
-			itemID := acc.currentReasoningID
-			if itemID == "" {
-				itemID = generateItemID("rs_")
-			}
 			item := responses.OutputItem{
 				Type:   "reasoning",
 				ID:     itemID,
@@ -242,6 +277,20 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			}
 			acc.outputItems = append(acc.outputItems, item)
 		}
+		// Always emit output_item.done to close the added event emitted at block_start,
+		// even when the thinking block was empty (avoids a dangling added with no done).
+		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
+			"type":         "response.output_item.done",
+			"output_index": outputIdx,
+			"item": map[string]interface{}{
+				"type":    "reasoning",
+				"id":      itemID,
+				"status":  "completed",
+				"summary": []interface{}{},
+			},
+		}, acc); err != nil {
+			return err
+		}
 		acc.currentReasoningID = ""
 
 	case "tool_use":
@@ -249,15 +298,29 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		if argsJSON == "" {
 			argsJSON = "{}"
 		}
+		itemID := acc.currentToolItemID
+		if itemID == "" {
+			itemID = generateItemID("fc_")
+		}
+		if err := writeAnthropicSSE(w, "response.function_call_arguments.done", map[string]interface{}{
+			"type":         "response.function_call_arguments.done",
+			"item_id":      itemID,
+			"output_index": acc.currentToolOutputIndex,
+			"arguments":    argsJSON,
+		}, acc); err != nil {
+			return err
+		}
 		item := responses.OutputItem{
 			Type:      "function_call",
-			ID:        generateItemID("fc_"),
+			ID:        itemID,
 			Status:    "completed",
 			CallID:    acc.currentBlockID,
 			Name:      acc.currentBlockName,
 			Arguments: argsJSON,
 		}
 		acc.outputItems = append(acc.outputItems, item)
+		acc.currentToolItemID = ""
+		acc.currentToolOutputIndex = 0
 	}
 
 	acc.currentBlockType = ""
@@ -317,59 +380,81 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 		}
 	}
 
+	// Split point: outputItems[0..msgIdx-1] were announced before the message;
+	// outputItems[msgIdx..] were announced after. When no message, close all items.
+	msgIdx := acc.messageOutputIndex
+	if !acc.messageStarted {
+		msgIdx = len(acc.outputItems)
+	}
+
 	outputIdx := 0
 
-	// Close previously completed non-message items (reasoning, tool calls from streaming).
-	for _, item := range acc.outputItems {
+	// Close items announced before the message (e.g. reasoning blocks).
+	for i := 0; i < msgIdx && i < len(acc.outputItems); i++ {
 		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
 			"type":         "response.output_item.done",
 			"output_index": outputIdx,
-			"item":         item,
+			"item":         acc.outputItems[i],
 		}, acc); err != nil {
 			return err
 		}
 		outputIdx++
 	}
 
-	// Close message item if started.
-	fullText := ""
-	for _, c := range acc.msgContent {
-		fullText += c.Text
+	// Close the message item at its announced output_index.
+	if acc.messageStarted {
+		fullText := ""
+		for _, c := range acc.msgContent {
+			fullText += c.Text
+		}
+		if fullText != "" {
+			if err := writeAnthropicSSE(w, "response.output_text.done", map[string]interface{}{
+				"type":          "response.output_text.done",
+				"output_index":  outputIdx,
+				"content_index": 0,
+				"text":          fullText,
+			}, acc); err != nil {
+				return err
+			}
+			if err := writeAnthropicSSE(w, "response.content_part.done", map[string]interface{}{
+				"type":          "response.content_part.done",
+				"output_index":  outputIdx,
+				"content_index": 0,
+				"part": map[string]interface{}{
+					"type":        "output_text",
+					"text":        fullText,
+					"annotations": []interface{}{},
+				},
+			}, acc); err != nil {
+				return err
+			}
+			if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
+				"type":         "response.output_item.done",
+				"output_index": outputIdx,
+				"item": map[string]interface{}{
+					"type":    "message",
+					"id":      acc.messageItemID,
+					"status":  "completed",
+					"role":    "assistant",
+					"content": acc.msgContent,
+				},
+			}, acc); err != nil {
+				return err
+			}
+		}
+		outputIdx++ // advance past the message slot regardless of content
 	}
-	if acc.messageStarted && fullText != "" {
-		if err := writeAnthropicSSE(w, "response.output_text.done", map[string]interface{}{
-			"type":          "response.output_text.done",
-			"output_index":  outputIdx,
-			"content_index": 0,
-			"text":          fullText,
-		}, acc); err != nil {
-			return err
-		}
-		if err := writeAnthropicSSE(w, "response.content_part.done", map[string]interface{}{
-			"type":          "response.content_part.done",
-			"output_index":  outputIdx,
-			"content_index": 0,
-			"part": map[string]interface{}{
-				"type":        "output_text",
-				"text":        fullText,
-				"annotations": []interface{}{},
-			},
-		}, acc); err != nil {
-			return err
-		}
+
+	// Close items announced after the message (e.g. tool calls).
+	for i := msgIdx; i < len(acc.outputItems); i++ {
 		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
 			"type":         "response.output_item.done",
 			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":    "message",
-				"id":      acc.messageItemID,
-				"status":  "completed",
-				"role":    "assistant",
-				"content": acc.msgContent,
-			},
+			"item":         acc.outputItems[i],
 		}, acc); err != nil {
 			return err
 		}
+		outputIdx++
 	}
 
 	return writeAnthropicSSE(w, "response.completed", map[string]interface{}{
@@ -379,15 +464,7 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 }
 
 func buildAnthropicInProgressResponse(acc *anthropicStreamAccumulator) map[string]interface{} {
-	resp := map[string]interface{}{
-		"id":         acc.responseID,
-		"object":     "response",
-		"created_at": acc.createdAt,
-		"model":      acc.model,
-		"status":     "in_progress",
-		"output":     []interface{}{},
-		"metadata":   map[string]interface{}{},
-	}
+	resp := responses.BuildInProgressResponse(acc.responseID, acc.model, acc.createdAt)
 	if acc.meta != nil && acc.meta.PreviousResponseID != "" {
 		resp["previous_response_id"] = acc.meta.PreviousResponseID
 	}
@@ -399,11 +476,6 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 
 	var output []responses.OutputItem
 	output = append(output, acc.outputItems...)
-
-	fullText := ""
-	for _, c := range acc.msgContent {
-		fullText += c.Text
-	}
 
 	if acc.messageStarted {
 		msgContent := acc.msgContent
@@ -450,31 +522,20 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		}
 	}
 
-	return &responses.Response{
+	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
 		ID:                 acc.responseID,
-		Object:             "response",
+		Model:              acc.model,
 		CreatedAt:          acc.createdAt,
 		CompletedAt:        &completedAt,
-		Model:              acc.model,
 		Status:             status,
 		IncompleteDetails:  incompleteDetails,
 		Output:             output,
 		Usage:              usage,
-		Error:              nil,
 		Metadata:           metadata,
-		Tools:              []responses.Tool{},
-		ParallelToolCalls:  true,
 		PreviousResponseID: prevRespID,
-		Instructions:       nil,
-	}
+	})
 }
 
 func writeAnthropicSSE(w io.Writer, eventType string, data interface{}, acc *anthropicStreamAccumulator) error {
-	b, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("writeAnthropicSSE marshal %s: %w", eventType, err)
-	}
-	acc.sequenceNumber++
-	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, b)
-	return err
+	return responses.WriteSSEEvent(w, eventType, data, &acc.sequenceNumber)
 }

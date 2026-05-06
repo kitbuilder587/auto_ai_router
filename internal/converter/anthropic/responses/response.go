@@ -1,8 +1,6 @@
 package anthropicresponses
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -19,7 +17,7 @@ func AnthropicToResponsesResponse(body []byte, displayModelID, responseID string
 		return nil, fmt.Errorf("AnthropicToResponsesResponse: parse: %w", err)
 	}
 	if responseID == "" {
-		responseID = generateResponseID()
+		responseID = responses.GenerateResponseID()
 	}
 	if createdAt == 0 {
 		createdAt = time.Now().Unix()
@@ -70,7 +68,7 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 		}
 		output = append(output, responses.OutputItem{
 			Type:    "message",
-			ID:      generateItemID("msg_"),
+			ID:      responses.GenerateItemID("msg_"),
 			Status:  "completed",
 			Role:    "assistant",
 			Content: msgContent,
@@ -92,7 +90,7 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 			flushMessage()
 			reasoningItem := responses.OutputItem{
 				Type:   "reasoning",
-				ID:     generateItemID("rs_"),
+				ID:     responses.GenerateItemID("rs_"),
 				Status: "completed",
 			}
 			if block.Thinking != "" {
@@ -108,20 +106,25 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 		case "tool_use":
 			// Flush accumulated text before a tool call.
 			flushMessage()
-			// Detect computer_use tool call: the input always contains an "action" key.
-			// Regular function calls use arbitrary input schemas.
-			if inputMap, ok := block.Input.(map[string]interface{}); ok {
-				if _, hasAction := inputMap["action"]; hasAction {
-					output = append(output, responses.OutputItem{
-						Type:   "computer_call",
-						ID:     generateItemID("cc_"),
-						Status: "completed",
-						CallID: block.ID,
-						Name:   block.Name,
-						Action: block.Input,
-					})
-					continue
+			// Detect computer_use tool call by tool name.
+			// The name "computer" is the canonical discriminator; the action-key
+			// heuristic is kept as a fallback for non-standard names.
+			isComputerCall := block.Name == "computer"
+			if !isComputerCall {
+				if inputMap, ok := block.Input.(map[string]interface{}); ok {
+					_, isComputerCall = inputMap["action"]
 				}
+			}
+			if isComputerCall {
+				output = append(output, responses.OutputItem{
+					Type:   "computer_call",
+					ID:     responses.GenerateItemID("cc_"),
+					Status: "completed",
+					CallID: block.ID,
+					Name:   block.Name,
+					Action: block.Input,
+				})
+				continue
 			}
 			argsJSON := "{}"
 			if block.Input != nil {
@@ -131,7 +134,7 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 			}
 			output = append(output, responses.OutputItem{
 				Type:      "function_call",
-				ID:        generateItemID("fc_"),
+				ID:        responses.GenerateItemID("fc_"),
 				Status:    "completed",
 				CallID:    block.ID,
 				Name:      block.Name,
@@ -145,7 +148,7 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 	if len(output) == 0 {
 		output = []responses.OutputItem{{
 			Type:    "message",
-			ID:      generateItemID("msg_"),
+			ID:      responses.GenerateItemID("msg_"),
 			Status:  "completed",
 			Role:    "assistant",
 			Content: []responses.OutputContent{{Type: "output_text", Text: "", Annotations: []responses.Annotation{}}},
@@ -180,18 +183,4 @@ func anthropicUsageToUsage(au anthropic.AnthropicUsage) *responses.Usage {
 		},
 		OutputTokensDetails: responses.OutputDetails{},
 	}
-}
-
-// generateResponseID generates a "resp_" prefixed unique ID.
-func generateResponseID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "resp_" + hex.EncodeToString(b)
-}
-
-// generateItemID generates a short unique ID with the given prefix.
-func generateItemID(prefix string) string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return prefix + hex.EncodeToString(b)
 }

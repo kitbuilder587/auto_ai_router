@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,20 +40,23 @@ type vertexStreamAccumulator struct {
 	finishReason string
 
 	// SSE state
-	headerEmitted      bool
-	messageStarted     bool
-	messageItemID      string
-	messageOutputIndex int // output_index where the message item was placed
-	reasoningStarted   bool
-	reasoningItemID    string
-	sequenceNumber     int
+	headerEmitted        bool
+	messageStarted       bool
+	messageItemID        string
+	messageOutputIndex   int // output_index where the message item was placed
+	reasoningStarted     bool
+	reasoningItemID      string
+	reasoningOutputIndex int // output_index where the reasoning item was placed
+	codeOutputIndex      int // output_index where the code interpreter item was placed
+	sequenceNumber       int
 }
 
 type accumulatedCall struct {
-	callID    string
-	name      string
-	arguments string
-	itemID    string
+	callID      string
+	name        string
+	arguments   string
+	itemID      string
+	outputIndex int // output_index at which the item was announced
 }
 
 // TransformVertexStreamToResponses reads Vertex AI SSE and writes Responses API SSE events.
@@ -186,16 +190,19 @@ func processThoughtDelta(w io.Writer, acc *vertexStreamAccumulator, delta string
 		}
 	}
 	if !acc.reasoningStarted {
+		// Capture index BEFORE setting reasoningStarted — currentOutputIndex counts it.
+		outputIdx := currentOutputIndex(acc)
 		acc.reasoningStarted = true
 		acc.reasoningItemID = generateItemID("rs_")
-		outputIdx := currentOutputIndex(acc)
+		acc.reasoningOutputIndex = outputIdx
 		if err := writeVertexSSE(w, "response.output_item.added", map[string]interface{}{
 			"type":         "response.output_item.added",
 			"output_index": outputIdx,
 			"item": map[string]interface{}{
-				"type":   "reasoning",
-				"id":     acc.reasoningItemID,
-				"status": "in_progress",
+				"type":    "reasoning",
+				"id":      acc.reasoningItemID,
+				"status":  "in_progress",
+				"summary": []interface{}{},
 			},
 		}, acc); err != nil {
 			return err
@@ -241,20 +248,30 @@ func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *gena
 		return err
 	}
 
-	// Emit full arguments as a single delta
+	// Emit full arguments as a single delta, then immediately close.
 	if err := writeVertexSSE(w, "response.function_call_arguments.delta", map[string]interface{}{
 		"type":         "response.function_call_arguments.delta",
+		"item_id":      itemID,
 		"output_index": outputIdx,
 		"delta":        argsJSON,
 	}, acc); err != nil {
 		return err
 	}
+	if err := writeVertexSSE(w, "response.function_call_arguments.done", map[string]interface{}{
+		"type":         "response.function_call_arguments.done",
+		"item_id":      itemID,
+		"output_index": outputIdx,
+		"arguments":    argsJSON,
+	}, acc); err != nil {
+		return err
+	}
 
 	acc.toolCalls = append(acc.toolCalls, accumulatedCall{
-		callID:    callID,
-		name:      fc.Name,
-		arguments: argsJSON,
-		itemID:    itemID,
+		callID:      callID,
+		name:        fc.Name,
+		arguments:   argsJSON,
+		itemID:      itemID,
+		outputIndex: outputIdx,
 	})
 	return nil
 }
@@ -265,9 +282,11 @@ func processCodePart(w io.Writer, acc *vertexStreamAccumulator, ec *genai.Execut
 			return err
 		}
 	}
+	// Capture index BEFORE setting codeCallID — currentOutputIndex counts it.
+	outputIdx := currentOutputIndex(acc)
 	acc.codeCallID = generateItemID("ci_")
 	acc.codeCallCode = ec.Code
-	outputIdx := currentOutputIndex(acc)
+	acc.codeOutputIndex = outputIdx
 	return writeVertexSSE(w, "response.output_item.added", map[string]interface{}{
 		"type":         "response.output_item.added",
 		"output_index": outputIdx,
@@ -350,104 +369,126 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 		}
 	}
 
-	outputIdx := 0
+	// Build close operations keyed by the output_index at which each item was
+	// announced during streaming, then sort so done-events mirror added-events.
+	type closureItem struct {
+		outputIndex int
+		fn          func() error
+	}
+	var closures []closureItem
 
-	// Close reasoning item if started.
 	if acc.reasoningStarted && acc.fullReasoning != "" {
-		if err := writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":   "reasoning",
-				"id":     acc.reasoningItemID,
-				"status": "completed",
-				"summary": []interface{}{
-					map[string]interface{}{"type": "summary_text", "text": acc.fullReasoning},
-				},
+		idx := acc.reasoningOutputIndex
+		closures = append(closures, closureItem{
+			outputIndex: idx,
+			fn: func() error {
+				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
+					"type":         "response.output_item.done",
+					"output_index": idx,
+					"item": map[string]interface{}{
+						"type":   "reasoning",
+						"id":     acc.reasoningItemID,
+						"status": "completed",
+						"summary": []interface{}{
+							map[string]interface{}{"type": "summary_text", "text": acc.fullReasoning},
+						},
+					},
+				}, acc)
 			},
-		}, acc); err != nil {
-			return err
-		}
-		outputIdx++
+		})
 	}
 
-	// Close message item if started.
 	if acc.messageStarted && acc.fullText != "" {
-		if err := writeVertexSSE(w, "response.output_text.done", map[string]interface{}{
-			"type":          "response.output_text.done",
-			"output_index":  outputIdx,
-			"content_index": 0,
-			"text":          acc.fullText,
-		}, acc); err != nil {
-			return err
-		}
-		if err := writeVertexSSE(w, "response.content_part.done", map[string]interface{}{
-			"type":          "response.content_part.done",
-			"output_index":  outputIdx,
-			"content_index": 0,
-			"part": map[string]interface{}{
-				"type":        "output_text",
-				"text":        acc.fullText,
-				"annotations": []interface{}{},
+		idx := acc.messageOutputIndex
+		closures = append(closures, closureItem{
+			outputIndex: idx,
+			fn: func() error {
+				if err := writeVertexSSE(w, "response.output_text.done", map[string]interface{}{
+					"type":          "response.output_text.done",
+					"output_index":  idx,
+					"content_index": 0,
+					"text":          acc.fullText,
+				}, acc); err != nil {
+					return err
+				}
+				if err := writeVertexSSE(w, "response.content_part.done", map[string]interface{}{
+					"type":          "response.content_part.done",
+					"output_index":  idx,
+					"content_index": 0,
+					"part": map[string]interface{}{
+						"type":        "output_text",
+						"text":        acc.fullText,
+						"annotations": []interface{}{},
+					},
+				}, acc); err != nil {
+					return err
+				}
+				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
+					"type":         "response.output_item.done",
+					"output_index": idx,
+					"item": map[string]interface{}{
+						"type":    "message",
+						"id":      acc.messageItemID,
+						"status":  "completed",
+						"role":    "assistant",
+						"content": []interface{}{map[string]interface{}{"type": "output_text", "text": acc.fullText, "annotations": []interface{}{}}},
+					},
+				}, acc)
 			},
-		}, acc); err != nil {
-			return err
-		}
-		if err := writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":    "message",
-				"id":      acc.messageItemID,
-				"status":  "completed",
-				"role":    "assistant",
-				"content": []interface{}{map[string]interface{}{"type": "output_text", "text": acc.fullText, "annotations": []interface{}{}}},
-			},
-		}, acc); err != nil {
-			return err
-		}
-		outputIdx++
+		})
 	}
 
-	// Close tool call items.
-	for i, tc := range acc.toolCalls {
-		if err := writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": outputIdx + i,
-			"item": map[string]interface{}{
-				"type":      "function_call",
-				"id":        tc.itemID,
-				"status":    "completed",
-				"call_id":   tc.callID,
-				"name":      tc.name,
-				"arguments": tc.arguments,
+	for _, tc := range acc.toolCalls {
+		tc := tc // capture for closure
+		closures = append(closures, closureItem{
+			outputIndex: tc.outputIndex,
+			fn: func() error {
+				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
+					"type":         "response.output_item.done",
+					"output_index": tc.outputIndex,
+					"item": map[string]interface{}{
+						"type":      "function_call",
+						"id":        tc.itemID,
+						"status":    "completed",
+						"call_id":   tc.callID,
+						"name":      tc.name,
+						"arguments": tc.arguments,
+					},
+				}, acc)
 			},
-		}, acc); err != nil {
-			return err
-		}
-	}
-	if len(acc.toolCalls) > 0 {
-		outputIdx += len(acc.toolCalls)
+		})
 	}
 
-	// Close code interpreter item.
 	if acc.codeCallID != "" {
-		if err := writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":    "code_interpreter_call",
-				"id":      acc.codeCallID,
-				"status":  "completed",
-				"code":    acc.codeCallCode,
-				"outputs": []interface{}{map[string]interface{}{"type": "text", "text": acc.codeCallOutput}},
+		idx := acc.codeOutputIndex
+		closures = append(closures, closureItem{
+			outputIndex: idx,
+			fn: func() error {
+				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
+					"type":         "response.output_item.done",
+					"output_index": idx,
+					"item": map[string]interface{}{
+						"type":    "code_interpreter_call",
+						"id":      acc.codeCallID,
+						"status":  "completed",
+						"code":    acc.codeCallCode,
+						"outputs": []interface{}{map[string]interface{}{"type": "text", "text": acc.codeCallOutput}},
+					},
+				}, acc)
 			},
-		}, acc); err != nil {
+		})
+	}
+
+	sort.Slice(closures, func(i, j int) bool {
+		return closures[i].outputIndex < closures[j].outputIndex
+	})
+
+	for _, c := range closures {
+		if err := c.fn(); err != nil {
 			return err
 		}
 	}
 
-	// response.completed
 	return writeVertexSSE(w, "response.completed", map[string]interface{}{
 		"type":     "response.completed",
 		"response": buildVertexCompletedResponse(acc),
@@ -455,15 +496,7 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 }
 
 func buildVertexInProgressResponse(acc *vertexStreamAccumulator) map[string]interface{} {
-	resp := map[string]interface{}{
-		"id":         acc.responseID,
-		"object":     "response",
-		"created_at": acc.createdAt,
-		"model":      acc.model,
-		"status":     "in_progress",
-		"output":     []interface{}{},
-		"metadata":   map[string]interface{}{},
-	}
+	resp := responses.BuildInProgressResponse(acc.responseID, acc.model, acc.createdAt)
 	if acc.meta != nil {
 		resp["store"] = acc.meta.Store
 		if acc.meta.PreviousResponseID != "" {
@@ -542,23 +575,18 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 		}
 	}
 
-	return &responses.Response{
+	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
 		ID:                 acc.responseID,
-		Object:             "response",
+		Model:              acc.model,
 		CreatedAt:          acc.createdAt,
 		CompletedAt:        &completedAt,
-		Model:              acc.model,
 		Status:             status,
 		IncompleteDetails:  incompleteDetails,
 		Output:             output,
 		Usage:              usage,
-		Error:              nil,
 		Metadata:           metadata,
-		Tools:              []responses.Tool{},
-		ParallelToolCalls:  true,
 		PreviousResponseID: prevRespID,
-		Instructions:       nil,
-	}
+	})
 }
 
 func vertexFinishReasonToStatus(reason string) (string, *responses.IncompleteDetails) {
@@ -573,11 +601,5 @@ func vertexFinishReasonToStatus(reason string) (string, *responses.IncompleteDet
 }
 
 func writeVertexSSE(w io.Writer, eventType string, data interface{}, acc *vertexStreamAccumulator) error {
-	b, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("writeVertexSSE marshal %s: %w", eventType, err)
-	}
-	acc.sequenceNumber++
-	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, b)
-	return err
+	return responses.WriteSSEEvent(w, eventType, data, &acc.sequenceNumber)
 }

@@ -1,25 +1,9 @@
 package responses
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 )
-
-// generateResponseID generates a "resp_" prefixed unique ID.
-func generateResponseID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "resp_" + hex.EncodeToString(b)
-}
-
-// generateItemID generates a short unique ID with the given prefix (e.g. "msg_", "fc_").
-func generateItemID(prefix string) string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return prefix + hex.EncodeToString(b)
-}
 
 // chatToResponseConfig holds optional parameters for ChatToResponse.
 type chatToResponseConfig struct {
@@ -110,7 +94,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			if len(msgContent) > 0 {
 				msgItem := OutputItem{
 					Type:    "message",
-					ID:      generateItemID("msg_"),
+					ID:      GenerateItemID("msg_"),
 					Status:  "completed",
 					Role:    "assistant",
 					Content: msgContent,
@@ -122,7 +106,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			for _, tc := range choice.Message.ToolCalls {
 				fcItem := OutputItem{
 					Type:      "function_call",
-					ID:        generateItemID("fc_"),
+					ID:        GenerateItemID("fc_"),
 					Status:    "completed",
 					CallID:    tc.ID,
 					Name:      tc.Function.Name,
@@ -138,7 +122,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 		output = []OutputItem{
 			{
 				Type:   "message",
-				ID:     generateItemID("msg_"),
+				ID:     GenerateItemID("msg_"),
 				Status: "completed",
 				Role:   "assistant",
 				Content: []OutputContent{
@@ -173,7 +157,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 	output = append(output, cfg.extraOutputItems...)
 
 	resp := Response{
-		ID:                 generateResponseID(),
+		ID:                 GenerateResponseID(),
 		Object:             "response",
 		CreatedAt:          ccResp.Created,
 		Model:              ccResp.Model,

@@ -54,8 +54,22 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 		ar.TopP = req.TopP
 	}
 
+	// Stop sequences
+	if req.Stop != nil {
+		switch s := req.Stop.(type) {
+		case string:
+			ar.StopSequences = []string{s}
+		case []interface{}:
+			for _, sv := range s {
+				if str, ok := sv.(string); ok {
+					ar.StopSequences = append(ar.StopSequences, str)
+				}
+			}
+		}
+	}
+
 	// System instruction
-	if inst := extractInstructionsText(req.Instructions); inst != "" {
+	if inst := responses.ExtractInstructionsText(req.Instructions); inst != "" {
 		ar.System = inst
 	}
 
@@ -324,28 +338,4 @@ func messageItemToAnthropic(itemMap map[string]interface{}, role string) (*anthr
 		Role:    anthropicRole,
 		Content: content,
 	}, nil
-}
-
-// extractInstructionsText extracts plain text from the instructions field.
-func extractInstructionsText(instructions interface{}) string {
-	if instructions == nil {
-		return ""
-	}
-	if s, ok := instructions.(string); ok {
-		return s
-	}
-	var sb strings.Builder
-	if arr, ok := instructions.([]interface{}); ok {
-		for _, item := range arr {
-			if m, ok := item.(map[string]interface{}); ok {
-				if content, ok := m["content"].(string); ok && content != "" {
-					if sb.Len() > 0 {
-						sb.WriteString("\n")
-					}
-					sb.WriteString(content)
-				}
-			}
-		}
-	}
-	return sb.String()
 }

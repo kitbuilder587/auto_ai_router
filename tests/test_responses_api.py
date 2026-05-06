@@ -20,8 +20,8 @@ from test_helpers import TestModels, ContentValidator, ToolDefinitions, ImageTes
 
 # Responses API now works with all providers via internal conversion
 RESPONSES_MODELS = (
-    # TestModels.OPENAI_MODELS
-    # TestModels.VERTEX_MODELS
+    TestModels.OPENAI_MODELS +
+    TestModels.VERTEX_MODELS +
     TestModels.ANTHROPIC_MODELS
 )
 
@@ -138,7 +138,7 @@ class TestResponsesAPIBasic:
             model=model,
             instructions="You are a pirate. Always respond in pirate language.",
             input="How are you?",
-            max_output_tokens=150,
+            max_output_tokens=550,
         )
 
         validate_responses_api_response(response)
@@ -268,7 +268,7 @@ class TestResponsesAPIStreaming:
         with openai_client.responses.stream(
             model=model,
             input="Reply with exactly one word: pong",
-            max_output_tokens=40,
+            max_output_tokens=350,
             temperature=0,
         ) as stream:
             for event in stream:
@@ -291,7 +291,7 @@ class TestResponsesAPIStreaming:
             model=model,
             input="What is the speed of light?",
             max_output_tokens=500,
-            reasoning={"effort": "low"},
+            reasoning=None if "gpt-4o-mini" in model else {"effort": "low"},
             temperature=1 if "claude" in model else 0,
         ) as stream:
             for event in stream:
@@ -307,7 +307,7 @@ class TestResponsesAPIStreaming:
             input="What is the speed of light?",
             max_output_tokens=500,
             temperature=1 if "claude" in model else 0,
-            reasoning={"effort": "low"},
+            reasoning=None if "gpt-4o-mini" in model else {"effort": "low"},
         )
 
         assert response.usage is not None
@@ -409,7 +409,7 @@ class TestResponsesAPIStore:
         first = openai_client.responses.create(
             model=model,
             input="My favorite number is 83471. Reply only 'ok'.",
-            max_output_tokens=150,
+            max_output_tokens=450,
             store=True,
             reasoning={"effort": None},
         )
@@ -417,7 +417,7 @@ class TestResponsesAPIStore:
         second = openai_client.responses.create(
             model=model,
             input="What is my favorite number? Reply with the number only.",
-            max_output_tokens=150,
+            max_output_tokens=450,
             previous_response_id=first.id,
             reasoning={"effort": None},
         )
@@ -527,13 +527,13 @@ class TestResponsesAPIEdgeCases:
         response = openai_client.responses.create(
             model=model,
             input="Write a Python function that adds two numbers. Only output the code.",
-            max_output_tokens=200,
+            max_output_tokens=550,
         )
 
         validate_responses_api_response(response)
         text = extract_response_text(response).lower()
         assert any(kw in text for kw in ["def", "return", "function", "+"]), (
-            f"Expected code-related keywords in response: {text[:200]}"
+            f"Expected code-related keywords in response: {text[:500]}"
         )
 
     @pytest.mark.parametrize("model", RESPONSES_MODELS)

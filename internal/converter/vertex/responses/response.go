@@ -1,8 +1,6 @@
 package vertexresponses
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -19,7 +17,7 @@ func VertexToResponsesResponse(body []byte, displayModelID, responseID string, c
 		return nil, fmt.Errorf("VertexToResponsesResponse: parse: %w", err)
 	}
 	if responseID == "" {
-		responseID = generateResponseID()
+		responseID = responses.GenerateResponseID()
 	}
 	if createdAt == 0 {
 		createdAt = time.Now().Unix()
@@ -93,7 +91,7 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 				if part.Text != "" {
 					output = append(output, responses.OutputItem{
 						Type:   "reasoning",
-						ID:     generateItemID("rs_"),
+						ID:     responses.GenerateItemID("rs_"),
 						Status: "completed",
 						Summary: []responses.OutputContent{
 							{Type: "summary_text", Text: part.Text},
@@ -113,11 +111,11 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 				}
 				callID := part.FunctionCall.ID
 				if callID == "" {
-					callID = generateItemID("call_")
+					callID = responses.GenerateItemID("call_")
 				}
 				output = append(output, responses.OutputItem{
 					Type:      "function_call",
-					ID:        generateItemID("fc_"),
+					ID:        responses.GenerateItemID("fc_"),
 					Status:    "completed",
 					CallID:    callID,
 					Name:      part.FunctionCall.Name,
@@ -127,7 +125,7 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 			case part.ExecutableCode != nil:
 				// Code to be executed → start or continue code_interpreter_call item.
 				flushMessage()
-				codeCallID = generateItemID("ci_")
+				codeCallID = responses.GenerateItemID("ci_")
 				output = append(output, responses.OutputItem{
 					Type:   "code_interpreter_call",
 					ID:     codeCallID,
@@ -180,7 +178,7 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 		output = []responses.OutputItem{
 			{
 				Type:   "message",
-				ID:     generateItemID("msg_"),
+				ID:     responses.GenerateItemID("msg_"),
 				Status: "completed",
 				Role:   "assistant",
 				Content: []responses.OutputContent{
@@ -201,7 +199,7 @@ type textPartRef struct {
 func buildMessageItem(content []responses.OutputContent) responses.OutputItem {
 	return responses.OutputItem{
 		Type:    "message",
-		ID:      generateItemID("msg_"),
+		ID:      responses.GenerateItemID("msg_"),
 		Status:  "completed",
 		Role:    "assistant",
 		Content: content,
@@ -276,7 +274,7 @@ func groundingMetadataToWebSearchCall(gm *genai.GroundingMetadata) *responses.Ou
 
 	item := &responses.OutputItem{
 		Type:    "web_search_call",
-		ID:      generateItemID("ws_"),
+		ID:      responses.GenerateItemID("ws_"),
 		Status:  "completed",
 		Queries: queries,
 	}
@@ -321,18 +319,4 @@ func usageMetadataToUsage(meta *genai.GenerateContentResponseUsageMetadata) *res
 			ReasoningTokens: thoughtTokens,
 		},
 	}
-}
-
-// generateResponseID generates a "resp_" prefixed unique ID.
-func generateResponseID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "resp_" + hex.EncodeToString(b)
-}
-
-// generateItemID generates a short unique ID with the given prefix.
-func generateItemID(prefix string) string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return prefix + hex.EncodeToString(b)
 }

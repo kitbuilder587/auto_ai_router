@@ -281,6 +281,81 @@ func outputToInputItems(output []OutputItem) []interface{} {
 				ciItem["outputs"] = item.Outputs
 			}
 			items = append(items, ciItem)
+
+		case "file_search_call":
+			fsItem := map[string]interface{}{
+				"type": "file_search_call",
+			}
+			if item.ID != "" {
+				fsItem["id"] = item.ID
+			}
+			if item.Status != "" {
+				fsItem["status"] = item.Status
+			}
+			if len(item.Queries) > 0 {
+				fsItem["queries"] = item.Queries
+			}
+			if item.Results != nil {
+				fsItem["results"] = item.Results
+			}
+			items = append(items, fsItem)
+
+		case "image_generation_call":
+			igItem := map[string]interface{}{
+				"type": "image_generation_call",
+			}
+			if item.ID != "" {
+				igItem["id"] = item.ID
+			}
+			if item.Status != "" {
+				igItem["status"] = item.Status
+			}
+			if item.Result != "" {
+				igItem["result"] = item.Result
+			}
+			if item.RevisedPrompt != "" {
+				igItem["revised_prompt"] = item.RevisedPrompt
+			}
+			items = append(items, igItem)
+
+		case "mcp_tool_call":
+			mcpItem := map[string]interface{}{
+				"type":         "mcp_tool_call",
+				"call_id":      item.CallID,
+				"name":         item.Name,
+				"arguments":    item.Arguments,
+				"server_label": item.ServerLabel,
+			}
+			if item.ID != "" {
+				mcpItem["id"] = item.ID
+			}
+			if item.Error != nil {
+				mcpItem["error"] = item.Error
+			}
+			items = append(items, mcpItem)
+
+		case "local_shell_call":
+			lsItem := map[string]interface{}{
+				"type":    "local_shell_call",
+				"call_id": item.CallID,
+				"action":  item.Action,
+			}
+			if item.ID != "" {
+				lsItem["id"] = item.ID
+			}
+			if item.Status != "" {
+				lsItem["status"] = item.Status
+			}
+			items = append(items, lsItem)
+
+		case "compaction":
+			compItem := map[string]interface{}{
+				"type": "compaction",
+			}
+			if item.ID != "" {
+				compItem["id"] = item.ID
+			}
+			items = append(items, compItem)
 		}
 	}
 	return items
@@ -596,13 +671,30 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			flushToolCalls()
 			var content []interface{}
 			if output, ok := itemMap["output"].(map[string]interface{}); ok {
-				if imgURL, ok := output["image_url"].(string); ok && imgURL != "" {
-					content = append(content, map[string]interface{}{
-						"type": "image_url",
-						"image_url": map[string]interface{}{
-							"url": imgURL,
-						},
-					})
+				outputType, _ := output["type"].(string)
+				switch outputType {
+				case "computer_screenshot":
+					// Schema format: image_url is a nested {url: "...", detail: "..."} object.
+					if imgURLMap, ok := output["image_url"].(map[string]interface{}); ok {
+						if imgURL, ok := imgURLMap["url"].(string); ok && imgURL != "" {
+							content = append(content, map[string]interface{}{
+								"type": "image_url",
+								"image_url": map[string]interface{}{
+									"url": imgURL,
+								},
+							})
+						}
+					}
+				default:
+					// Legacy/proxy format: image_url is a plain string.
+					if imgURL, ok := output["image_url"].(string); ok && imgURL != "" {
+						content = append(content, map[string]interface{}{
+							"type": "image_url",
+							"image_url": map[string]interface{}{
+								"url": imgURL,
+							},
+						})
+					}
 				}
 			}
 			if len(content) == 0 {
@@ -1087,4 +1179,6 @@ func deleteResponsesFields(raw map[string]interface{}) {
 	delete(raw, "service_tier")
 	delete(raw, "background")
 	delete(raw, "prompt")
+	delete(raw, "prompt_cache_key")
+	delete(raw, "prompt_cache_retention")
 }

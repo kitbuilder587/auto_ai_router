@@ -138,7 +138,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
 	acc := &streamAccumulator{
-		responseID: generateResponseID(),
+		responseID: GenerateResponseID(),
 		model:      model,
 	}
 	if meta != nil {
@@ -255,6 +255,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			// Emit text delta
 			deltaEvent := map[string]interface{}{
 				"type":          "response.output_text.delta",
+				"item_id":       acc.messageItemID,
 				"output_index":  0,
 				"content_index": 0,
 				"delta":         choice.Delta.Content,
@@ -279,6 +280,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			acc.fullRefusal += choice.Delta.Refusal
 			refusalEvent := map[string]interface{}{
 				"type":          "response.refusal.delta",
+				"item_id":       acc.messageItemID,
 				"output_index":  0,
 				"content_index": 0,
 				"delta":         choice.Delta.Refusal,
@@ -304,7 +306,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 				}
 				toolCall := accumulatedToolCall{
 					id:     tc.ID,
-					itemID: generateItemID("fc_"),
+					itemID: GenerateItemID("fc_"),
 				}
 				if tc.Function != nil {
 					toolCall.name = tc.Function.Name
@@ -344,7 +346,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 					for len(acc.toolCalls) <= idx {
 						acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{})
 					}
-					acc.toolCalls[idx].itemID = generateItemID("fc_")
+					acc.toolCalls[idx].itemID = GenerateItemID("fc_")
 				}
 				acc.toolCalls[idx].arguments += tc.Function.Arguments
 
@@ -356,6 +358,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 
 				argDeltaEvent := map[string]interface{}{
 					"type":         "response.function_call_arguments.delta",
+					"item_id":      acc.toolCalls[idx].itemID,
 					"output_index": outputIndex,
 					"delta":        tc.Function.Arguments,
 				}
@@ -467,32 +470,25 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 		}
 	}
 
-	metadata := map[string]string{}
-	for k, v := range acc.requestMetadata {
-		metadata[k] = v
-	}
+	metadata := acc.requestMetadata
 	var prevRespID interface{}
 	if acc.previousResponseID != "" {
 		prevRespID = acc.previousResponseID
 	}
-	return &Response{
+
+	return BuildCompletedResponse(CompletedResponseParams{
 		ID:                 acc.responseID,
-		Object:             "response",
-		CreatedAt:          acc.createdAt,
 		Model:              acc.model,
+		CreatedAt:          acc.createdAt,
 		Status:             status,
+		IncompleteDetails:  incompleteDetails,
 		Output:             output,
 		Usage:              usage,
-		Error:              nil,
-		IncompleteDetails:  incompleteDetails,
 		Metadata:           metadata,
-		ToolChoice:         "auto",
-		Tools:              []Tool{},
-		ParallelToolCalls:  true,
-		Instructions:       nil,
 		PreviousResponseID: prevRespID,
 		Store:              acc.storeFlag,
-	}
+		ToolChoice:         "auto",
+	})
 }
 
 // truncate returns at most n bytes of s for safe debug logging.
@@ -527,7 +523,7 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 // emitMessageStartEvents emits output_item.added and content_part.added for a message.
 func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 	acc.messageStarted = true
-	acc.messageItemID = generateItemID("msg_")
+	acc.messageItemID = GenerateItemID("msg_")
 
 	msgItemID := acc.messageItemID
 
@@ -548,6 +544,7 @@ func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 
 	contentPartEvent := map[string]interface{}{
 		"type":          "response.content_part.added",
+		"item_id":       acc.messageItemID,
 		"output_index":  0,
 		"content_index": 0,
 		"part": map[string]interface{}{
@@ -567,6 +564,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		// output_text.done
 		textDoneEvent := map[string]interface{}{
 			"type":          "response.output_text.done",
+			"item_id":       acc.messageItemID,
 			"output_index":  0,
 			"content_index": 0,
 			"text":          acc.fullText,
@@ -578,6 +576,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		// content_part.done
 		contentPartDoneEvent := map[string]interface{}{
 			"type":          "response.content_part.done",
+			"item_id":       acc.messageItemID,
 			"output_index":  0,
 			"content_index": 0,
 			"part": map[string]interface{}{
@@ -609,6 +608,20 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 			},
 		}
 		if err := writeSSEWithSeq(w, "response.output_item.done", msgDoneEvent, acc); err != nil {
+			return err
+		}
+	}
+
+	// Close refusal part if any refusal text was accumulated
+	if acc.messageStarted && acc.fullRefusal != "" {
+		refusalDoneEvent := map[string]interface{}{
+			"type":          "response.refusal.done",
+			"item_id":       acc.messageItemID,
+			"output_index":  0,
+			"content_index": 0,
+			"refusal":       acc.fullRefusal,
+		}
+		if err := writeSSEWithSeq(w, "response.refusal.done", refusalDoneEvent, acc); err != nil {
 			return err
 		}
 	}
@@ -683,9 +696,9 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
 		}
 	}
-	metadata := map[string]interface{}{}
-	for k, v := range acc.requestMetadata {
-		metadata[k] = v
+	var metadata interface{} = acc.requestMetadata
+	if acc.requestMetadata == nil {
+		metadata = map[string]string{}
 	}
 	var prevRespID interface{}
 	if acc.previousResponseID != "" {
@@ -770,9 +783,9 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 		}
 	}
 
-	metadata := map[string]interface{}{}
-	for k, v := range acc.requestMetadata {
-		metadata[k] = v
+	var metadata interface{} = acc.requestMetadata
+	if acc.requestMetadata == nil {
+		metadata = map[string]string{}
 	}
 	var prevRespID interface{}
 	if acc.previousResponseID != "" {
