@@ -72,6 +72,18 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Handle POST /v1/responses/compact — compact a conversation
+	if req.Method == "POST" && req.URL.Path == "/v1/responses/compact" {
+		r.proxy.HandleCompactResponse(w, req)
+		return
+	}
+
+	// Handle WebSocket upgrade on /v1/responses
+	if req.URL.Path == "/v1/responses" && req.Header.Get("Upgrade") == "websocket" {
+		r.proxy.HandleWebSocketResponses(w, req)
+		return
+	}
+
 	allowedPaths := map[string]bool{
 		"/v1/chat/completions":   true,
 		"/v1/completions":        true,

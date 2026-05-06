@@ -351,8 +351,8 @@ type Response struct {
 	MaxOutputTokens    *int               `json:"max_output_tokens"`
 	Reasoning          interface{}        `json:"reasoning"` // null | {effort, summary}
 	User               interface{}        `json:"user,omitempty"`
-	SafetyIdentifier   interface{}        `json:"safety_identifier,omitempty"`
-	PromptCacheKey     interface{}        `json:"prompt_cache_key,omitempty"`
+	SafetyIdentifier   interface{}        `json:"safety_identifier"`
+	PromptCacheKey     interface{}        `json:"prompt_cache_key"`
 
 	// Required array / object fields (never null, may be empty)
 	Output   []OutputItem      `json:"output"`
@@ -383,8 +383,8 @@ type Response struct {
 	// Text config echoed from request
 	Text interface{} `json:"text,omitempty"` // {format: {type: "text"|"json_schema"|"json_object"}}
 
-	// Optional fields
-	MaxToolCalls *int `json:"max_tool_calls,omitempty"`
+	// Required-nullable fields (must be present in JSON even when null)
+	MaxToolCalls *int `json:"max_tool_calls"`
 
 	// Input items echo (populated when include=["input_items"] is requested)
 	Input []OutputItem `json:"input,omitempty"`
@@ -398,4 +398,13 @@ type Response struct {
 	ContextEdits         interface{} `json:"context_edits,omitempty"`
 	PromptCacheRetention interface{} `json:"prompt_cache_retention,omitempty"`
 	Billing              interface{} `json:"billing,omitempty"`
+}
+
+// CompactResource represents the response from POST /v1/responses/compact.
+type CompactResource struct {
+	ID        string       `json:"id"`
+	Object    string       `json:"object"` // "response.compaction"
+	Output    []OutputItem `json:"output"`
+	CreatedAt int64        `json:"created_at"`
+	Usage     *Usage       `json:"usage"`
 }

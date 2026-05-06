@@ -355,6 +355,9 @@ func outputToInputItems(output []OutputItem) []interface{} {
 			if item.ID != "" {
 				compItem["id"] = item.ID
 			}
+			if item.EncryptedContent != "" {
+				compItem["encrypted_content"] = item.EncryptedContent
+			}
 			items = append(items, compItem)
 		}
 	}
@@ -426,28 +429,69 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 	// 5. Normalize tools: nested Chat Completions function format → flat Responses API format.
 	// Input:  {type:"function", function:{name:"...", description:"...", parameters:{...}}}
 	// Output: {type:"function", name:"...", description:"...", parameters:{...}}
+	// Empty tools array is removed — some providers reject tools:[].
 	if toolsVal, ok := raw["tools"]; ok {
 		if toolsArr, ok := toolsVal.([]interface{}); ok {
-			normalized := make([]interface{}, len(toolsArr))
-			for i, t := range toolsArr {
-				toolMap, ok := t.(map[string]interface{})
-				if !ok {
-					normalized[i] = t
-					continue
-				}
-				if toolMap["type"] == "function" {
-					if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
-						flat := map[string]interface{}{"type": "function"}
-						for k, v := range funcDef {
-							flat[k] = v
-						}
-						normalized[i] = flat
+			if len(toolsArr) == 0 {
+				delete(raw, "tools")
+				delete(raw, "tool_choice")
+			} else {
+				normalized := make([]interface{}, len(toolsArr))
+				for i, t := range toolsArr {
+					toolMap, ok := t.(map[string]interface{})
+					if !ok {
+						normalized[i] = t
 						continue
 					}
+					if toolMap["type"] == "function" {
+						if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
+							flat := map[string]interface{}{"type": "function"}
+							for k, v := range funcDef {
+								flat[k] = v
+							}
+							normalized[i] = flat
+							continue
+						}
+					}
+					normalized[i] = t
 				}
-				normalized[i] = t
+				raw["tools"] = normalized
 			}
-			raw["tools"] = normalized
+		}
+	}
+
+	// 6. Convert compaction items to user messages.
+	// OpenAI's native Responses API does not support type:"compaction" items.
+	// Convert them to standard user messages carrying the compacted context summary.
+	if inputVal, ok := raw["input"]; ok {
+		if inputArr, ok := inputVal.([]interface{}); ok {
+			out := make([]interface{}, 0, len(inputArr))
+			changed := false
+			for _, item := range inputArr {
+				itemMap, ok := item.(map[string]interface{})
+				if !ok || itemMap["type"] != "compaction" {
+					out = append(out, item)
+					continue
+				}
+				changed = true
+				ec, _ := itemMap["encrypted_content"].(string)
+				if ec != "" {
+					out = append(out, map[string]interface{}{
+						"type": "message",
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{
+								"type": "input_text",
+								"text": "[Conversation context summary]: " + ec,
+							},
+						},
+					})
+				}
+				// Skip empty compaction items
+			}
+			if changed {
+				raw["input"] = out
+			}
 		}
 	}
 
@@ -832,6 +876,18 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 					"role":         "tool",
 					"tool_call_id": callID,
 					"content":      outputStr,
+				})
+			}
+
+		case "compaction":
+			// A compaction item carries an encrypted_content summary of prior context.
+			// Inject it as a user message so the model has the compacted context.
+			flushToolCalls()
+			ec, _ := itemMap["encrypted_content"].(string)
+			if ec != "" {
+				messages = append(messages, map[string]interface{}{
+					"role":    "user",
+					"content": "[Conversation context summary]: " + ec,
 				})
 			}
 
