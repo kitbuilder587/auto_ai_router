@@ -156,24 +156,17 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 
 	output = append(output, cfg.extraOutputItems...)
 
-	resp := Response{
-		ID:                 GenerateResponseID(),
-		Object:             "response",
-		CreatedAt:          ccResp.Created,
-		Model:              ccResp.Model,
-		Status:             status,
-		Output:             output,
-		Usage:              usage,
-		Error:              nil,
-		IncompleteDetails:  incompleteDetails,
-		Metadata:           map[string]string{},
-		ToolChoice:         "auto",
-		Tools:              []Tool{},
-		ParallelToolCalls:  true,
-		Instructions:       nil,
-		PreviousResponseID: nil,
-		Store:              false,
-	}
+	resp := NewResponse(ResponseParams{
+		ID:                GenerateResponseID(),
+		Model:             ccResp.Model,
+		CreatedAt:         ccResp.Created,
+		Status:            status,
+		IncompleteDetails: incompleteDetails,
+		Output:            output,
+		Usage:             usage,
+		ToolChoice:        "auto",
+		Store:             false,
+	})
 
 	result, err := json.Marshal(resp)
 	if err != nil {

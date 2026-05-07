@@ -12,15 +12,12 @@ import (
 // The caller is responsible for adding any provider-specific fields (e.g.
 // "store", "previous_response_id") to the returned map after this call.
 func BuildInProgressResponse(responseID, model string, createdAt int64) map[string]interface{} {
-	return map[string]interface{}{
-		"id":         responseID,
-		"object":     "response",
-		"created_at": createdAt,
-		"model":      model,
-		"status":     "in_progress",
-		"output":     []interface{}{},
-		"metadata":   map[string]interface{}{},
-	}
+	return ResponseToMap(NewResponse(ResponseParams{
+		ID:        responseID,
+		Model:     model,
+		CreatedAt: createdAt,
+		Status:    "in_progress",
+	}))
 }
 
 // CompletedResponseParams holds the pre-computed, provider-independent fields
@@ -61,33 +58,20 @@ type CompletedResponseParams struct {
 // conversions (stop-reasons, usage shapes, output item types) must be done by
 // the caller before invoking this function.
 func BuildCompletedResponse(p CompletedResponseParams) *Response {
-	metadata := p.Metadata
-	if metadata == nil {
-		metadata = map[string]string{}
-	}
-	output := p.Output
-	if output == nil {
-		output = []OutputItem{}
-	}
-	return &Response{
+	return NewResponse(ResponseParams{
 		ID:                 p.ID,
-		Object:             "response",
-		CreatedAt:          p.CreatedAt,
-		CompletedAt:        p.CompletedAt,
 		Model:              p.Model,
+		CreatedAt:          p.CreatedAt,
 		Status:             p.Status,
+		CompletedAt:        p.CompletedAt,
 		IncompleteDetails:  p.IncompleteDetails,
-		Output:             output,
+		Output:             p.Output,
 		Usage:              p.Usage,
-		Error:              nil,
-		Metadata:           metadata,
-		Tools:              []Tool{},
-		ParallelToolCalls:  true,
+		Metadata:           p.Metadata,
 		PreviousResponseID: p.PreviousResponseID,
-		Instructions:       nil,
 		Store:              p.Store,
 		ToolChoice:         p.ToolChoice,
-	}
+	})
 }
 
 // WriteSSEEvent JSON-marshals data, increments *seqNum, and writes a single
@@ -98,11 +82,34 @@ func BuildCompletedResponse(p CompletedResponseParams) *Response {
 // seqNum must not be nil. The caller owns the sequenceNumber field inside its
 // own accumulator and passes a pointer so the counter stays in sync.
 func WriteSSEEvent(w io.Writer, eventType string, data interface{}, seqNum *int) error {
-	b, err := json.Marshal(data)
+	payload, err := injectSequenceNumber(data, *seqNum+1)
 	if err != nil {
 		return fmt.Errorf("WriteSSEEvent marshal %s: %w", eventType, err)
 	}
 	*seqNum++
-	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, b)
+	_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, payload)
 	return err
+}
+
+func injectSequenceNumber(data interface{}, seq int) ([]byte, error) {
+	switch v := data.(type) {
+	case map[string]interface{}:
+		if _, exists := v["sequence_number"]; !exists {
+			v["sequence_number"] = seq
+		}
+		return json.Marshal(v)
+	default:
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		var obj map[string]interface{}
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return nil, err
+		}
+		if _, exists := obj["sequence_number"]; !exists {
+			obj["sequence_number"] = seq
+		}
+		return json.Marshal(obj)
+	}
 }

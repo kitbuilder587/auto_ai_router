@@ -185,6 +185,50 @@ func TestChatToResponse_ToolCalls(t *testing.T) {
 	assert.Equal(t, "completed", fcItems[0].Status)
 }
 
+func TestChatToResponse_RequiredSchemaFields(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "z-ai/glm-4.7-flash",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "I'll check the current weather in San Francisco for you.",
+				"tool_calls": [{
+					"id": "call_xyz",
+					"type": "function",
+					"function": {
+						"name": "get_weather",
+						"arguments": "{\"location\":\"San Francisco, CA\"}"
+					}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {
+			"prompt_tokens": 188,
+			"completion_tokens": 26,
+			"total_tokens": 214
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "disabled", parsed["truncation"])
+	assert.Equal(t, "default", parsed["service_tier"])
+	assert.Equal(t, "auto", parsed["tool_choice"])
+	assert.Equal(t, float64(1), parsed["temperature"])
+	assert.Equal(t, float64(1), parsed["top_p"])
+	_, hasText := parsed["text"]
+	assert.True(t, hasText)
+}
+
 func TestChatToResponse_Usage(t *testing.T) {
 	ccBody := `{
 		"id": "chatcmpl-abc123",

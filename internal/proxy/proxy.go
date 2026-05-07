@@ -1083,7 +1083,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = []byte(decodedBody)
 		}
 
-		// Extract token usage BEFORE Responses API conversion (from Chat Completions format)
+		// bodyForTokenExtraction is set to finalResponseBody now and may be updated
+		// after Responses API conversion (for nativeResponses the raw provider body
+		// uses a provider-specific format that ExtractTokenUsage cannot parse).
 		bodyForTokenExtraction := finalResponseBody
 		if len(bodyForTokenExtraction) == 0 {
 			bodyForTokenExtraction = []byte(decodedBody)
@@ -1101,6 +1103,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
 				if enriched, marshalErr := json.Marshal(nativeResp); marshalErr == nil {
 					finalResponseBody = enriched
+					// Use the converted Responses API body for token extraction:
+					// the raw provider body (e.g. Vertex usageMetadata) is not
+					// parseable by ExtractTokenUsage which expects OpenAI-compatible fields.
+					bodyForTokenExtraction = finalResponseBody
 				}
 				if saveResponseFn != nil {
 					saveResponseFn(nativeResp)

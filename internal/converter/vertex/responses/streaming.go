@@ -175,12 +175,8 @@ func processTextDelta(w io.Writer, acc *vertexStreamAccumulator, delta string) e
 		}
 	}
 	acc.fullText += delta
-	return writeVertexSSE(w, "response.output_text.delta", map[string]interface{}{
-		"type":          "response.output_text.delta",
-		"output_index":  acc.messageOutputIndex,
-		"content_index": 0,
-		"delta":         delta,
-	}, acc)
+	return writeVertexSSE(w, "response.output_text.delta",
+		responses.BuildOutputTextDeltaEvent(acc.messageItemID, acc.messageOutputIndex, 0, delta), acc)
 }
 
 func processThoughtDelta(w io.Writer, acc *vertexStreamAccumulator, delta string) error {
@@ -318,16 +314,12 @@ func currentOutputIndex(acc *vertexStreamAccumulator) int {
 func emitVertexHeaderEvents(w io.Writer, acc *vertexStreamAccumulator) error {
 	acc.headerEmitted = true
 	respObj := buildVertexInProgressResponse(acc)
-	if err := writeVertexSSE(w, "response.created", map[string]interface{}{
-		"type":     "response.created",
-		"response": respObj,
-	}, acc); err != nil {
+	if err := writeVertexSSE(w, "response.created",
+		responses.BuildResponseEvent("response.created", respObj), acc); err != nil {
 		return err
 	}
-	return writeVertexSSE(w, "response.in_progress", map[string]interface{}{
-		"type":     "response.in_progress",
-		"response": respObj,
-	}, acc)
+	return writeVertexSSE(w, "response.in_progress",
+		responses.BuildResponseEvent("response.in_progress", respObj), acc)
 }
 
 func emitVertexMessageStart(w io.Writer, acc *vertexStreamAccumulator) error {
@@ -336,30 +328,13 @@ func emitVertexMessageStart(w io.Writer, acc *vertexStreamAccumulator) error {
 	outputIdx := currentOutputIndex(acc) - 1 // -1 because messageStarted was just set
 	acc.messageOutputIndex = outputIdx       // save for text delta events
 
-	if err := writeVertexSSE(w, "response.output_item.added", map[string]interface{}{
-		"type":         "response.output_item.added",
-		"output_index": outputIdx,
-		"item": map[string]interface{}{
-			"type":    "message",
-			"id":      acc.messageItemID,
-			"status":  "in_progress",
-			"role":    "assistant",
-			"content": []interface{}{},
-		},
-	}, acc); err != nil {
+	if err := writeVertexSSE(w, "response.output_item.added",
+		responses.BuildMessageItemAddedEvent(outputIdx, acc.messageItemID), acc); err != nil {
 		return err
 	}
 
-	return writeVertexSSE(w, "response.content_part.added", map[string]interface{}{
-		"type":          "response.content_part.added",
-		"output_index":  outputIdx,
-		"content_index": 0,
-		"part": map[string]interface{}{
-			"type":        "output_text",
-			"text":        "",
-			"annotations": []interface{}{},
-		},
-	}, acc)
+	return writeVertexSSE(w, "response.content_part.added",
+		responses.BuildContentPartAddedEvent(acc.messageItemID, outputIdx, 0), acc)
 }
 
 func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error {
@@ -403,24 +378,12 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 		closures = append(closures, closureItem{
 			outputIndex: idx,
 			fn: func() error {
-				if err := writeVertexSSE(w, "response.output_text.done", map[string]interface{}{
-					"type":          "response.output_text.done",
-					"output_index":  idx,
-					"content_index": 0,
-					"text":          acc.fullText,
-				}, acc); err != nil {
+				if err := writeVertexSSE(w, "response.output_text.done",
+					responses.BuildOutputTextDoneEvent(acc.messageItemID, idx, 0, acc.fullText), acc); err != nil {
 					return err
 				}
-				if err := writeVertexSSE(w, "response.content_part.done", map[string]interface{}{
-					"type":          "response.content_part.done",
-					"output_index":  idx,
-					"content_index": 0,
-					"part": map[string]interface{}{
-						"type":        "output_text",
-						"text":        acc.fullText,
-						"annotations": []interface{}{},
-					},
-				}, acc); err != nil {
+				if err := writeVertexSSE(w, "response.content_part.done",
+					responses.BuildContentPartDoneEvent(acc.messageItemID, idx, 0, acc.fullText), acc); err != nil {
 					return err
 				}
 				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
@@ -489,10 +452,8 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 		}
 	}
 
-	return writeVertexSSE(w, "response.completed", map[string]interface{}{
-		"type":     "response.completed",
-		"response": buildVertexCompletedResponse(acc),
-	}, acc)
+	return writeVertexSSE(w, "response.completed",
+		responses.BuildResponseEvent("response.completed", buildVertexCompletedResponse(acc)), acc)
 }
 
 func buildVertexInProgressResponse(acc *vertexStreamAccumulator) map[string]interface{} {

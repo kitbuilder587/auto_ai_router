@@ -505,18 +505,12 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 
 	respObj := buildInProgressResponse(acc)
 
-	createdEvent := map[string]interface{}{
-		"type":     "response.created",
-		"response": respObj,
-	}
+	createdEvent := BuildResponseEvent("response.created", respObj)
 	if err := writeSSEWithSeq(w, "response.created", createdEvent, acc); err != nil {
 		return err
 	}
 
-	inProgressEvent := map[string]interface{}{
-		"type":     "response.in_progress",
-		"response": respObj,
-	}
+	inProgressEvent := BuildResponseEvent("response.in_progress", respObj)
 	return writeSSEWithSeq(w, "response.in_progress", inProgressEvent, acc)
 }
 
@@ -527,32 +521,12 @@ func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 
 	msgItemID := acc.messageItemID
 
-	itemAddedEvent := map[string]interface{}{
-		"type":         "response.output_item.added",
-		"output_index": 0,
-		"item": map[string]interface{}{
-			"type":    "message",
-			"id":      msgItemID,
-			"status":  "in_progress",
-			"role":    "assistant",
-			"content": []interface{}{},
-		},
-	}
+	itemAddedEvent := BuildMessageItemAddedEvent(0, msgItemID)
 	if err := writeSSEWithSeq(w, "response.output_item.added", itemAddedEvent, acc); err != nil {
 		return err
 	}
 
-	contentPartEvent := map[string]interface{}{
-		"type":          "response.content_part.added",
-		"item_id":       acc.messageItemID,
-		"output_index":  0,
-		"content_index": 0,
-		"part": map[string]interface{}{
-			"type":        "output_text",
-			"text":        "",
-			"annotations": []interface{}{},
-		},
-	}
+	contentPartEvent := BuildContentPartAddedEvent(acc.messageItemID, 0, 0)
 	return writeSSEWithSeq(w, "response.content_part.added", contentPartEvent, acc)
 }
 
@@ -562,29 +536,13 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 	// This matches the condition in buildCompletedResponse (messageStarted && fullText != "").
 	if acc.messageStarted && acc.fullText != "" {
 		// output_text.done
-		textDoneEvent := map[string]interface{}{
-			"type":          "response.output_text.done",
-			"item_id":       acc.messageItemID,
-			"output_index":  0,
-			"content_index": 0,
-			"text":          acc.fullText,
-		}
+		textDoneEvent := BuildOutputTextDoneEvent(acc.messageItemID, 0, 0, acc.fullText)
 		if err := writeSSEWithSeq(w, "response.output_text.done", textDoneEvent, acc); err != nil {
 			return err
 		}
 
 		// content_part.done
-		contentPartDoneEvent := map[string]interface{}{
-			"type":          "response.content_part.done",
-			"item_id":       acc.messageItemID,
-			"output_index":  0,
-			"content_index": 0,
-			"part": map[string]interface{}{
-				"type":        "output_text",
-				"text":        acc.fullText,
-				"annotations": []interface{}{},
-			},
-		}
+		contentPartDoneEvent := BuildContentPartDoneEvent(acc.messageItemID, 0, 0, acc.fullText)
 		if err := writeSSEWithSeq(w, "response.content_part.done", contentPartDoneEvent, acc); err != nil {
 			return err
 		}
@@ -636,6 +594,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		// function_call_arguments.done
 		argsDoneEvent := map[string]interface{}{
 			"type":         "response.function_call_arguments.done",
+			"item_id":      tc.itemID,
 			"output_index": outputIndex,
 			"arguments":    tc.arguments,
 		}
@@ -675,140 +634,115 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		eventType = "response.completed"
 	}
 
-	completedEvent := map[string]interface{}{
-		"type":     eventType,
-		"response": completedResp,
-	}
+	completedEvent := BuildResponseEvent(eventType, completedResp)
 	return writeSSEWithSeq(w, eventType, completedEvent, acc)
 }
 
 // buildInProgressResponse builds the response object for in-progress events.
 func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 	status := "in_progress"
-	var incompleteDetails interface{}
+	var incompleteDetails *IncompleteDetails
 	if acc.finishReason != nil {
 		switch *acc.finishReason {
 		case "length":
 			status = "incomplete"
-			incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+			incompleteDetails = &IncompleteDetails{Reason: "max_output_tokens"}
 		case "content_filter":
 			status = "incomplete"
-			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+			incompleteDetails = &IncompleteDetails{Reason: "content_filter"}
 		}
-	}
-	var metadata interface{} = acc.requestMetadata
-	if acc.requestMetadata == nil {
-		metadata = map[string]string{}
 	}
 	var prevRespID interface{}
 	if acc.previousResponseID != "" {
 		prevRespID = acc.previousResponseID
 	}
-	return map[string]interface{}{
-		"id":                   acc.responseID,
-		"object":               "response",
-		"created_at":           acc.createdAt,
-		"model":                acc.model,
-		"status":               status,
-		"output":               []interface{}{},
-		"usage":                nil,
-		"error":                nil,
-		"incomplete_details":   incompleteDetails,
-		"metadata":             metadata,
-		"tool_choice":          "auto",
-		"tools":                []interface{}{},
-		"parallel_tool_calls":  true,
-		"instructions":         nil,
-		"previous_response_id": prevRespID,
-		"store":                acc.storeFlag,
-	}
+	return ResponseToMap(NewResponse(ResponseParams{
+		ID:                 acc.responseID,
+		Model:              acc.model,
+		CreatedAt:          acc.createdAt,
+		Status:             status,
+		IncompleteDetails:  incompleteDetails,
+		Metadata:           acc.requestMetadata,
+		PreviousResponseID: prevRespID,
+		Store:              acc.storeFlag,
+		ToolChoice:         "auto",
+	}))
 }
 
 // buildCompletedResponse builds the full response object for the completed event.
 func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
-	output := make([]interface{}, 0)
+	output := make([]OutputItem, 0)
 
 	if acc.messageStarted && acc.fullText != "" {
-		output = append(output, map[string]interface{}{
-			"type":   "message",
-			"id":     acc.messageItemID,
-			"status": "completed",
-			"role":   "assistant",
-			"content": []interface{}{
-				map[string]interface{}{
-					"type":        "output_text",
-					"text":        acc.fullText,
-					"annotations": []interface{}{},
-				},
-			},
+		output = append(output, OutputItem{
+			Type:   "message",
+			ID:     acc.messageItemID,
+			Status: "completed",
+			Role:   "assistant",
+			Content: []OutputContent{{
+				Type:        "output_text",
+				Text:        acc.fullText,
+				Annotations: []Annotation{},
+			}},
 		})
 	}
 
 	for _, tc := range acc.toolCalls {
-		output = append(output, map[string]interface{}{
-			"type":      "function_call",
-			"id":        tc.itemID,
-			"call_id":   tc.id,
-			"name":      tc.name,
-			"arguments": tc.arguments,
-			"status":    "completed",
+		output = append(output, OutputItem{
+			Type:      "function_call",
+			ID:        tc.itemID,
+			CallID:    tc.id,
+			Name:      tc.name,
+			Arguments: tc.arguments,
+			Status:    "completed",
 		})
 	}
 
-	var usageObj interface{}
+	var usageObj *Usage
 	if acc.usage != nil {
-		usageObj = map[string]interface{}{
-			"input_tokens":  acc.usage.PromptTokens,
-			"output_tokens": acc.usage.CompletionTokens,
-			"total_tokens":  acc.usage.TotalTokens,
-			"input_tokens_details": map[string]interface{}{
-				"cached_tokens": acc.usage.CachedTokens,
+		usageObj = &Usage{
+			InputTokens:  acc.usage.PromptTokens,
+			OutputTokens: acc.usage.CompletionTokens,
+			TotalTokens:  acc.usage.TotalTokens,
+			InputTokensDetails: InputDetails{
+				CachedTokens: acc.usage.CachedTokens,
 			},
-			"output_tokens_details": map[string]interface{}{
-				"reasoning_tokens": acc.usage.ReasoningTokens,
+			OutputTokensDetails: OutputDetails{
+				ReasoningTokens: acc.usage.ReasoningTokens,
 			},
 		}
 	}
 
 	status := "completed"
-	var incompleteDetails interface{}
+	var incompleteDetails *IncompleteDetails
 	if acc.finishReason != nil {
 		switch *acc.finishReason {
 		case "length":
 			status = "incomplete"
-			incompleteDetails = map[string]interface{}{"reason": "max_output_tokens"}
+			incompleteDetails = &IncompleteDetails{Reason: "max_output_tokens"}
 		case "content_filter":
 			status = "incomplete"
-			incompleteDetails = map[string]interface{}{"reason": "content_filter"}
+			incompleteDetails = &IncompleteDetails{Reason: "content_filter"}
 		}
 	}
 
-	var metadata interface{} = acc.requestMetadata
-	if acc.requestMetadata == nil {
-		metadata = map[string]string{}
-	}
 	var prevRespID interface{}
 	if acc.previousResponseID != "" {
 		prevRespID = acc.previousResponseID
 	}
-	return map[string]interface{}{
-		"id":                   acc.responseID,
-		"object":               "response",
-		"created_at":           acc.createdAt,
-		"model":                acc.model,
-		"status":               status,
-		"output":               output,
-		"usage":                usageObj,
-		"error":                nil,
-		"incomplete_details":   incompleteDetails,
-		"metadata":             metadata,
-		"tool_choice":          "auto",
-		"tools":                []interface{}{},
-		"parallel_tool_calls":  true,
-		"instructions":         nil,
-		"previous_response_id": prevRespID,
-		"store":                acc.storeFlag,
-	}
+	return ResponseToMap(NewResponse(ResponseParams{
+		ID:                 acc.responseID,
+		Model:              acc.model,
+		CreatedAt:          acc.createdAt,
+		Status:             status,
+		IncompleteDetails:  incompleteDetails,
+		Output:             output,
+		Usage:              usageObj,
+		Metadata:           acc.requestMetadata,
+		PreviousResponseID: prevRespID,
+		Store:              acc.storeFlag,
+		ToolChoice:         "auto",
+	}))
 }
 
 // writeSSEWithSeq writes a single SSE event to the writer, injecting the

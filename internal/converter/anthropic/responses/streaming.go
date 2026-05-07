@@ -240,12 +240,8 @@ func handleAnthropicTextDelta(w io.Writer, acc *anthropicStreamAccumulator, delt
 		}
 	}
 	acc.currentText += delta
-	return writeAnthropicSSE(w, "response.output_text.delta", map[string]interface{}{
-		"type":          "response.output_text.delta",
-		"output_index":  acc.messageOutputIndex,
-		"content_index": 0,
-		"delta":         delta,
-	}, acc)
+	return writeAnthropicSSE(w, "response.output_text.delta",
+		responses.BuildOutputTextDeltaEvent(acc.messageItemID, acc.messageOutputIndex, 0, delta), acc)
 }
 
 func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
@@ -330,16 +326,12 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 func emitAnthropicHeaderEvents(w io.Writer, acc *anthropicStreamAccumulator) error {
 	acc.headerEmitted = true
 	respObj := buildAnthropicInProgressResponse(acc)
-	if err := writeAnthropicSSE(w, "response.created", map[string]interface{}{
-		"type":     "response.created",
-		"response": respObj,
-	}, acc); err != nil {
+	if err := writeAnthropicSSE(w, "response.created",
+		responses.BuildResponseEvent("response.created", respObj), acc); err != nil {
 		return err
 	}
-	return writeAnthropicSSE(w, "response.in_progress", map[string]interface{}{
-		"type":     "response.in_progress",
-		"response": respObj,
-	}, acc)
+	return writeAnthropicSSE(w, "response.in_progress",
+		responses.BuildResponseEvent("response.in_progress", respObj), acc)
 }
 
 func emitAnthropicMessageStart(w io.Writer, acc *anthropicStreamAccumulator) error {
@@ -347,30 +339,13 @@ func emitAnthropicMessageStart(w io.Writer, acc *anthropicStreamAccumulator) err
 	acc.messageItemID = generateItemID("msg_")
 	outputIdx := len(acc.outputItems)
 
-	if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
-		"type":         "response.output_item.added",
-		"output_index": outputIdx,
-		"item": map[string]interface{}{
-			"type":    "message",
-			"id":      acc.messageItemID,
-			"status":  "in_progress",
-			"role":    "assistant",
-			"content": []interface{}{},
-		},
-	}, acc); err != nil {
+	if err := writeAnthropicSSE(w, "response.output_item.added",
+		responses.BuildMessageItemAddedEvent(outputIdx, acc.messageItemID), acc); err != nil {
 		return err
 	}
 
-	return writeAnthropicSSE(w, "response.content_part.added", map[string]interface{}{
-		"type":          "response.content_part.added",
-		"output_index":  outputIdx,
-		"content_index": 0,
-		"part": map[string]interface{}{
-			"type":        "output_text",
-			"text":        "",
-			"annotations": []interface{}{},
-		},
-	}, acc)
+	return writeAnthropicSSE(w, "response.content_part.added",
+		responses.BuildContentPartAddedEvent(acc.messageItemID, outputIdx, 0), acc)
 }
 
 func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator) error {
@@ -408,24 +383,12 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 			fullText += c.Text
 		}
 		if fullText != "" {
-			if err := writeAnthropicSSE(w, "response.output_text.done", map[string]interface{}{
-				"type":          "response.output_text.done",
-				"output_index":  outputIdx,
-				"content_index": 0,
-				"text":          fullText,
-			}, acc); err != nil {
+			if err := writeAnthropicSSE(w, "response.output_text.done",
+				responses.BuildOutputTextDoneEvent(acc.messageItemID, outputIdx, 0, fullText), acc); err != nil {
 				return err
 			}
-			if err := writeAnthropicSSE(w, "response.content_part.done", map[string]interface{}{
-				"type":          "response.content_part.done",
-				"output_index":  outputIdx,
-				"content_index": 0,
-				"part": map[string]interface{}{
-					"type":        "output_text",
-					"text":        fullText,
-					"annotations": []interface{}{},
-				},
-			}, acc); err != nil {
+			if err := writeAnthropicSSE(w, "response.content_part.done",
+				responses.BuildContentPartDoneEvent(acc.messageItemID, outputIdx, 0, fullText), acc); err != nil {
 				return err
 			}
 			if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
@@ -457,10 +420,8 @@ func emitAnthropicCompletionEvents(w io.Writer, acc *anthropicStreamAccumulator)
 		outputIdx++
 	}
 
-	return writeAnthropicSSE(w, "response.completed", map[string]interface{}{
-		"type":     "response.completed",
-		"response": buildAnthropicCompletedResponse(acc),
-	}, acc)
+	return writeAnthropicSSE(w, "response.completed",
+		responses.BuildResponseEvent("response.completed", buildAnthropicCompletedResponse(acc)), acc)
 }
 
 func buildAnthropicInProgressResponse(acc *anthropicStreamAccumulator) map[string]interface{} {

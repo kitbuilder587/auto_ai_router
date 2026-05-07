@@ -102,7 +102,9 @@ func (p *Proxy) HandleCompactResponse(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		decompressed, err := io.ReadAll(gr)
-		gr.Close()
+		if closeErr := gr.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 		if err != nil {
 			WriteErrorInternal(w, "Failed to read decompressed LLM response")
 			return

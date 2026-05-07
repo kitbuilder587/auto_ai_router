@@ -1,6 +1,7 @@
 package vertexresponses
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -145,4 +146,49 @@ func TestCandidatesToOutputItems_GroundingMetadataAddsAnnotationsAndWebSearchCal
 
 	assert.Equal(t, "web_search_call", output[1].Type)
 	assert.Equal(t, []string{"capital of france"}, output[1].Queries)
+}
+
+func TestVertexToResponsesResponse_RequiredSchemaFields(t *testing.T) {
+	vertexResp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								ID:   "call_1",
+								Name: "get_weather",
+								Args: map[string]any{"location": "Paris"},
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+
+	resp := buildResponsesResponse(vertexResp, "gemini-test", "resp_test", 123)
+
+	assert.Equal(t, "auto", resp.ToolChoice)
+	assert.Equal(t, "disabled", resp.Truncation)
+	assert.Equal(t, "default", resp.ServiceTier)
+	require.NotNil(t, resp.Temperature)
+	assert.Equal(t, 1.0, *resp.Temperature)
+	require.NotNil(t, resp.TopP)
+	assert.Equal(t, 1.0, *resp.TopP)
+	require.NotNil(t, resp.Text)
+
+	raw, err := json.Marshal(resp)
+	require.NoError(t, err)
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &parsed))
+	assert.Equal(t, "auto", parsed["tool_choice"])
+	assert.Equal(t, "disabled", parsed["truncation"])
+	assert.Equal(t, "default", parsed["service_tier"])
+	assert.Equal(t, float64(1), parsed["temperature"])
+	assert.Equal(t, float64(1), parsed["top_p"])
+	_, hasText := parsed["text"]
+	assert.True(t, hasText)
 }

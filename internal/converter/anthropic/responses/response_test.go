@@ -188,6 +188,43 @@ func TestAnthropicToResponsesResponse_CustomResponseID(t *testing.T) {
 	assert.Equal(t, int64(1234567890), resp.CreatedAt)
 }
 
+func TestAnthropicToResponsesResponse_RequiredSchemaFields(t *testing.T) {
+	body := `{
+		"id": "msg_schema",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [{"type": "tool_use", "id": "tool_abc", "name": "get_weather", "input": {"city": "London"}}],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 20, "output_tokens": 30}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, "auto", resp.ToolChoice)
+	assert.Equal(t, "disabled", resp.Truncation)
+	assert.Equal(t, "default", resp.ServiceTier)
+	require.NotNil(t, resp.Temperature)
+	assert.Equal(t, 1.0, *resp.Temperature)
+	require.NotNil(t, resp.TopP)
+	assert.Equal(t, 1.0, *resp.TopP)
+	require.NotNil(t, resp.Text)
+
+	raw, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &parsed))
+	assert.Equal(t, "auto", parsed["tool_choice"])
+	assert.Equal(t, "disabled", parsed["truncation"])
+	assert.Equal(t, "default", parsed["service_tier"])
+	assert.Equal(t, float64(1), parsed["temperature"])
+	assert.Equal(t, float64(1), parsed["top_p"])
+	_, hasText := parsed["text"]
+	assert.True(t, hasText)
+}
+
 func TestAnthropicStopReasonToStatus(t *testing.T) {
 	tests := []struct {
 		reason   string

@@ -156,6 +156,53 @@ func sendWSError(conn *websocket.Conn, code, message string) {
 	// Do NOT send [DONE] — the error event itself signals turn completion
 }
 
+func sendWSHTTPError(conn *websocket.Conn, raw []byte, fallbackStatus int) {
+	code := "api_error"
+	message := http.StatusText(fallbackStatus)
+	if message == "" {
+		message = "Request failed"
+	}
+	errType := "server_error"
+	var param interface{}
+
+	var body struct {
+		Error struct {
+			Message string      `json:"message"`
+			Type    string      `json:"type"`
+			Param   interface{} `json:"param"`
+			Code    string      `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &body) == nil {
+		if body.Error.Message != "" {
+			message = body.Error.Message
+		}
+		if body.Error.Type != "" {
+			errType = body.Error.Type
+		}
+		if body.Error.Param != nil {
+			param = body.Error.Param
+		}
+		if body.Error.Code != "" {
+			code = body.Error.Code
+		}
+	}
+
+	evt := map[string]interface{}{
+		"type":            "error",
+		"sequence_number": 0,
+		"error": map[string]interface{}{
+			"code":    code,
+			"message": message,
+			"type":    errType,
+			"param":   param,
+		},
+	}
+	if b, err := json.Marshal(evt); err == nil {
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+	}
+}
+
 // HandleWebSocketResponses handles WebSocket connections on /v1/responses.
 //
 // Protocol:
@@ -173,7 +220,11 @@ func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request)
 		p.logger.Debug("ws: upgrade failed", "error", err)
 		return
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil && p.logger != nil {
+			p.logger.Debug("ws: close failed", "error", closeErr)
+		}
+	}()
 
 	// Connection-local cache: response ID → completed Response
 	localCache := make(map[string]*responses.Response)
@@ -321,9 +372,9 @@ outerLoop:
 				wsWriter.bufMu.Unlock()
 
 				if len(rawBuf) > 0 && wsWriter.status >= 400 {
-					// Non-streaming error: forward raw body as a WS message.
+					// Non-streaming error: normalize raw JSON error body into a WS error event.
 					wsWriter.writeMu.Lock()
-					_ = conn.WriteMessage(websocket.TextMessage, rawBuf)
+					sendWSHTTPError(conn, rawBuf, wsWriter.status)
 					wsWriter.writeMu.Unlock()
 					wsWriter.isFailed = true
 				}

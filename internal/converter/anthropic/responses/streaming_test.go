@@ -164,6 +164,67 @@ func TestTransformAnthropicStreamToResponses_TextDeltaContent(t *testing.T) {
 	assert.Equal(t, "Part1Part2", fullText)
 }
 
+func TestTransformAnthropicStreamToResponses_MessageEventsIncludeRequiredFields(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{"input_tokens": 5, "cache_read_input_tokens": 0},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "hello"},
+		},
+		{
+			"type": "content_block_stop",
+		},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 3},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	err := TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEvents(out.String())
+	require.NotEmpty(t, events)
+
+	var messageItemID string
+	for _, e := range events {
+		_, hasSeq := e["sequence_number"]
+		assert.True(t, hasSeq, "every event must include sequence_number: %#v", e)
+
+		typ, _ := e["type"].(string)
+		if typ == "response.output_item.added" {
+			item, _ := e["item"].(map[string]interface{})
+			if item != nil && item["type"] == "message" {
+				messageItemID, _ = item["id"].(string)
+			}
+		}
+	}
+	require.NotEmpty(t, messageItemID)
+
+	for _, e := range events {
+		typ, _ := e["type"].(string)
+		switch typ {
+		case "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done":
+			itemID, _ := e["item_id"].(string)
+			assert.Equal(t, messageItemID, itemID, "event %s must include matching item_id", typ)
+		}
+	}
+}
+
 func TestTransformAnthropicStreamToResponses_ThinkingBlock(t *testing.T) {
 	stream := buildAnthropicSSEStream([]map[string]interface{}{
 		{

@@ -37,24 +37,16 @@ func buildAnthropicResponse(
 	output := anthropicContentToOutputItems(ar.Content)
 	usage := anthropicUsageToUsage(ar.Usage)
 	completedAt := createdAt
-
-	return &responses.Response{
-		ID:                 responseID,
-		Object:             "response",
-		CreatedAt:          createdAt,
-		CompletedAt:        &completedAt,
-		Model:              model,
-		Status:             status,
-		IncompleteDetails:  incompleteDetails,
-		Output:             output,
-		Usage:              usage,
-		Error:              nil,
-		Metadata:           map[string]string{},
-		Tools:              []responses.Tool{},
-		ParallelToolCalls:  true,
-		PreviousResponseID: nil,
-		Instructions:       nil,
-	}
+	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
+		ID:                responseID,
+		Model:             model,
+		CreatedAt:         createdAt,
+		CompletedAt:       &completedAt,
+		Status:            status,
+		IncompleteDetails: incompleteDetails,
+		Output:            output,
+		Usage:             usage,
+	})
 }
 
 // anthropicContentToOutputItems converts Anthropic content blocks to Responses API output items.
