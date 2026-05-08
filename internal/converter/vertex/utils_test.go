@@ -86,7 +86,7 @@ func TestParseDataURLToPart(t *testing.T) {
 	})
 
 	t.Run("not_data_url", func(t *testing.T) {
-		result := parseDataURLToPart("https://example.com/image.jpg")
+		result := parseDataURLToPart("https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg")
 		assert.Nil(t, result)
 	})
 

@@ -65,14 +65,12 @@ func convertInputImageToAnthropic(partMap map[string]interface{}) (*anthropic.Co
 		}, nil
 	}
 
-	// Regular URL → url source type
-	return &anthropic.ContentBlock{
-		Type: "image",
-		Source: &anthropic.MediaSource{
-			Type: "url",
-			URL:  imgURL,
-		},
-	}, nil
+	// Regular URL → download and base64-encode; Anthropic does not support url sources.
+	block := anthropic.DownloadAndEncodeImage(imgURL)
+	if block == nil {
+		return nil, fmt.Errorf("input_image: failed to download image from %s", imgURL)
+	}
+	return block, nil
 }
 
 func convertInputFileToAnthropic(partMap map[string]interface{}) (*anthropic.ContentBlock, error) {

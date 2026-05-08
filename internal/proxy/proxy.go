@@ -734,7 +734,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 		if attempt > 0 {
-			// Close previous response body before retrying
+			// Check for next credential BEFORE resetting resp/responseBody.
+			// If no credential is available, break while preserving the last HTTP response
+			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
+			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
+			if err != nil {
+				p.logger.Debug("No more same-type credentials for retry",
+					"model", modelID, "attempt", attempt, "error", err)
+				break
+			}
+
+			// Only reset after we know there is a credential to retry with.
 			if closeBody != nil {
 				closeBody()
 				closeBody = nil
@@ -742,12 +752,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp = nil
 			responseBody = nil
 
-			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
-			if err != nil {
-				p.logger.Debug("No more same-type credentials for retry",
-					"model", modelID, "attempt", attempt, "error", err)
-				break
-			}
 			cred = nextCred
 			triedCreds[cred.Name] = true
 			logCtx.Credential = cred
