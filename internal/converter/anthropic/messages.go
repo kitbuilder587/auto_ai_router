@@ -89,8 +89,13 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 	if req.Thinking != nil {
 		thinkingParam = req.Thinking
 	}
-	if tc := mapThinkingConfig(thinkingParam, req.ReasoningEffort); tc != nil {
+	if tc, oc := mapThinkingConfig(thinkingParam, req.ReasoningEffort, anthropicReq.Model); tc != nil {
 		anthropicReq.Thinking = tc
+		anthropicReq.OutputConfig = oc
+		if oc != nil {
+			// effort-based adaptive thinking requires the effort beta header
+			anthropicReq.AnthropicBeta = appendBetaUnique(anthropicReq.AnthropicBeta, "effort-2025-11-24")
+		}
 		// Anthropic requires temperature=1.0 when thinking is enabled.
 		temp := 1.0
 		anthropicReq.Temperature = &temp

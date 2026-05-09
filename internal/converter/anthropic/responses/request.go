@@ -75,12 +75,16 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 
 	// Reasoning → extended thinking
 	if req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none" {
-		budget := effortToBudgetTokens(req.Reasoning.Effort)
-		ar.Thinking = &anthropic.AnthropicThinking{
-			Type:         "enabled",
-			BudgetTokens: budget,
+		tc, oc := anthropic.MapThinkingConfigFromEffort(req.Reasoning.Effort, ar.Model)
+		if tc != nil {
+			ar.Thinking = tc
+			ar.OutputConfig = oc
+			if oc != nil {
+				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "effort-2025-11-24")
+			} else {
+				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "interleaved-thinking-2025-05-14")
+			}
 		}
-		ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "interleaved-thinking-2025-05-14")
 	}
 
 	// Tools

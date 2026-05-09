@@ -76,20 +76,6 @@ func responsesToolChoiceToAnthropic(toolChoice interface{}) interface{} {
 	return nil
 }
 
-// effortToBudgetTokens maps Responses API reasoning effort to Anthropic budget_tokens.
-func effortToBudgetTokens(effort string) int {
-	switch effort {
-	case "low":
-		return 1024
-	case "medium", "":
-		return 8000
-	case "high":
-		return 16000
-	default:
-		return 8000
-	}
-}
-
 func appendUnique(slice []string, s string) []string {
 	for _, v := range slice {
 		if v == s {

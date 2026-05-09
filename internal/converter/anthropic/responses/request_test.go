@@ -211,12 +211,17 @@ func TestResponsesRequestToAnthropic_ReasoningEffortHigh(t *testing.T) {
 	var ar map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &ar))
 
+	// claude-opus-4-5 uses adaptive thinking: type="adaptive", no budget_tokens
 	thinking := ar["thinking"].(map[string]interface{})
-	assert.Equal(t, "enabled", thinking["type"])
-	assert.Equal(t, float64(16000), thinking["budget_tokens"])
+	assert.Equal(t, "adaptive", thinking["type"])
+	assert.Nil(t, thinking["budget_tokens"])
+
+	// effort goes in output_config, not in thinking
+	outputConfig := ar["output_config"].(map[string]interface{})
+	assert.Equal(t, "high", outputConfig["effort"])
 
 	betas := ar["anthropic_beta"].([]interface{})
-	assert.Contains(t, betas, "interleaved-thinking-2025-05-14")
+	assert.Contains(t, betas, "effort-2025-11-24")
 }
 
 func TestResponsesRequestToAnthropic_ReasoningEffortLow(t *testing.T) {
@@ -233,7 +238,11 @@ func TestResponsesRequestToAnthropic_ReasoningEffortLow(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &ar))
 
 	thinking := ar["thinking"].(map[string]interface{})
-	assert.Equal(t, float64(1024), thinking["budget_tokens"])
+	assert.Equal(t, "adaptive", thinking["type"])
+	assert.Nil(t, thinking["budget_tokens"])
+
+	outputConfig := ar["output_config"].(map[string]interface{})
+	assert.Equal(t, "low", outputConfig["effort"])
 }
 
 func TestResponsesRequestToAnthropic_ReasoningEffortNone(t *testing.T) {
