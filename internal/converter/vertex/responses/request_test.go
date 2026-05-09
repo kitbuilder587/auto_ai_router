@@ -311,8 +311,13 @@ func TestResponsesToolsToVertex_Mixed(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &vr))
 
 	vertexTools := vr["tools"].([]interface{})
-	// functionDeclarations tool + googleSearch + codeExecution = 3 tools
-	assert.Len(t, vertexTools, 3)
+	// Built-in tools take priority; function declarations are dropped.
+	// googleSearch + codeExecution = 2 tools (function "search" silently dropped).
+	assert.Len(t, vertexTools, 2)
+	toolMap0 := vertexTools[0].(map[string]interface{})
+	toolMap1 := vertexTools[1].(map[string]interface{})
+	assert.Contains(t, toolMap0, "googleSearch")
+	assert.Contains(t, toolMap1, "codeExecution")
 }
 
 func TestResponsesRequestToVertex_WebSearchOnlyNoToolConfig(t *testing.T) {

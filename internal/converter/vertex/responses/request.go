@@ -55,17 +55,20 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 		vr.Tools = responsesToolsToVertex(req.Tools)
 	}
 
-	// Tool choice — only set FunctionCallingConfig when there are function tools.
-	// Vertex rejects FunctionCallingConfig when no FunctionDeclarations are present.
+	// Tool choice — only set FunctionCallingConfig when function tools are present AND
+	// no built-in tools (built-ins take priority and function decls are silently dropped).
 	if req.ToolChoice != nil {
+		hasBuiltinTools := false
 		hasFunctionTools := false
 		for _, t := range req.Tools {
-			if t.Type == "function" {
+			switch t.Type {
+			case "function":
 				hasFunctionTools = true
-				break
+			case "web_search_preview", "web_search_preview_2025_03_11", "web_search", "code_interpreter":
+				hasBuiltinTools = true
 			}
 		}
-		if hasFunctionTools {
+		if hasFunctionTools && !hasBuiltinTools {
 			vr.ToolConfig = responsesToolChoiceToVertex(req.ToolChoice)
 		}
 	}

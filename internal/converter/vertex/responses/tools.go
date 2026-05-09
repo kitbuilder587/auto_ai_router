@@ -47,12 +47,15 @@ func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 		}
 	}
 
-	var result []*genai.Tool
-	if len(funcDecls) > 0 {
-		result = append(result, &genai.Tool{FunctionDeclarations: funcDecls})
+	// Gemini API does NOT allow combining built-in tools with function declarations.
+	// When both are present, prefer built-in tools and silently drop functions.
+	if len(builtinTools) > 0 {
+		return builtinTools
 	}
-	result = append(result, builtinTools...)
-	return result
+	if len(funcDecls) > 0 {
+		return []*genai.Tool{{FunctionDeclarations: funcDecls}}
+	}
+	return nil
 }
 
 // responsesToolChoiceToVertex maps Responses API tool_choice to Vertex ToolConfig.
