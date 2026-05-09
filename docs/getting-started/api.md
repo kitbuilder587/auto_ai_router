@@ -46,6 +46,66 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+## Responses API
+
+The router supports the [OpenAI Responses API](../advanced/responses.md) with native provider integration for Anthropic, Vertex AI, and AWS Bedrock.
+
+```bash
+curl -X POST http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer sk-your-master-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "input": "Hello!"
+  }'
+```
+
+### Streaming
+
+```bash
+curl -X POST http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer sk-your-master-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "input": "Hello!",
+    "stream": true
+  }'
+```
+
+### WebSocket
+
+Connect to `ws://localhost:8080/v1/responses` (with `Upgrade: websocket`) for persistent multi-turn sessions. See [Responses API — WebSocket](../advanced/responses.md#websocket-protocol) for the full protocol.
+
+### Compact
+
+```bash
+curl -X POST http://localhost:8080/v1/responses/compact \
+  -H "Authorization: Bearer sk-your-master-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "input": "..."
+  }'
+```
+
+### Using with OpenAI SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-your-master-key-here",
+)
+
+response = client.responses.create(
+    model="claude-sonnet-4-20250514",
+    input="Hello!",
+)
+print(response.output_text)
+```
+
 ## Health Check
 
 ```bash

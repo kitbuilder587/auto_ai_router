@@ -19,6 +19,12 @@ credentials:
 | `api_key`  | Anthropic API key (supports `os.environ/VAR_NAME`) |
 | `base_url` | API base URL (`https://api.anthropic.com`)         |
 
+## Responses API
+
+Anthropic is fully supported via the [Responses API](../advanced/responses.md). Requests are converted natively to the Anthropic Messages API — no Chat Completions intermediate format is used.
+
+Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
+
 ## OpenAI-Compatible API
 
 The router accepts requests in **OpenAI Chat Completion format** and automatically converts them to Anthropic Messages API format. Responses are converted back to OpenAI format.
