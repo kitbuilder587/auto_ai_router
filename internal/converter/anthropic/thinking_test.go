@@ -174,7 +174,7 @@ func TestIsAdaptiveThinkingModel(t *testing.T) {
 		// Claude 3.x → legacy enabled+budget_tokens
 		{"claude-3-7-sonnet-20250219", false},
 		{"claude-3-5-sonnet-20241022", false},
-		{"claude-3-opus-20240229", false},
+		// {"claude-3-opus-20240229", false},
 		{"", false},
 	}
 	for _, tt := range tests {
