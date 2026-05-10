@@ -87,10 +87,10 @@ func MapThinkingConfigFromEffort(effort, modelName string) (*AnthropicThinking, 
 // Claude 3.x models use budget_tokens-based enabled thinking.
 // Claude 4 Sonnet/Haiku do not support extended thinking at all.
 func isAdaptiveThinkingModel(model string) bool {
-	if strings.Contains(model, "claude-opus-4") {
+	if strings.Contains(model, "opus") {
 		return true
 	}
-	if strings.Contains(model, "claude-mythos-preview") {
+	if strings.Contains(model, "mythos") {
 		return true
 	}
 	return false
