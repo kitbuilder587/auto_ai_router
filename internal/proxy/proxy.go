@@ -601,20 +601,22 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				if streamUsage != nil {
 					logCtx.TokenUsage = streamUsage
-					p.metrics.RecordTokenUsage(cred.Name, modelID,
-						streamUsage.PromptTokens, streamUsage.CompletionTokens,
-						streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
-					totalTokens := streamUsage.Total()
-					if totalTokens > 0 {
-						p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
-						if modelID != "" {
-							p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+					if proxyResp.StatusCode < 400 {
+						p.metrics.RecordTokenUsage(cred.Name, modelID,
+							streamUsage.PromptTokens, streamUsage.CompletionTokens,
+							streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
+						totalTokens := streamUsage.Total()
+						if totalTokens > 0 {
+							p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
+							if modelID != "" {
+								p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+							}
 						}
+						p.logger.Debug("Proxy streaming token usage recorded",
+							"credential", cred.Name, "model", modelID,
+							"prompt_tokens", streamUsage.PromptTokens,
+							"completion_tokens", streamUsage.CompletionTokens)
 					}
-					p.logger.Debug("Proxy streaming token usage recorded",
-						"credential", cred.Name, "model", modelID,
-						"prompt_tokens", streamUsage.PromptTokens,
-						"completion_tokens", streamUsage.CompletionTokens)
 				}
 			}
 			if streamCompleted {
@@ -687,7 +689,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.TargetURL = cred.BaseURL
 		if !proxyResp.IsStreaming {
 			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
-			if logCtx.TokenUsage != nil {
+			if logCtx.TokenUsage != nil && proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(cred.Name, modelID,
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
 					logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
@@ -1176,22 +1178,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Log to LiteLLM DB (non-streaming)
 		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
-		if logCtx.TokenUsage != nil {
-			p.metrics.RecordTokenUsage(cred.Name, modelID,
-				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
-				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
-		}
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
 
-		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
-			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
-		}
-
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
 			logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
+		} else if logCtx.TokenUsage != nil {
+			p.metrics.RecordTokenUsage(cred.Name, modelID,
+				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
+				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
+		}
+
+		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
+			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
 		if logCtx.Token != "" && logCtx.Credential != nil {
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {

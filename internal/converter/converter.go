@@ -311,16 +311,6 @@ func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
 	return ExtractTokenUsage(body)
 }
 
-// AnthropicUsageToTokenUsage converts Anthropic-specific usage to universal TokenUsage.
-// Convenience function for callers using the converter package.
-func AnthropicUsageToTokenUsage(inputTokens, outputTokens, cacheReadTokens int) *TokenUsage {
-	return &TokenUsage{
-		PromptTokens:      inputTokens,
-		CompletionTokens:  outputTokens,
-		CachedInputTokens: cacheReadTokens,
-	}
-}
-
 // ExtractTokenUsage parses token usage from an OpenAI-format JSON response body.
 // Handles both chat completion format (prompt_tokens/completion_tokens)
 // and image generation format (input_tokens/output_tokens).
