@@ -74,6 +74,7 @@ def make_llm(model: str, base_url: str, api_key: str, **kwargs) -> ChatOpenAI:
         model=model,
         openai_api_base=base_url,
         openai_api_key=api_key,
+        use_responses_api=True,
         **kwargs,
     )
 
@@ -507,3 +508,85 @@ class TestToolCallsWithHistory:
             "Get weather for London and compare with Paris distance"
         )
         assert response is not None
+
+
+# ---------------------------------------------------------------------------
+# Strict tool calling tests
+# ---------------------------------------------------------------------------
+
+class TestStrictToolCalling:
+    """Test strict tool calling (strict=True/False in bind_tools).
+
+    strict=True instructs LangChain to include "strict": true in the function
+    schema, which forces the model to produce arguments that exactly match the
+    declared JSON Schema (no extra keys, all required fields present).
+    Providers that don't support strict mode typically ignore the flag.
+    """
+
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_strict_true_single_tool(self, openai_client, base_url, model):
+        """Test that strict=True is accepted and returns a valid response."""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather], strict=True)
+
+        response = model_with_tools.invoke("What's the weather in Tokyo?")
+
+        assert response is not None
+        assert hasattr(response, "content") or hasattr(response, "tool_calls")
+
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_strict_false_single_tool(self, openai_client, base_url, model):
+        """Test that strict=False is accepted and returns a valid response."""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather], strict=False)
+
+        response = model_with_tools.invoke("What's the weather in London?")
+
+        assert response is not None
+        assert hasattr(response, "content") or hasattr(response, "tool_calls")
+
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_strict_true_multiple_tools(self, openai_client, base_url, model):
+        """Test strict=True with multiple tools bound."""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools(
+            [get_weather, calculate_distance, list_cities],
+            strict=True,
+        )
+
+        response = model_with_tools.invoke(
+            "What's the weather in Tokyo and how far is it from London?"
+        )
+
+        assert response is not None
+
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_strict_true_tool_call_args_valid(self, openai_client, base_url, model):
+        """Test that strict=True tool call args contain required fields only."""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather], strict=True)
+
+        response = model_with_tools.invoke("Get weather for Sydney.")
+
+        assert response is not None
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            for tool_call in response.tool_calls:
+                if tool_call.get("name") == "get_weather":
+                    args = tool_call.get("args") or tool_call.get("arguments") or {}
+                    # Required field must be present
+                    assert "location" in args, (
+                        f"strict=True tool call missing required 'location' arg: {args}"
+                    )
+
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_strict_vs_nonstrict_both_succeed(self, openai_client, base_url, model):
+        """Test that both strict and non-strict modes complete successfully."""
+        prompt = "What's the weather in New York?"
+
+        llm = make_llm(model, base_url, openai_client.api_key)
+
+        strict_response = llm.bind_tools([get_weather], strict=True).invoke(prompt)
+        nonstrict_response = llm.bind_tools([get_weather], strict=False).invoke(prompt)
+
+        assert strict_response is not None
+        assert nonstrict_response is not None
