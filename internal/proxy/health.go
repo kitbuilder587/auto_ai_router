@@ -1,11 +1,11 @@
 package proxy
 
 import (
-	_ "embed"
 	"net/http"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 )
 
 func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
@@ -120,30 +120,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	return healthy, status
 }
 
-// VisualHealthCheck renders an HTML dashboard with health check information
+// VisualHealthCheck serves the static health dashboard HTML.
 func (p *Proxy) VisualHealthCheck(w http.ResponseWriter, r *http.Request) {
-	_, status := p.HealthCheck()
-
-	if p.healthTemplate == nil {
-		p.logger.Error("Health template not available")
-		WriteErrorInternal(w, "Template not available")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-
-	// Convert to map[string]interface{} for template compatibility
-	statusMap := map[string]interface{}{
-		"status":                status.Status,
-		"credentials_available": status.CredentialsAvailable,
-		"credentials_banned":    status.CredentialsBanned,
-		"total_credentials":     status.TotalCredentials,
-		"credentials":           status.Credentials,
-		"models":                status.Models,
-	}
-
-	if err := p.healthTemplate.Execute(w, statusMap); err != nil {
-		p.logger.Error("Failed to execute health template", "error", err)
-	}
+	webui.ServeHealth(w, r)
 }

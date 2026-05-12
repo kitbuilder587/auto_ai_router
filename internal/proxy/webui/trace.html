@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Router Chain Trace</title>
+  <link rel="stylesheet" href="/webui/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+</head>
+<body>
+<div class="wf">
+  <div class="wf-logo">
+    <span class="dot"></span>
+    <span class="name">air</span>
+    <span class="ver" id="verLabel"></span>
+  </div>
+  <div class="wf-topbar">
+    <div class="crumbs">
+      <span>workspace</span>
+      <span class="sep">/</span>
+      <span class="here">router trace</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill" id="countdown"></span>
+    <button class="pill" onclick="toggleTheme()">theme</button>
+  </div>
+  <nav class="wf-nav">
+    <div class="group">workspace</div>
+    <a class="item" href="/vhealth"><span class="glyph">▸</span> system health</a>
+    <a class="item active" href="/vtrace"><span class="glyph">▸</span> router trace</a>
+    <a class="item" href="/vconfig"><span class="glyph">▸</span> server config</a>
+  </nav>
+  <main class="wf-main">
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:var(--sp-4);">
+      <div>
+        <h1 class="wf-h1">Router chain trace</h1>
+        <p class="wf-sub" id="subtitle">loading…</p>
+      </div>
+      <div style="display:flex;gap:var(--sp-2);align-items:center;">
+        <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">—</span></span>
+        <button class="wf-btn" onclick="load(true)">refresh <span class="key">R</span></button>
+      </div>
+    </div>
+
+    <div class="wf-section-title">chain diagram</div>
+    <div class="wf-card" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;" id="diagramWrap">
+      <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
+    </div>
+
+    <div class="wf-section-title">router &amp; credential data</div>
+    <div id="routerList"></div>
+  </main>
+</div>
+
+<script>
+'use strict';
+
+let countdownSecs = 30;
+let countdownTimer = null;
+
+// ── theme ──────────────────────────────────────────────────────────────────
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('theme', next);
+  // re-render diagram with new theme
+  if (window._lastTrace) renderDiagram(window._lastTrace);
+}
+(function initTheme() {
+  document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
+})();
+
+function isDark() {
+  return (document.documentElement.getAttribute('data-theme') || 'dark') === 'dark';
+}
+
+// ── mermaid init ───────────────────────────────────────────────────────────
+function getMermaidConfig() {
+  const dark = isDark();
+  return {
+    startOnLoad: false,
+    theme: 'base',
+    themeVariables: {
+      primaryColor:       dark ? '#1f2225' : '#ededeb',
+      primaryTextColor:   dark ? '#e7e8ea' : '#18191b',
+      primaryBorderColor: dark ? '#25282c' : '#d8d8d4',
+      lineColor:          dark ? '#5f656d' : '#8b9098',
+      background:         dark ? '#131517' : '#f4f4f2',
+      fontSize: '12px',
+    },
+    flowchart: { htmlLabels: true, curve: 'basis' },
+  };
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '#quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function badge(cls, text) {
+  return `<span class="wf-badge ${cls}"><span class="dotS"></span>${text}</span>`;
+}
+
+function statusClass(s) {
+  return s === 'healthy' ? 'ok' : s === 'degraded' ? 'warn' : s === 'unhealthy' ? 'err' : '';
+}
+
+function fmtNum(n) {
+  if (!n && n !== 0) return '—';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'k';
+  return String(n);
+}
+
+function fmtRate(cur, lim) {
+  if (lim > 0)  return `${fmtNum(cur)} / ${fmtNum(lim)}`;
+  if (cur > 0)  return `${fmtNum(cur)} / ∞`;
+  return '—';
+}
+
+// ── mermaid diagram builder ────────────────────────────────────────────────
+function buildMermaid(trace) {
+  const nodeDefs  = [];
+  const edgeDefs  = [];
+  const styleDefs = [];
+  const defined   = new Set();
+  let nc = 0;
+  const idMap = new Map();
+
+  function nid(key) {
+    if (!idMap.has(key)) idMap.set(key, 'n' + nc++);
+    return idMap.get(key);
+  }
+
+  function statusFill(s) {
+    return { healthy: '#22c55e', degraded: '#f59e0b', unhealthy: '#ef4444' }[s] || '#5f656d';
+  }
+
+  function addRouter(t) {
+    const rid = nid('r:' + t.router_id);
+    if (defined.has(rid)) return rid;
+    defined.add(rid);
+
+    const creds = t.credentials || {};
+    const total  = Object.keys(creds).length;
+    const banned = Object.values(creds).filter(c => c.is_banned).length;
+    const lbl = `🖥 ${esc(t.router_id)}<br/>${esc(t.status || '?')}<br/>${total - banned}/${total} ok`;
+    nodeDefs.push(`    ${rid}["${lbl}"]`);
+    styleDefs.push(`    style ${rid} fill:${statusFill(t.status)},color:#fff,stroke:#fff`);
+
+    for (const [name, cred] of Object.entries(creds)) {
+      if (cred.type === 'proxy') continue;
+      const lid  = nid('c:' + t.router_id + ':' + name);
+      const icon = cred.is_banned ? '✗' : '✓';
+      const errStr = Object.entries(cred.banned_error_counts || {}).map(([c, n]) => `${n}×${c}`).join(' ');
+      const credLbl = `${icon} ${esc(name)}<br/>${esc(cred.type)}${errStr ? '<br/>' + esc(errStr) : ''}`;
+      nodeDefs.push(`    ${lid}["${credLbl}"]`);
+      styleDefs.push(`    style ${lid} fill:${cred.is_banned ? '#ef4444' : '#475569'},color:#fff,stroke:none`);
+      edgeDefs.push(`    ${rid} --> ${lid}`);
+    }
+
+    for (const [credName, up] of Object.entries(t.upstreams || {})) {
+      if (up.fetch_error) {
+        const eid = nid('e:' + t.router_id + ':' + credName);
+        nodeDefs.push(`    ${eid}["⚠ ${esc(credName)}<br/>unreachable"]`);
+        styleDefs.push(`    style ${eid} fill:#5f656d,color:#fff,stroke:none`);
+        edgeDefs.push(`    ${rid} -->|"${esc(credName)}"| ${eid}`);
+      } else {
+        const uid = addRouter(up);
+        edgeDefs.push(`    ${rid} -->|"${esc(credName)}"| ${uid}`);
+      }
+    }
+
+    return rid;
+  }
+
+  addRouter(trace);
+  return ['flowchart LR', ...nodeDefs, ...edgeDefs, ...styleDefs].join('\n');
+}
+
+async function renderDiagram(trace) {
+  const wrap = document.getElementById('diagramWrap');
+  mermaid.initialize(getMermaidConfig());
+  const diagram = buildMermaid(trace);
+  try {
+    const id = 'trace_' + Date.now();
+    const { svg } = await mermaid.render(id, diagram);
+    wrap.innerHTML = svg;
+  } catch (e) {
+    wrap.innerHTML = `<pre style="color:var(--status-err);font-size:11px;text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
+  }
+}
+
+// ── router details (collapsible) ───────────────────────────────────────────
+function buildDetails(trace) {
+  const routers = [];
+
+  function collect(t, via) {
+    routers.push({ t, via });
+    for (const [credName, up] of Object.entries(t.upstreams || {})) {
+      if (!up.fetch_error) collect(up, credName);
+    }
+  }
+  collect(trace, null);
+
+  return routers.map(({ t, via }, idx) => {
+    const cls = statusClass(t.status);
+    const credCount = Object.keys(t.credentials || {}).length;
+    const viaHtml = via
+      ? `<span style="color:var(--fg-dim);font-size:11px;">via ${esc(via)}</span>`
+      : '';
+
+    const rows = Object.entries(t.credentials || {}).sort().map(([name, c]) => {
+      const sCls  = c.is_banned ? 'err' : 'ok';
+      const sTxt  = c.is_banned ? 'banned' : 'ok';
+      const errs  = Object.entries(c.banned_error_counts || {})
+                      .map(([code, n]) => `${n}×${code}`).join(' ');
+      return `<tr>
+        <td>${esc(name)}</td>
+        <td class="dim">${esc(c.type || '—')}</td>
+        <td>${badge(sCls, sTxt)}</td>
+        <td class="muted">${fmtRate(c.current_rpm, c.limit_rpm)}</td>
+        <td class="muted">${fmtRate(c.current_tpm, c.limit_tpm)}</td>
+        <td style="font-size:11px;color:var(--status-err);">${esc(errs) || '—'}</td>
+      </tr>`;
+    }).join('');
+
+    const unreachRows = Object.entries(t.upstreams || {})
+      .filter(([, up]) => up.fetch_error)
+      .map(([credName, up]) => `<tr>
+        <td>${esc(credName)}</td>
+        <td class="dim">proxy</td>
+        <td colspan="3" style="color:var(--status-err);font-size:11px;font-style:italic;">
+          unreachable: ${esc(up.fetch_error)}
+        </td>
+        <td>—</td>
+      </tr>`).join('');
+
+    const openAttr = idx === 0 ? ' open' : '';
+    return `<details class="wf-card" style="margin-bottom:var(--sp-2);"${openAttr}>
+      <summary>
+        <span style="color:var(--fg-dim);">${idx === 0 ? '▾' : '▸'}</span>
+        <span style="font-size:13px;">${esc(t.router_id || '—')}</span>
+        ${badge(cls, t.status || 'unknown')}
+        ${viaHtml}
+        <span style="margin-left:auto;color:var(--fg-dim);font-size:11px;">${credCount} credentials</span>
+      </summary>
+      <div class="detail-body">
+        <table class="wf-table">
+          <thead>
+            <tr>
+              <th>credential</th>
+              <th>type</th>
+              <th>status</th>
+              <th>RPM</th>
+              <th>TPM</th>
+              <th>errors</th>
+            </tr>
+          </thead>
+          <tbody>${rows}${unreachRows}</tbody>
+        </table>
+      </div>
+    </details>`;
+  }).join('');
+}
+
+// ── data loading ───────────────────────────────────────────────────────────
+async function load() {
+  clearInterval(countdownTimer);
+
+  try {
+    const resp = await fetch('/trace');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const trace = await resp.json();
+    window._lastTrace = trace;
+
+    // version from header
+    const ver    = resp.headers.get('X-Router-Version') || '';
+    const commit = resp.headers.get('X-Router-Commit')  || '';
+    document.getElementById('verLabel').textContent =
+      ver ? `${ver}${commit ? ' / ' + commit.slice(0, 7) : ''}` : '';
+
+    // overall status derived from root router
+    const rootStatus = trace.status || 'unknown';
+    const cls = statusClass(rootStatus);
+    const badgeEl = document.getElementById('statusBadge');
+    badgeEl.className = `wf-badge ${cls}`;
+    document.getElementById('statusText').textContent = rootStatus;
+
+    // count routers + creds
+    let routerCount = 0, credCount = 0;
+    function countNodes(t) {
+      routerCount++;
+      credCount += Object.keys(t.credentials || {}).length;
+      for (const up of Object.values(t.upstreams || {})) {
+        if (!up.fetch_error) countNodes(up);
+      }
+    }
+    countNodes(trace);
+
+    document.getElementById('subtitle').textContent =
+      `${routerCount} router${routerCount !== 1 ? 's' : ''} · ${credCount} credentials · updated ${new Date().toLocaleTimeString()}`;
+
+    await renderDiagram(trace);
+    document.getElementById('routerList').innerHTML = buildDetails(trace);
+
+    // wire <details> toggle arrows
+    document.querySelectorAll('#routerList details').forEach(det => {
+      det.addEventListener('toggle', () => {
+        const arrow = det.querySelector('summary > span:first-child');
+        if (arrow) arrow.textContent = det.open ? '▾' : '▸';
+      });
+    });
+  } catch (e) {
+    document.getElementById('diagramWrap').innerHTML =
+      `<p style="color:var(--status-err);padding:var(--sp-4);">Failed to load trace: ${esc(e.message)}</p>`;
+    document.getElementById('routerList').innerHTML = '';
+    document.getElementById('subtitle').textContent = `error: ${e.message}`;
+  }
+
+  // countdown
+  countdownSecs = 30;
+  tickCountdown();
+  countdownTimer = setInterval(() => {
+    countdownSecs--;
+    tickCountdown();
+    if (countdownSecs <= 0) { clearInterval(countdownTimer); load(); }
+  }, 1000);
+}
+
+function tickCountdown() {
+  document.getElementById('countdown').textContent = `refresh in ${countdownSecs}s`;
+}
+
+document.addEventListener('keydown', e => {
+  if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
+});
+
+load();
+</script>
+</body>
+</html>

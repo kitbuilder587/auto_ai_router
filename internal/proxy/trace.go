@@ -8,14 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	_ "embed"
-
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 )
-
-//go:embed trace.html
-var traceHTML string
 
 const defaultTraceDepth = 25
 
@@ -105,9 +101,7 @@ func (p *Proxy) HandleTrace(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleVisualTrace serves the HTML trace dashboard.
+// HandleVisualTrace serves the static trace dashboard HTML.
 func (p *Proxy) HandleVisualTrace(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(traceHTML))
+	webui.ServeTrace(w, r)
 }

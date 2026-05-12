@@ -218,7 +218,7 @@ func main() {
 	}
 
 	// ==================== HTTP Server Setup ====================
-	rtr := router.New(prx, modelManager, &cfg.Monitoring, log)
+	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
 

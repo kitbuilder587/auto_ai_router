@@ -193,43 +193,17 @@ func TestVisualHealthCheck_Success(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "healthy")
 }
 
-func TestVisualHealthCheck_NoTemplate(t *testing.T) {
-	prx := NewTestProxyBuilder().
-		WithMasterKey("test-key").
-		WithCredentials(config.CredentialConfig{
-			Name:    "test_cred",
-			APIKey:  "sk-test",
-			BaseURL: "http://test.com",
-			RPM:     100,
-		}).
-		Build()
-
-	// Explicitly set template to nil to simulate template parsing error
-	prx.healthTemplate = nil
-
-	req := httptest.NewRequest("GET", "/health/visual", nil)
-	w := httptest.NewRecorder()
-
-	prx.VisualHealthCheck(w, req)
-
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "Template not available")
-}
-
-func TestVisualHealthCheck_HealthyStatus(t *testing.T) {
+func TestVisualHealthCheck_ServesHTML(t *testing.T) {
 	prx := createHealthTestProxy(1)
 
-	req := httptest.NewRequest("GET", "/health/visual", nil)
+	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()
 
 	prx.VisualHealthCheck(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	// Should contain healthy status
-	body := w.Body.String()
-	assert.Contains(t, body, "healthy")
-	// Check for credential and status information
-	assert.Contains(t, body, "System Health Dashboard")
+	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
+	assert.Contains(t, w.Body.String(), "System health")
 }
 
 func TestHealthCheck_MultipleModelsPerCredential(t *testing.T) {
