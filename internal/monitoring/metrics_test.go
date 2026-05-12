@@ -65,7 +65,7 @@ func TestRecordRequest_DifferentStatusCodes(t *testing.T) {
 	// Record requests with different status codes
 	statusCodes := []int{200, 201, 400, 401, 403, 429, 500, 502, 503}
 	for _, code := range statusCodes {
-		m.RecordRequest("cred1", "/v1/test", code, 50*time.Millisecond)
+		m.RecordRequest("cred1", "/v1/test", "test-model", code, 50*time.Millisecond)
 	}
 
 	// Verify metrics were collected
