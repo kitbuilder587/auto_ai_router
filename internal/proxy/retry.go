@@ -229,22 +229,24 @@ func (p *Proxy) TryFallbackProxy(
 		}
 		if streamUsage != nil {
 			logCtx.TokenUsage = streamUsage
-			p.metrics.RecordTokenUsage(fallbackCred.Name, modelID,
-				streamUsage.PromptTokens, streamUsage.CompletionTokens,
-				streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
-			totalTokens := streamUsage.Total()
-			if totalTokens > 0 {
-				p.rateLimiter.ConsumeTokens(fallbackCred.Name, totalTokens)
-				if modelID != "" {
-					p.rateLimiter.ConsumeModelTokens(fallbackCred.Name, modelID, totalTokens)
+			if proxyResp.StatusCode < 400 {
+				p.metrics.RecordTokenUsage(fallbackCred.Name, modelID,
+					streamUsage.PromptTokens, streamUsage.CompletionTokens,
+					streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
+				totalTokens := streamUsage.Total()
+				if totalTokens > 0 {
+					p.rateLimiter.ConsumeTokens(fallbackCred.Name, totalTokens)
+					if modelID != "" {
+						p.rateLimiter.ConsumeModelTokens(fallbackCred.Name, modelID, totalTokens)
+					}
 				}
+				p.logger.Debug("Fallback proxy streaming token usage recorded",
+					"fallback_credential", fallbackCred.Name,
+					"model", modelID,
+					"prompt_tokens", streamUsage.PromptTokens,
+					"completion_tokens", streamUsage.CompletionTokens,
+				)
 			}
-			p.logger.Debug("Fallback proxy streaming token usage recorded",
-				"fallback_credential", fallbackCred.Name,
-				"model", modelID,
-				"prompt_tokens", streamUsage.PromptTokens,
-				"completion_tokens", streamUsage.CompletionTokens,
-			)
 		}
 	} else {
 		p.writeProxyResponse(w, proxyResp, r)

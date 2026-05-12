@@ -162,18 +162,18 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(1)
 		assert.Contains(t, query, "INSERT INTO")
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$25")
-		assert.NotContains(t, query, "$26") // 25 params + 2 NULL constants
+		assert.Contains(t, query, "$24")
+		assert.NotContains(t, query, "$25") // 24 params + 2 NULL constants
 		assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(3)
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$25") // First entry
-		assert.Contains(t, query, "$26") // Second entry start
-		assert.Contains(t, query, "$75") // Third entry end (3 * 25)
-		assert.NotContains(t, query, "$76")
+		assert.Contains(t, query, "$24") // First entry
+		assert.Contains(t, query, "$25") // Second entry start
+		assert.Contains(t, query, "$72") // Third entry end (3 * 24)
+		assert.NotContains(t, query, "$73")
 	})
 
 	t.Run("zero entries", func(t *testing.T) {
@@ -216,7 +216,7 @@ func TestGetSpendLogParams(t *testing.T) {
 
 	params := GetSpendLogParams(entry)
 
-	assert.Len(t, params, 25)
+	assert.Len(t, params, 24)
 	assert.Equal(t, "req-123", params[0])
 	assert.Equal(t, "/v1/chat/completions", params[1])
 	assert.Equal(t, "hashed-key", params[2])
@@ -241,9 +241,9 @@ func TestGetBatchParams(t *testing.T) {
 
 	params := GetBatchParams(entries)
 
-	assert.Len(t, params, 50) // 2 * 25
+	assert.Len(t, params, 48) // 2 * 24
 	assert.Equal(t, "req-1", params[0])
-	assert.Equal(t, "req-2", params[25]) // Second entry starts at position 25
+	assert.Equal(t, "req-2", params[24]) // Second entry starts at position 24
 }
 
 // TestLogger_SQLInjectionPrevention validates that SQL injection attacks are prevented
@@ -468,7 +468,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					// Verify params are created without error
 					params := GetSpendLogParams(entry)
 					assert.NotNil(t, params)
-					assert.Len(t, params, 25)
+					assert.Len(t, params, 24)
 
 					// Verify the malicious string appears unchanged in the params
 					// This proves parameterization treats it as data, not SQL code
@@ -499,7 +499,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					batch := []*models.SpendLogEntry{entry}
 					batchParams := GetBatchParams(batch)
 					assert.NotNil(t, batchParams)
-					assert.Len(t, batchParams, 25)
+					assert.Len(t, batchParams, 24)
 
 					// All params should be stringifiable (printable)
 					// This would fail if parameterization was broken
@@ -566,12 +566,12 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 				query := queries.BuildBatchInsertQuery(2)
 				assert.NotEmpty(t, query)
 				assert.Contains(t, query, "$1")
-				assert.Contains(t, query, "$50") // 2 * 25 parameters
-				assert.NotContains(t, query, "$51")
+				assert.Contains(t, query, "$48") // 2 * 24 parameters
+				assert.NotContains(t, query, "$49")
 
 				// Get batch params
 				params := GetBatchParams(entries)
-				assert.Len(t, params, 50) // 2 entries * 25 params
+				assert.Len(t, params, 48) // 2 entries * 24 params
 
 				// Verify malicious strings are present and unchanged
 				maliciousFound := 0
@@ -619,7 +619,7 @@ func TestLogger_SQLInjectionPrevention_QueryBuilding(t *testing.T) {
 			assert.Contains(t, query, "ON CONFLICT")
 
 			// Count parameter placeholders ($1, $2, etc)
-			paramCount := tc.count * 25 // 25 parameters per entry
+			paramCount := tc.count * 24 // 24 parameters per entry
 			expectedLastParam := fmt.Sprintf("$%d", paramCount)
 			assert.Contains(t, query, expectedLastParam)
 

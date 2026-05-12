@@ -2,12 +2,33 @@ package spendlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 )
+
+// Schema compatibility flags — set to false on first SQLSTATE 42703 (column does not exist).
+// Persist across retries: first attempt detects missing column, subsequent retries use fallback query.
+var (
+	schemaTokenHasLastActive      atomic.Bool
+	schemaTeamMemberHasTotalSpend atomic.Bool
+)
+
+func init() {
+	schemaTokenHasLastActive.Store(true)
+	schemaTeamMemberHasTotalSpend.Store(true)
+}
+
+// isColumnNotExist returns true if err is PostgreSQL SQLSTATE 42703 (undefined_column).
+func isColumnNotExist(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
+}
 
 // SpendUpdates holds aggregated spend updates with explicit typing per entity.
 // Avoids confusion with string keys and improves code readability.
@@ -125,11 +146,24 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 
 // updateTokens updates Token.spend in LiteLLM_VerificationToken.
 // Executes a single UPDATE per apiKey.
+// Falls back to query without last_active if the column doesn't exist (older DB schema).
 func updateTokens(ctx context.Context, tx pgx.Tx, tokens map[string]float64) error {
 	for apiKey, amount := range tokens {
-		_, err := tx.Exec(ctx,
-			`UPDATE "LiteLLM_VerificationToken" SET spend = spend + $1 WHERE token = $2 AND spend IS NOT NULL`,
-			amount, apiKey)
+		var err error
+		if schemaTokenHasLastActive.Load() {
+			_, err = tx.Exec(ctx,
+				`UPDATE "LiteLLM_VerificationToken" SET spend = spend + $1, last_active = NOW() WHERE token = $2 AND spend IS NOT NULL`,
+				amount, apiKey)
+			if err != nil && isColumnNotExist(err) {
+				schemaTokenHasLastActive.Store(false)
+				// Transaction aborted — caller will retry; next attempt uses fallback query.
+				return err
+			}
+		} else {
+			_, err = tx.Exec(ctx,
+				`UPDATE "LiteLLM_VerificationToken" SET spend = spend + $1 WHERE token = $2 AND spend IS NOT NULL`,
+				amount, apiKey)
+		}
 		if err != nil {
 			return err
 		}
@@ -179,9 +213,9 @@ func updateOrgs(ctx context.Context, tx pgx.Tx, orgs map[string]float64) error {
 	return nil
 }
 
-// updateTeamMembers updates LiteLLM_TeamMembership.spend.
+// updateTeamMembers updates LiteLLM_TeamMembership.spend (and total_spend if available).
 // Uses composite key "teamID:userID" for record identification.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
+// Falls back to query without total_spend if the column doesn't exist (older DB schema).
 func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]float64) error {
 	for key, amount := range teamMembers {
 		// key format: "teamID:userID"
@@ -196,9 +230,21 @@ func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]fl
 			return fmt.Errorf("invalid team member key %q: empty teamID or userID", key)
 		}
 
-		_, err := tx.Exec(ctx,
-			`UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`,
-			amount, teamID, userID)
+		var err error
+		if schemaTeamMemberHasTotalSpend.Load() {
+			_, err = tx.Exec(ctx,
+				`UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1, total_spend = total_spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`,
+				amount, teamID, userID)
+			if err != nil && isColumnNotExist(err) {
+				schemaTeamMemberHasTotalSpend.Store(false)
+				// Transaction aborted — caller will retry; next attempt uses fallback query.
+				return err
+			}
+		} else {
+			_, err = tx.Exec(ctx,
+				`UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`,
+				amount, teamID, userID)
+		}
 		if err != nil {
 			return err
 		}

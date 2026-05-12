@@ -46,12 +46,12 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 	})
 
 	t.Run("http_url", func(t *testing.T) {
-		url := "https://example.com/image.jpg"
+		url := "https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg"
+
 		result := convertImageURLToAnthropic(url)
 		require.NotNil(t, result)
 		assert.Equal(t, "image", result.Type)
-		assert.Equal(t, "url", result.Source.Type)
-		assert.Equal(t, url, result.Source.URL)
+		assert.Equal(t, "base64", result.Source.Type)
 	})
 
 	t.Run("invalid_data_url_no_comma", func(t *testing.T) {

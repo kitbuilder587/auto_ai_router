@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,21 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("tcp4 listener unavailable in test environment: %v", err)
+	}
+	server := &httptest.Server{
+		Listener: listener,
+		Config:   &http.Server{Handler: handler},
+	}
+	server.Start()
+	return server
+}
+
 func TestGetRemoteModels_Caching(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 
@@ -20,7 +36,7 @@ func TestGetRemoteModels_Caching(t *testing.T) {
 	requestCount := 0
 
 	// Create test server that returns different data on first vs subsequent requests
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 
 		w.Header().Set("Content-Type", "application/json")
@@ -105,7 +121,7 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 	requestCountProxy2 := 0
 
 	// Create test server for proxy-1
-	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCountProxy1++
 		w.Header().Set("Content-Type", "application/json")
 		resp := ModelsResponse{
@@ -119,7 +135,7 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 	defer server1.Close()
 
 	// Create test server for proxy-2
-	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCountProxy2++
 		w.Header().Set("Content-Type", "application/json")
 		resp := ModelsResponse{

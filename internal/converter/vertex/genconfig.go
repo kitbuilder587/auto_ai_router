@@ -178,11 +178,16 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 	// cap the thinking budget so that actual output tokens are not starved.
 	// budget=0 is not supported for 2.5-pro, so dynamic (-1) is used by default,
 	// but dynamic can consume the entire MaxOutputTokens budget for thinking.
+	// Only apply the cap when the result is >= 128 (the model's minimum fixed budget).
 	if isGemini25ProModel(model) && cfg.MaxOutputTokens > 0 &&
 		cfg.ThinkingConfig != nil && cfg.ThinkingConfig.ThinkingBudget != nil &&
 		*cfg.ThinkingConfig.ThinkingBudget == -1 {
+		const minBudget = int32(128)
 		budget := cfg.MaxOutputTokens / 2
-		cfg.ThinkingConfig.ThinkingBudget = &budget
+		if budget >= minBudget {
+			cfg.ThinkingConfig.ThinkingBudget = &budget
+		}
+		// budget < 128: keep dynamic (-1) — fixed budgets below minimum are rejected by the API
 	}
 
 	// Phase 4: Audio output (SpeechConfig)

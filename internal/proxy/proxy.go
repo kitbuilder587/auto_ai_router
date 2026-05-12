@@ -601,20 +601,22 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				if streamUsage != nil {
 					logCtx.TokenUsage = streamUsage
-					p.metrics.RecordTokenUsage(cred.Name, modelID,
-						streamUsage.PromptTokens, streamUsage.CompletionTokens,
-						streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
-					totalTokens := streamUsage.Total()
-					if totalTokens > 0 {
-						p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
-						if modelID != "" {
-							p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+					if proxyResp.StatusCode < 400 {
+						p.metrics.RecordTokenUsage(cred.Name, modelID,
+							streamUsage.PromptTokens, streamUsage.CompletionTokens,
+							streamUsage.ReasoningTokens, streamUsage.CachedInputTokens)
+						totalTokens := streamUsage.Total()
+						if totalTokens > 0 {
+							p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
+							if modelID != "" {
+								p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+							}
 						}
+						p.logger.Debug("Proxy streaming token usage recorded",
+							"credential", cred.Name, "model", modelID,
+							"prompt_tokens", streamUsage.PromptTokens,
+							"completion_tokens", streamUsage.CompletionTokens)
 					}
-					p.logger.Debug("Proxy streaming token usage recorded",
-						"credential", cred.Name, "model", modelID,
-						"prompt_tokens", streamUsage.PromptTokens,
-						"completion_tokens", streamUsage.CompletionTokens)
 				}
 			}
 			if streamCompleted {
@@ -687,7 +689,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.TargetURL = cred.BaseURL
 		if !proxyResp.IsStreaming {
 			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
-			if logCtx.TokenUsage != nil {
+			if logCtx.TokenUsage != nil && proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(cred.Name, modelID,
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
 					logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
@@ -724,6 +726,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		responseBody    []byte
 		targetURL       string
 		conv            *converter.ProviderConverter
+		provResponses   responses.ProviderResponses // non-nil when prepared.nativeResponses
 		closeBody       func()
 		isStreamingResp bool
 		shouldRetry     bool
@@ -733,7 +736,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 		if attempt > 0 {
-			// Close previous response body before retrying
+			// Check for next credential BEFORE resetting resp/responseBody.
+			// If no credential is available, break while preserving the last HTTP response
+			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
+			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
+			if err != nil {
+				p.logger.Debug("No more same-type credentials for retry",
+					"model", modelID, "attempt", attempt, "error", err)
+				break
+			}
+
+			// Only reset after we know there is a credential to retry with.
 			if closeBody != nil {
 				closeBody()
 				closeBody = nil
@@ -741,12 +754,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp = nil
 			responseBody = nil
 
-			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
-			if err != nil {
-				p.logger.Debug("No more same-type credentials for retry",
-					"model", modelID, "attempt", attempt, "error", err)
-				break
-			}
 			cred = nextCred
 			triedCreds[cred.Name] = true
 			logCtx.Credential = cred
@@ -764,35 +771,57 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		retryReason = ""
 		transportErr = nil
 
-		// Create provider converter for this request
-		// Use realModelID for URL construction and body conversion (provider-facing name).
-		// modelID (alias) is used for credential selection and rate limiting.
-		conv = converter.New(cred.Type, converter.RequestMode{
-			IsImageGeneration: logCtx.IsImageGeneration,
-			IsImageEdit:       isImageEdit,
-			IsEmbeddings:      isEmbeddings,
-			IsStreaming:       streaming,
-			ModelID:           realModelID,
-			DisplayModelID:    modelID,
-			ContentType:       r.Header.Get("Content-Type"),
-		})
-
-		// Convert request body to provider format
-		requestBody, convErr := conv.RequestFrom(body)
-		if convErr != nil {
-			// Fatal: conversion error won't be fixed by another credential
-			p.logger.Error("Failed to convert request to provider format",
-				"credential", cred.Name, "type", cred.Type, "error", convErr)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusInternalServerError
-			logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
-			logCtx.TargetURL = cred.BaseURL
-			WriteErrorInternal(w, "Failed to convert request")
-			return
+		// Create converter and build request body / target URL.
+		// nativeResponses path uses ProviderResponses (Vertex AI, Anthropic) directly.
+		// All other paths use the Chat Completions ProviderConverter.
+		var requestBody []byte
+		if prepared.nativeResponses {
+			mode := responses.ResponsesRequestMode{
+				ModelID:        realModelID,
+				DisplayModelID: modelID,
+				IsStreaming:    streaming,
+			}
+			provResponses = responses.NewProviderResponses(cred.Type, mode)
+			var convErr error
+			requestBody, _, convErr = provResponses.RequestFrom(body)
+			if convErr != nil {
+				p.logger.Error("Failed to convert Responses API request to provider format",
+					"credential", cred.Name, "type", cred.Type, "error", convErr)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusInternalServerError
+				logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
+				logCtx.TargetURL = cred.BaseURL
+				WriteErrorInternal(w, "Failed to convert request")
+				return
+			}
+			targetURL = provResponses.BuildURL(cred)
+		} else {
+			// Use realModelID for URL construction and body conversion (provider-facing name).
+			// modelID (alias) is used for credential selection and rate limiting.
+			conv = converter.New(cred.Type, converter.RequestMode{
+				IsImageGeneration: logCtx.IsImageGeneration,
+				IsImageEdit:       isImageEdit,
+				IsEmbeddings:      isEmbeddings,
+				IsStreaming:       streaming,
+				ModelID:           realModelID,
+				DisplayModelID:    modelID,
+				ContentType:       r.Header.Get("Content-Type"),
+			})
+			var convErr error
+			requestBody, convErr = conv.RequestFrom(body)
+			if convErr != nil {
+				// Fatal: conversion error won't be fixed by another credential
+				p.logger.Error("Failed to convert request to provider format",
+					"credential", cred.Name, "type", cred.Type, "error", convErr)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusInternalServerError
+				logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
+				logCtx.TargetURL = cred.BaseURL
+				WriteErrorInternal(w, "Failed to convert request")
+				return
+			}
+			targetURL = conv.BuildURL(cred)
 		}
-
-		// Build target URL
-		targetURL = conv.BuildURL(cred)
 		if targetURL == "" {
 			baseURL := strings.TrimSuffix(cred.BaseURL, "/")
 			urlPath := r.URL.Path
@@ -848,7 +877,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,
 		// and non-multipart OpenAI) always send JSON.
 		originalContentType := r.Header.Get("Content-Type")
-		isMultipartPassthrough := conv.IsPassthrough() &&
+		isMultipartPassthrough := conv != nil && conv.IsPassthrough() &&
 			strings.HasPrefix(strings.ToLower(originalContentType), "multipart/form-data")
 		if !isMultipartPassthrough {
 			proxyReq.Header.Set("Content-Type", "application/json")
@@ -1044,7 +1073,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Transform response to OpenAI format (only for successful responses).
 		// For error responses (4xx/5xx) pass the provider body through unchanged.
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !conv.IsPassthrough() {
+		// nativeResponses path skips this step — provider→Responses API conversion
+		// happens further down via provResponses.ResponseTo().
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !prepared.nativeResponses && conv != nil && !conv.IsPassthrough() {
 			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
 			if convErr != nil {
 				p.logger.Error("Failed to transform provider response to OpenAI format",
@@ -1058,14 +1089,36 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = []byte(decodedBody)
 		}
 
-		// Extract token usage BEFORE Responses API conversion (from Chat Completions format)
+		// bodyForTokenExtraction is set to finalResponseBody now and may be updated
+		// after Responses API conversion (for nativeResponses the raw provider body
+		// uses a provider-specific format that ExtractTokenUsage cannot parse).
 		bodyForTokenExtraction := finalResponseBody
 		if len(bodyForTokenExtraction) == 0 {
 			bodyForTokenExtraction = []byte(decodedBody)
 		}
 
 		// Handle Responses API response body.
-		if prepared.passthroughResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// Native Responses converter: convert provider response → *responses.Response.
+			nativeResp, convErr := provResponses.ResponseTo([]byte(decodedBody), modelID)
+			if convErr != nil {
+				p.logger.Error("Failed to convert native Responses API response",
+					"credential", cred.Name, "type", cred.Type, "error", convErr)
+				// finalResponseBody already holds decodedBody — return as-is
+			} else {
+				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
+				if enriched, marshalErr := json.Marshal(nativeResp); marshalErr == nil {
+					finalResponseBody = enriched
+					// Use the converted Responses API body for token extraction:
+					// the raw provider body (e.g. Vertex usageMetadata) is not
+					// parseable by ExtractTokenUsage which expects OpenAI-compatible fields.
+					bodyForTokenExtraction = finalResponseBody
+				}
+				if saveResponseFn != nil {
+					saveResponseFn(nativeResp)
+				}
+			}
+		} else if prepared.passthroughResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// Codex passthrough: body is already in Responses API format — enrich and optionally save.
 			var respObj responses.Response
 			if err := json.Unmarshal(finalResponseBody, &respObj); err == nil {
@@ -1125,22 +1178,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Log to LiteLLM DB (non-streaming)
 		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
-		if logCtx.TokenUsage != nil {
-			p.metrics.RecordTokenUsage(cred.Name, modelID,
-				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
-				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
-		}
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
 
-		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
-			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
-		}
-
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
 			logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
+		} else if logCtx.TokenUsage != nil {
+			p.metrics.RecordTokenUsage(cred.Name, modelID,
+				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
+				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
+		}
+
+		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
+			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
 		if logCtx.Token != "" && logCtx.Credential != nil {
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
@@ -1175,7 +1227,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			"resp_status", resp.StatusCode)
 
 		streamCompleted := false
-		if prepared.convertedResp {
+		if prepared.nativeResponses {
+			// Native Responses converter (Vertex AI, Anthropic): convert provider SSE
+			// directly to Responses API SSE via ProviderResponses.StreamTo().
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				err := p.handleNativeResponsesStreaming(w, resp, provResponses, modelID, logCtx, saveResponseFn, prepared.responsesMetadata)
+				if err != nil {
+					p.logger.Error("Failed to handle native Responses API streaming", "error", err)
+				} else {
+					streamCompleted = true
+				}
+			} else {
+				// Error response: stream as-is
+				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle streaming response", "error", err)
+				}
+			}
+		} else if prepared.convertedResp {
 			// For Responses API: only transform successful responses (2xx status).
 			// For error responses (4xx/5xx), pass through the provider error as-is.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {

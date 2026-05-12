@@ -98,10 +98,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		organizationID = logCtx.TokenInfo.OrganizationID
 	}
 
-	// Build metadata with optional alias fields from tokenInfo
-	// Add error field if request failed
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage)
-
 	// Determine end user - prefer user email from tokenInfo
 	endUser := extractEndUser(logCtx.Request)
 	if logCtx.TokenInfo != nil && logCtx.TokenInfo.UserEmail != "" {
@@ -134,9 +130,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	// Calculate cost based on model pricing and token usage.
 	// Try real model name first (from models[].model), then alias name.
 	var cost float64
+	var tokenCosts *converter.TokenCosts
 	if p.priceRegistry == nil {
 		p.logger.Warn("Price registry not available, using 0 cost for spend log")
-		cost = 0.0
 	} else {
 		priceModelID := logCtx.ModelID
 		if logCtx.RealModelID != "" && logCtx.RealModelID != logCtx.ModelID {
@@ -144,15 +140,16 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 		modelPrice := p.priceRegistry.GetPrice(priceModelID)
 		if modelPrice == nil && priceModelID != logCtx.ModelID {
-			// Fallback: try alias name
 			modelPrice = p.priceRegistry.GetPrice(logCtx.ModelID)
 		}
 		if modelPrice == nil {
 			p.logger.Warn("Model price not found in registry, using 0 cost",
 				"model_name", priceModelID)
-			cost = 0.0
 		} else {
-			cost = modelPrice.CalculateCost(logCtx.TokenUsage)
+			tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
+			if tokenCosts != nil {
+				cost = tokenCosts.TotalCost
+			}
 			p.logger.Debug("Calculated cost for model",
 				"model_name", priceModelID,
 				"cost", cost,
@@ -161,9 +158,17 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
+	// Build metadata with usage, cost breakdown, requester IP, and optional error
+	requesterIP := getClientIP(logCtx.Request)
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts)
+
 	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
 	if customLLMProvider == "proxy" {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
+	}
+
+	if teamID == "" {
+		teamID = logCtx.Credential.Name
 	}
 
 	return p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{

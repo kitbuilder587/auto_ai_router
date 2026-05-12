@@ -53,7 +53,6 @@ func TestSpendLogRecordFields(t *testing.T) {
 		TeamID:            "team-456",
 		OrganizationID:    "org-789",
 		EndUser:           "end-user-001",
-		AgentID:           "agent-001",
 		RequestTags:       "tag1,tag2",
 	}
 
@@ -73,7 +72,6 @@ func TestSpendLogRecordFields(t *testing.T) {
 	assert.Equal(t, "team-456", record.TeamID)
 	assert.Equal(t, "org-789", record.OrganizationID)
 	assert.Equal(t, "end-user-001", record.EndUser)
-	assert.Equal(t, "agent-001", record.AgentID)
 	assert.Equal(t, "tag1,tag2", record.RequestTags)
 }
 
@@ -205,29 +203,6 @@ func TestAggregateEndUserKey_Fields(t *testing.T) {
 	assert.Equal(t, "https://api.openai.com/v1/chat/completions", key.endpoint)
 }
 
-// TestAggregateAgentKey_Fields verifies the aggregateAgentKey structure
-func TestAggregateAgentKey_Fields(t *testing.T) {
-	key := aggregateAgentKey{
-		agentID:               "agent-001",
-		date:                  "2024-01-15",
-		apiKey:                "sk-test-key",
-		model:                 "gpt-4",
-		modelGroup:            "gpt-4-group",
-		customLLMProvider:     "openai",
-		mcpNamespacedToolName: "mcp-tool",
-		endpoint:              "https://api.openai.com/v1/chat/completions",
-	}
-
-	assert.Equal(t, "agent-001", key.agentID)
-	assert.Equal(t, "2024-01-15", key.date)
-	assert.Equal(t, "sk-test-key", key.apiKey)
-	assert.Equal(t, "gpt-4", key.model)
-	assert.Equal(t, "gpt-4-group", key.modelGroup)
-	assert.Equal(t, "openai", key.customLLMProvider)
-	assert.Equal(t, "mcp-tool", key.mcpNamespacedToolName)
-	assert.Equal(t, "https://api.openai.com/v1/chat/completions", key.endpoint)
-}
-
 // TestAggregateTagKey_Fields verifies the aggregateTagKey structure
 func TestAggregateTagKey_Fields(t *testing.T) {
 	key := aggregateTagKey{
@@ -273,7 +248,6 @@ func TestSpendLogRecord_EmptyFields(t *testing.T) {
 	assert.Equal(t, "", record.TeamID)
 	assert.Equal(t, "", record.OrganizationID)
 	assert.Equal(t, "", record.EndUser)
-	assert.Equal(t, "", record.AgentID)
 	assert.Equal(t, "", record.RequestTags)
 }
 

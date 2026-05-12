@@ -70,7 +70,7 @@ func TestLogMasking_HeadersNotExposed(t *testing.T) {
 	logger := slog.New(handler)
 
 	// Mock upstream server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify the upstream request has our API key
 		assert.Contains(t, r.Header.Get("Authorization"), "Bearer upstream-key-")
 

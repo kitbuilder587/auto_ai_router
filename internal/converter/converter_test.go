@@ -455,13 +455,6 @@ func TestProviderConverter_UsageFromResponse(t *testing.T) {
 	}
 }
 
-func TestAnthropicUsageToTokenUsage(t *testing.T) {
-	usage := AnthropicUsageToTokenUsage(1, 2, 3)
-	if usage.PromptTokens != 1 || usage.CompletionTokens != 2 || usage.CachedInputTokens != 3 {
-		t.Fatalf("unexpected usage: %+v", usage)
-	}
-}
-
 func TestExtractTokenUsage(t *testing.T) {
 	if got := ExtractTokenUsage(nil); got != nil {
 		t.Fatalf("expected nil for empty body")

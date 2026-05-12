@@ -27,7 +27,7 @@ func TestForwardToProxy_Headers(t *testing.T) {
 	)
 
 	// Создаем upstream сервер, который проверяет входящие заголовки
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestReceived = true
 		receivedHeaders = r.Header
 
@@ -125,7 +125,7 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	var authHeaderValue string
 
 	// Upstream сервер
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeaderValue = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -166,7 +166,7 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 	var receivedHeaders http.Header
 
 	// Upstream сервер проверяет что hop-by-hop заголовки отсутствуют
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders = r.Header
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -216,7 +216,7 @@ func TestForwardToProxy_ContentLengthCorrect(t *testing.T) {
 	responseBody := "This is the upstream response body"
 
 	// Upstream сервер отправляет Content-Length (правильный будет перезаписан)
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(responseBody))
@@ -262,7 +262,7 @@ func TestForwardToProxy_ContentLengthCorrect(t *testing.T) {
 func TestForwardToProxy_QueryParameters(t *testing.T) {
 	var receivedQuery string
 
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedQuery = r.URL.RawQuery
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -303,7 +303,7 @@ func TestForwardToProxy_LargeResponseBody(t *testing.T) {
 	// Создаем большое тело ответа (1MB)
 	largeBody := bytes.Repeat([]byte("x"), 1024*1024)
 
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(largeBody)
@@ -343,7 +343,7 @@ func TestForwardToProxy_LargeResponseBody(t *testing.T) {
 // TestForwardToProxy_UpstreamError проверяет обработку ошибок при обращении к upstream
 func TestForwardToProxy_UpstreamError(t *testing.T) {
 	// Создаем server который закрывает соединение
-	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Имитируем внутреннюю ошибку
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error": "internal server error"}`))

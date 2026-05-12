@@ -27,7 +27,7 @@ func TestProxyFallbackOn429(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
 	// Create primary server mock that returns 429 with retryable body
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -39,7 +39,7 @@ func TestProxyFallbackOn429(t *testing.T) {
 	defer primaryServer.Close()
 
 	// Create fallback server mock that returns 200 OK
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		_ = testhelpers.NewResponseBuilder().
 			WithStatus(http.StatusOK).
@@ -126,7 +126,7 @@ func TestProxyFallbackOn429_NonRetryableBody(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
 	// Primary returns 429 with content policy violation (non-retryable)
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -138,7 +138,7 @@ func TestProxyFallbackOn429_NonRetryableBody(t *testing.T) {
 	defer primaryServer.Close()
 
 	// Fallback server (should NOT be called)
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"result": "ok"})
@@ -170,7 +170,7 @@ func TestProxyFallbackOn429_NonRetryableBody(t *testing.T) {
 func TestProxyFallbackOn429_RequestBodyPreserved(t *testing.T) {
 	var primaryReceivedBody, fallbackReceivedBody []byte
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		primaryReceivedBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestProxyFallbackOn429_RequestBodyPreserved(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		fallbackReceivedBody, err = io.ReadAll(r.Body)
 		require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestProxyFallbackOn429_RequestBodyPreserved(t *testing.T) {
 func TestProxyFallbackOn429_CredentialAPIKeysPreserved(t *testing.T) {
 	var primaryAuth, fallbackAuth string
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		primaryAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -229,7 +229,7 @@ func TestProxyFallbackOn429_CredentialAPIKeysPreserved(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fallbackAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -283,7 +283,7 @@ func TestProxyFallbackOn429_CredentialAPIKeysPreserved(t *testing.T) {
 func TestProxyFallbackOn429_MultipleRetries(t *testing.T) {
 	var primaryCalls, fallback1Calls, fallback2Calls int32
 
-	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -291,7 +291,7 @@ func TestProxyFallbackOn429_MultipleRetries(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	fallback1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallback1Server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallback1Calls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -302,7 +302,7 @@ func TestProxyFallbackOn429_MultipleRetries(t *testing.T) {
 	}))
 	defer fallback1Server.Close()
 
-	fallback2Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallback2Server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallback2Calls, 1)
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -347,7 +347,7 @@ func TestProxy_429PreservedOverNetworkError(t *testing.T) {
 	var cred1Calls int32
 
 	// cred1 returns 429 (rate-limited).
-	cred1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cred1Server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&cred1Calls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -359,7 +359,7 @@ func TestProxy_429PreservedOverNetworkError(t *testing.T) {
 	defer cred1Server.Close()
 
 	// cred2 is dead (connection refused): create a server and immediately close it.
-	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	deadURL := deadServer.URL
 	deadServer.Close()
 
@@ -412,7 +412,7 @@ func TestProxy_429PreservedOverNetworkError(t *testing.T) {
 func TestProxy_429PreservedWhenNoFallbackAndNetworkError(t *testing.T) {
 	var cred1Calls int32
 
-	cred1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cred1Server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&cred1Calls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -423,7 +423,7 @@ func TestProxy_429PreservedWhenNoFallbackAndNetworkError(t *testing.T) {
 	}))
 	defer cred1Server.Close()
 
-	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	deadURL := deadServer.URL
 	deadServer.Close()
 

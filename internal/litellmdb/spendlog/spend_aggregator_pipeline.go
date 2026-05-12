@@ -28,7 +28,6 @@ type spendLogRecord struct {
 	TeamID            string
 	OrganizationID    string
 	EndUser           string
-	AgentID           string
 	RequestTags       string
 }
 
@@ -52,7 +51,7 @@ func loadUnprocessedSpendLogRecords(
 		var userID *string
 		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, apiBase *string
 		var status *string
-		var teamID, organizationID, endUser, agentID, requestTags *string
+		var teamID, organizationID, endUser, requestTags *string
 
 		err := rows.Scan(
 			&userID,
@@ -71,7 +70,6 @@ func loadUnprocessedSpendLogRecords(
 			&teamID,
 			&organizationID,
 			&endUser,
-			&agentID,
 			&requestTags,
 		)
 		if err != nil {
@@ -89,7 +87,6 @@ func loadUnprocessedSpendLogRecords(
 		record.TeamID = derefString(teamID)
 		record.OrganizationID = derefString(organizationID)
 		record.EndUser = derefString(endUser)
-		record.AgentID = derefString(agentID)
 		record.RequestTags = derefString(requestTags)
 
 		records = append(records, record)
@@ -138,11 +135,6 @@ func (sl *Logger) runAggregators(aggCtx context.Context, conn *pgxpool.Conn, sco
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
 			return aggregateDailyEndUserSpendLogs(c, conn, sl.logger, records)
-		}},
-		{"Agent", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyAgentSpendLogs(c, conn, sl.logger, records)
 		}},
 		{"Tag", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)

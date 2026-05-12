@@ -41,6 +41,12 @@ us.anthropic.claude-3-haiku-20240307-v1:0
 anthropic.claude-3-5-haiku-20241022-v1:0
 ```
 
+## Responses API
+
+AWS Bedrock is fully supported via the [Responses API](../advanced/responses.md). Requests are converted natively to the Bedrock Anthropic Messages API — no Chat Completions intermediate format is used.
+
+Supported features: streaming (via Bedrock EventStream), `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
+
 ## OpenAI-Compatible API
 
 The router accepts requests in **OpenAI Chat Completion format** and automatically converts them to AWS Bedrock InvokeModel format. The conversion pipeline:

@@ -103,6 +103,11 @@ func WriteErrorInternal(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusInternalServerError, message, errorTypeForStatus(http.StatusInternalServerError), nil, nil)
 }
 
+// WriteErrorServiceUnavailable writes a 503 Service Unavailable JSON error.
+func WriteErrorServiceUnavailable(w http.ResponseWriter, message string) {
+	WriteJSONError(w, http.StatusServiceUnavailable, message, errorTypeForStatus(http.StatusServiceUnavailable), nil, nil)
+}
+
 // WriteErrorBadGateway writes a 502 Bad Gateway JSON error.
 func WriteErrorBadGateway(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusBadGateway, message, errorTypeForStatus(http.StatusBadGateway), nil, nil)

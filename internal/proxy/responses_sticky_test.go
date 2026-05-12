@@ -43,7 +43,7 @@ func (s *fakeResponseStore) CleanupExpired(context.Context) error { return nil }
 func (s *fakeResponseStore) Close() error                         { return nil }
 
 func TestProxyRequest_ResponsesAPIPreviousResponseIDUsesStoredCredential(t *testing.T) {
-	server1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -57,7 +57,7 @@ func TestProxyRequest_ResponsesAPIPreviousResponseIDUsesStoredCredential(t *test
 	}))
 	defer server1.Close()
 
-	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{

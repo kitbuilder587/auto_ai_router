@@ -28,6 +28,11 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
+
+	// Register native Responses API converters for Vertex AI, Anthropic, and Bedrock.
+	_ "github.com/mixaill76/auto_ai_router/internal/converter/anthropic/responses"
+	_ "github.com/mixaill76/auto_ai_router/internal/converter/bedrock/responses"
+	_ "github.com/mixaill76/auto_ai_router/internal/converter/vertex/responses"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 

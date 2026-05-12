@@ -248,7 +248,7 @@ func TestTryFallbackProxy_Success(t *testing.T) {
 	var fallbackCalls int32
 
 	// Create fallback server mock that returns 200 OK
-	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		_ = testhelpers.NewResponseBuilder().
 			WithStatus(http.StatusOK).

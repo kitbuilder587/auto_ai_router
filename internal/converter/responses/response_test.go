@@ -185,6 +185,50 @@ func TestChatToResponse_ToolCalls(t *testing.T) {
 	assert.Equal(t, "completed", fcItems[0].Status)
 }
 
+func TestChatToResponse_RequiredSchemaFields(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "z-ai/glm-4.7-flash",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "I'll check the current weather in San Francisco for you.",
+				"tool_calls": [{
+					"id": "call_xyz",
+					"type": "function",
+					"function": {
+						"name": "get_weather",
+						"arguments": "{\"location\":\"San Francisco, CA\"}"
+					}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {
+			"prompt_tokens": 188,
+			"completion_tokens": 26,
+			"total_tokens": 214
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "disabled", parsed["truncation"])
+	assert.Equal(t, "default", parsed["service_tier"])
+	assert.Equal(t, "auto", parsed["tool_choice"])
+	assert.Equal(t, float64(1), parsed["temperature"])
+	assert.Equal(t, float64(1), parsed["top_p"])
+	_, hasText := parsed["text"]
+	assert.True(t, hasText)
+}
+
 func TestChatToResponse_Usage(t *testing.T) {
 	ccBody := `{
 		"id": "chatcmpl-abc123",
@@ -348,4 +392,144 @@ func TestChatToResponse_Structure(t *testing.T) {
 
 	// Output item IDs should have proper prefixes
 	assert.True(t, strings.HasPrefix(resp.Output[0].ID, "msg_"))
+}
+
+// Phase 3: WithExtraOutputItems option
+
+func TestChatToResponse_WithExtraOutputItems(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc",
+		"object": "chat.completion",
+		"created": 1700000001,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "hello"},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+	}`
+
+	extra := []OutputItem{
+		{
+			Type:    "web_search_call",
+			ID:      "ws_injected",
+			Status:  "completed",
+			Queries: []string{"grounding query"},
+		},
+	}
+
+	result, err := ChatToResponse([]byte(ccBody), WithExtraOutputItems(extra))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	// Should have the regular message item + the injected web_search_call item
+	require.Len(t, resp.Output, 2)
+	assert.Equal(t, "message", resp.Output[0].Type)
+	assert.Equal(t, "web_search_call", resp.Output[1].Type)
+	assert.Equal(t, "ws_injected", resp.Output[1].ID)
+	assert.Equal(t, []string{"grounding query"}, resp.Output[1].Queries)
+}
+
+func TestChatToResponse_WithExtraOutputItems_Multiple(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-xyz",
+		"object": "chat.completion",
+		"created": 1700000002,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "found it"},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	extra := []OutputItem{
+		{Type: "web_search_call", ID: "ws_1", Status: "completed"},
+		{Type: "web_search_call", ID: "ws_2", Status: "completed"},
+	}
+
+	result, err := ChatToResponse([]byte(ccBody), WithExtraOutputItems(extra))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	require.Len(t, resp.Output, 3)
+	assert.Equal(t, "message", resp.Output[0].Type)
+	assert.Equal(t, "ws_1", resp.Output[1].ID)
+	assert.Equal(t, "ws_2", resp.Output[2].ID)
+}
+
+func TestOutputContentMarshalJSON_TextAlwaysPresent(t *testing.T) {
+	// Regression: output_text content must always include "text" in JSON even when
+	// the value is an empty string. When "text" is absent the Python OpenAI SDK parses
+	// the attribute as None, causing TypeError in "".join([None, ...]).
+	cases := []struct {
+		name     string
+		content  OutputContent
+		wantText interface{} // expected value of "text" key in JSON
+	}{
+		{
+			name:     "non-empty text",
+			content:  OutputContent{Type: "output_text", Text: "Paris"},
+			wantText: "Paris",
+		},
+		{
+			name:     "empty text",
+			content:  OutputContent{Type: "output_text", Text: ""},
+			wantText: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.content)
+			require.NoError(t, err)
+			var m map[string]interface{}
+			require.NoError(t, json.Unmarshal(b, &m))
+			val, ok := m["text"]
+			assert.True(t, ok, `"text" key must be present in output_text JSON`)
+			assert.Equal(t, tc.wantText, val)
+			// annotations must also be present (even empty)
+			_, hasAnnotations := m["annotations"]
+			assert.True(t, hasAnnotations, `"annotations" key must be present for output_text`)
+		})
+	}
+}
+
+func TestOutputContentMarshalJSON_NonOutputTextOmitsEmptyText(t *testing.T) {
+	// For non-output_text types, empty text is still omitted (no change to existing behaviour).
+	c := OutputContent{Type: "summary_text", Text: ""}
+	b, err := json.Marshal(c)
+	require.NoError(t, err)
+	var m map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &m))
+	_, hasText := m["text"]
+	assert.False(t, hasText, `"text" key must be absent for non-output_text when empty`)
+}
+
+func TestChatToResponse_WithoutOptions_Unchanged(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-base",
+		"object": "chat.completion",
+		"created": 1700000003,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "ok"},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	// No extra items — only the message
+	require.Len(t, resp.Output, 1)
+	assert.Equal(t, "message", resp.Output[0].Type)
 }

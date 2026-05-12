@@ -3,20 +3,21 @@ package anthropic
 // AnthropicRequest represents a request to the Anthropic Messages API.
 // Serialized directly to JSON for HTTP requests (no SDK dependency).
 type AnthropicRequest struct {
-	Model         string             `json:"model"`
-	Messages      []AnthropicMessage `json:"messages"`
-	System        interface{}        `json:"system,omitempty"` // string or []ContentBlock
-	MaxTokens     int                `json:"max_tokens"`
-	Temperature   *float64           `json:"temperature,omitempty"`
-	TopP          *float64           `json:"top_p,omitempty"`
-	TopK          *int               `json:"top_k,omitempty"`
-	StopSequences []string           `json:"stop_sequences,omitempty"`
-	Stream        bool               `json:"stream,omitempty"`
-	Tools         []AnthropicTool    `json:"tools,omitempty"`
-	ToolChoice    interface{}        `json:"tool_choice,omitempty"`
-	Thinking      *AnthropicThinking `json:"thinking,omitempty"`
-	Metadata      *AnthropicMetadata `json:"metadata,omitempty"`
-	AnthropicBeta []string           `json:"anthropic_beta,omitempty"`
+	Model         string                 `json:"model"`
+	Messages      []AnthropicMessage     `json:"messages"`
+	System        interface{}            `json:"system,omitempty"` // string or []ContentBlock
+	MaxTokens     int                    `json:"max_tokens"`
+	Temperature   *float64               `json:"temperature,omitempty"`
+	TopP          *float64               `json:"top_p,omitempty"`
+	TopK          *int                   `json:"top_k,omitempty"`
+	StopSequences []string               `json:"stop_sequences,omitempty"`
+	Stream        bool                   `json:"stream,omitempty"`
+	Tools         []AnthropicTool        `json:"tools,omitempty"`
+	ToolChoice    interface{}            `json:"tool_choice,omitempty"`
+	Thinking      *AnthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig  *AnthropicOutputConfig `json:"output_config,omitempty"`
+	Metadata      *AnthropicMetadata     `json:"metadata,omitempty"`
+	AnthropicBeta []string               `json:"anthropic_beta,omitempty"`
 }
 
 // AnthropicMessage represents a single message in the Anthropic conversation.
@@ -80,10 +81,17 @@ type AnthropicTool struct {
 }
 
 // AnthropicThinking controls extended thinking / reasoning in Anthropic models.
+//   - Claude 3.x: Type="enabled", BudgetTokens=N
+//   - Claude 4+:  Type="adaptive", paired with AnthropicOutputConfig.Effort
 type AnthropicThinking struct {
-	Type         string `json:"type"`                    // "enabled" or "disabled"
-	BudgetTokens int    `json:"budget_tokens,omitempty"` // token budget when enabled
-	Display      string `json:"display,omitempty"`       // "full", "minimal", "none" (controls thinking block visibility)
+	Type         string `json:"type"`                    // "enabled", "adaptive", or "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"` // token budget (Claude 3.x only)
+	Display      string `json:"display,omitempty"`       // "full", "minimal", "none"
+}
+
+// AnthropicOutputConfig controls output-level settings for Claude 4+ models.
+type AnthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"` // "low", "medium", "high", "xhigh", "max"
 }
 
 // AnthropicMetadata carries per-request metadata sent to Anthropic.

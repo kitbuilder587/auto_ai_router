@@ -371,6 +371,51 @@ func TestStreamTransform_NoDoneEmitsCompletion(t *testing.T) {
 	assert.Contains(t, result, "response.output_text.done")
 }
 
+func TestStreamTransform_ResponseEventsIncludeRequiredSchemaFields(t *testing.T) {
+	stopReason := "stop"
+
+	input := buildSSEChunk(buildChatChunk("Hello", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(buildUsageChunk(5, 2, 7)) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gpt-4o")
+	require.NoError(t, err)
+
+	result := output.String()
+	for _, eventName := range []string{"response.created", "response.in_progress", "response.completed"} {
+		idx := strings.Index(result, "event: "+eventName+"\n")
+		require.NotEqual(t, -1, idx, "missing event %s", eventName)
+
+		afterEvent := result[idx:]
+		dataIdx := strings.Index(afterEvent, "data: ")
+		require.NotEqual(t, -1, dataIdx)
+
+		dataLine := afterEvent[dataIdx+6:]
+		endIdx := strings.Index(dataLine, "\n")
+		require.Greater(t, endIdx, 0)
+		dataLine = dataLine[:endIdx]
+
+		var event map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(dataLine), &event))
+		_, hasSeq := event["sequence_number"]
+		assert.True(t, hasSeq)
+
+		resp, ok := event["response"].(map[string]interface{})
+		require.True(t, ok, "event %s must include response object", eventName)
+		for _, key := range []string{
+			"completed_at", "truncation", "text", "top_p", "temperature",
+			"service_tier", "presence_penalty", "frequency_penalty",
+			"top_logprobs", "reasoning", "max_output_tokens", "max_tool_calls",
+			"background", "safety_identifier", "prompt_cache_key",
+		} {
+			_, ok := resp[key]
+			assert.True(t, ok, "response.%s must be present in %s", key, eventName)
+		}
+	}
+}
+
 func TestStreamTransform_ToolCall(t *testing.T) {
 	// Build a tool call streaming sequence
 	roleChunk := buildChatChunkWithRole("assistant")

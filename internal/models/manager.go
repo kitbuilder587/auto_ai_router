@@ -252,6 +252,18 @@ func isNativeResponsesModel(modelID string) bool {
 	return false
 }
 
+// providerPassthroughDefaults maps provider types to their default passthrough behaviour.
+// OpenAI natively supports /v1/responses so it defaults to true.
+// Vertex AI and Anthropic use the native ProviderResponses converter (Phase 4) instead.
+var providerPassthroughDefaults = map[config.ProviderType]bool{
+	config.ProviderTypeOpenAI:    true,
+	config.ProviderTypeVertexAI:  false,
+	config.ProviderTypeGemini:    false,
+	config.ProviderTypeAnthropic: false,
+	config.ProviderTypeBedrock:   false,
+	config.ProviderTypeProxy:     false,
+}
+
 // IsPassthroughResponses reports whether Responses API requests for modelID
 // should be forwarded to the provider's native /v1/responses endpoint as-is,
 // without converting to Chat Completions format.
@@ -264,6 +276,25 @@ func (m *Manager) IsPassthroughResponses(modelID string) bool {
 	defer m.mu.RUnlock()
 	if v, ok := m.modelPassthroughResponses[modelID]; ok && v != nil {
 		return *v
+	}
+	return isNativeResponsesModel(modelID)
+}
+
+// IsPassthroughResponsesForProvider reports whether Responses API requests for modelID
+// on the given provider should use the native /v1/responses passthrough.
+//
+// Priority:
+//  1. Explicit config override (passthrough_responses: true/false in models[])
+//  2. Provider default (openai=true, others=false)
+//  3. Auto-detect by model name prefix
+func (m *Manager) IsPassthroughResponsesForProvider(modelID string, providerType config.ProviderType) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if v, ok := m.modelPassthroughResponses[modelID]; ok && v != nil {
+		return *v
+	}
+	if def, ok := providerPassthroughDefaults[providerType]; ok {
+		return def
 	}
 	return isNativeResponsesModel(modelID)
 }

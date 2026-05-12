@@ -196,6 +196,169 @@ func outputToInputItems(output []OutputItem) []interface{} {
 				"name":      item.Name,
 				"arguments": item.Arguments,
 			})
+
+		case "reasoning":
+			// Skip reasoning items that have neither summary nor encrypted_content —
+			// there's nothing useful to pass to the next turn.
+			if len(item.Summary) == 0 && item.EncryptedContent == "" {
+				continue
+			}
+			reasoningItem := map[string]interface{}{
+				"type": "reasoning",
+			}
+			if item.ID != "" {
+				reasoningItem["id"] = item.ID
+			}
+			// Build summary array (provider-agnostic; Anthropic/Vertex will each
+			// extract what they need from it).
+			if len(item.Summary) > 0 {
+				summary := make([]interface{}, 0, len(item.Summary))
+				for _, s := range item.Summary {
+					if s.Text != "" {
+						summary = append(summary, map[string]interface{}{
+							"type": s.Type,
+							"text": s.Text,
+						})
+					}
+				}
+				if len(summary) > 0 {
+					reasoningItem["summary"] = summary
+				}
+			}
+			// Preserve encrypted_content for same-provider round-trips (Anthropic).
+			// Vertex ignores this field; OpenAI passthrough uses it verbatim.
+			if item.EncryptedContent != "" {
+				reasoningItem["encrypted_content"] = item.EncryptedContent
+			}
+			items = append(items, reasoningItem)
+
+		case "computer_call":
+			callItem := map[string]interface{}{
+				"type":    "computer_call",
+				"call_id": item.CallID,
+				"name":    item.Name,
+				"action":  item.Action,
+			}
+			if item.ID != "" {
+				callItem["id"] = item.ID
+			}
+			items = append(items, callItem)
+
+		case "computer_call_output":
+			outputItem := map[string]interface{}{
+				"type":    "computer_call_output",
+				"call_id": item.CallID,
+			}
+			if item.ID != "" {
+				outputItem["id"] = item.ID
+			}
+			if item.Output != nil {
+				outputItem["output"] = item.Output
+			}
+			items = append(items, outputItem)
+
+		case "web_search_call":
+			wsItem := map[string]interface{}{
+				"type": "web_search_call",
+			}
+			if item.ID != "" {
+				wsItem["id"] = item.ID
+			}
+			if len(item.Queries) > 0 {
+				wsItem["queries"] = item.Queries
+			}
+			items = append(items, wsItem)
+
+		case "code_interpreter_call":
+			ciItem := map[string]interface{}{
+				"type": "code_interpreter_call",
+				"code": item.Code,
+			}
+			if item.ID != "" {
+				ciItem["id"] = item.ID
+			}
+			if item.Outputs != nil {
+				ciItem["outputs"] = item.Outputs
+			}
+			items = append(items, ciItem)
+
+		case "file_search_call":
+			fsItem := map[string]interface{}{
+				"type": "file_search_call",
+			}
+			if item.ID != "" {
+				fsItem["id"] = item.ID
+			}
+			if item.Status != "" {
+				fsItem["status"] = item.Status
+			}
+			if len(item.Queries) > 0 {
+				fsItem["queries"] = item.Queries
+			}
+			if item.Results != nil {
+				fsItem["results"] = item.Results
+			}
+			items = append(items, fsItem)
+
+		case "image_generation_call":
+			igItem := map[string]interface{}{
+				"type": "image_generation_call",
+			}
+			if item.ID != "" {
+				igItem["id"] = item.ID
+			}
+			if item.Status != "" {
+				igItem["status"] = item.Status
+			}
+			if item.Result != "" {
+				igItem["result"] = item.Result
+			}
+			if item.RevisedPrompt != "" {
+				igItem["revised_prompt"] = item.RevisedPrompt
+			}
+			items = append(items, igItem)
+
+		case "mcp_tool_call":
+			mcpItem := map[string]interface{}{
+				"type":         "mcp_tool_call",
+				"call_id":      item.CallID,
+				"name":         item.Name,
+				"arguments":    item.Arguments,
+				"server_label": item.ServerLabel,
+			}
+			if item.ID != "" {
+				mcpItem["id"] = item.ID
+			}
+			if item.Error != nil {
+				mcpItem["error"] = item.Error
+			}
+			items = append(items, mcpItem)
+
+		case "local_shell_call":
+			lsItem := map[string]interface{}{
+				"type":    "local_shell_call",
+				"call_id": item.CallID,
+				"action":  item.Action,
+			}
+			if item.ID != "" {
+				lsItem["id"] = item.ID
+			}
+			if item.Status != "" {
+				lsItem["status"] = item.Status
+			}
+			items = append(items, lsItem)
+
+		case "compaction":
+			compItem := map[string]interface{}{
+				"type": "compaction",
+			}
+			if item.ID != "" {
+				compItem["id"] = item.ID
+			}
+			if item.EncryptedContent != "" {
+				compItem["encrypted_content"] = item.EncryptedContent
+			}
+			items = append(items, compItem)
 		}
 	}
 	return items
@@ -266,28 +429,69 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 	// 5. Normalize tools: nested Chat Completions function format → flat Responses API format.
 	// Input:  {type:"function", function:{name:"...", description:"...", parameters:{...}}}
 	// Output: {type:"function", name:"...", description:"...", parameters:{...}}
+	// Empty tools array is removed — some providers reject tools:[].
 	if toolsVal, ok := raw["tools"]; ok {
 		if toolsArr, ok := toolsVal.([]interface{}); ok {
-			normalized := make([]interface{}, len(toolsArr))
-			for i, t := range toolsArr {
-				toolMap, ok := t.(map[string]interface{})
-				if !ok {
-					normalized[i] = t
-					continue
-				}
-				if toolMap["type"] == "function" {
-					if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
-						flat := map[string]interface{}{"type": "function"}
-						for k, v := range funcDef {
-							flat[k] = v
-						}
-						normalized[i] = flat
+			if len(toolsArr) == 0 {
+				delete(raw, "tools")
+				delete(raw, "tool_choice")
+			} else {
+				normalized := make([]interface{}, len(toolsArr))
+				for i, t := range toolsArr {
+					toolMap, ok := t.(map[string]interface{})
+					if !ok {
+						normalized[i] = t
 						continue
 					}
+					if toolMap["type"] == "function" {
+						if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
+							flat := map[string]interface{}{"type": "function"}
+							for k, v := range funcDef {
+								flat[k] = v
+							}
+							normalized[i] = flat
+							continue
+						}
+					}
+					normalized[i] = t
 				}
-				normalized[i] = t
+				raw["tools"] = normalized
 			}
-			raw["tools"] = normalized
+		}
+	}
+
+	// 6. Convert compaction items to user messages.
+	// OpenAI's native Responses API does not support type:"compaction" items.
+	// Convert them to standard user messages carrying the compacted context summary.
+	if inputVal, ok := raw["input"]; ok {
+		if inputArr, ok := inputVal.([]interface{}); ok {
+			out := make([]interface{}, 0, len(inputArr))
+			changed := false
+			for _, item := range inputArr {
+				itemMap, ok := item.(map[string]interface{})
+				if !ok || itemMap["type"] != "compaction" {
+					out = append(out, item)
+					continue
+				}
+				changed = true
+				ec, _ := itemMap["encrypted_content"].(string)
+				if ec != "" {
+					out = append(out, map[string]interface{}{
+						"type": "message",
+						"role": "user",
+						"content": []interface{}{
+							map[string]interface{}{
+								"type": "input_text",
+								"text": "[Conversation context summary]: " + ec,
+							},
+						},
+					})
+				}
+				// Skip empty compaction items
+			}
+			if changed {
+				raw["input"] = out
+			}
 		}
 	}
 
@@ -444,6 +648,248 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			flushToolCalls()
 			msg := convertFunctionCallOutput(itemMap)
 			messages = append(messages, msg)
+
+		case "reasoning":
+			// Serialize reasoning as a synthetic assistant message using summary text.
+			// encrypted_content is dropped — it is only meaningful to the original provider.
+			flushToolCalls()
+			var textParts []interface{}
+			if summary, ok := itemMap["summary"].([]interface{}); ok {
+				for _, s := range summary {
+					sm, ok := s.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					text, _ := sm["text"].(string)
+					if text != "" {
+						textParts = append(textParts, map[string]interface{}{
+							"type": "text",
+							"text": "[Reasoning]: " + text,
+						})
+					}
+				}
+			}
+			if len(textParts) > 0 {
+				messages = append(messages, map[string]interface{}{
+					"role":    "assistant",
+					"content": textParts,
+				})
+			}
+
+		case "web_search_call":
+			// Serialize as a synthetic function_call + tool result pair.
+			flushToolCalls()
+			callID, _ := itemMap["call_id"].(string)
+			if callID == "" {
+				callID, _ = itemMap["id"].(string)
+			}
+			if callID != "" {
+				name, _ := itemMap["name"].(string)
+				if name == "" {
+					name = "web_search"
+				}
+				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+					"id":   callID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      name,
+						"arguments": "{}",
+					},
+				})
+				flushToolCalls()
+				var outputStr string
+				if results := itemMap["results"]; results != nil {
+					if b, err := json.Marshal(results); err == nil {
+						outputStr = string(b)
+					}
+				}
+				messages = append(messages, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": callID,
+					"content":      outputStr,
+				})
+			}
+
+		case "computer_call_output":
+			// Convert screenshot/output to a user message with image content.
+			flushToolCalls()
+			var content []interface{}
+			if output, ok := itemMap["output"].(map[string]interface{}); ok {
+				outputType, _ := output["type"].(string)
+				switch outputType {
+				case "computer_screenshot":
+					// Schema format: image_url is a nested {url: "...", detail: "..."} object.
+					if imgURLMap, ok := output["image_url"].(map[string]interface{}); ok {
+						if imgURL, ok := imgURLMap["url"].(string); ok && imgURL != "" {
+							content = append(content, map[string]interface{}{
+								"type": "image_url",
+								"image_url": map[string]interface{}{
+									"url": imgURL,
+								},
+							})
+						}
+					}
+				default:
+					// Legacy/proxy format: image_url is a plain string.
+					if imgURL, ok := output["image_url"].(string); ok && imgURL != "" {
+						content = append(content, map[string]interface{}{
+							"type": "image_url",
+							"image_url": map[string]interface{}{
+								"url": imgURL,
+							},
+						})
+					}
+				}
+			}
+			if len(content) == 0 {
+				content = append(content, map[string]interface{}{
+					"type": "text",
+					"text": "[computer_call_output]",
+				})
+			}
+			messages = append(messages, map[string]interface{}{
+				"role":    "user",
+				"content": content,
+			})
+
+		case "code_interpreter_call":
+			// Serialize as a synthetic function_call + tool result pair.
+			flushToolCalls()
+			callID, _ := itemMap["call_id"].(string)
+			if callID == "" {
+				callID, _ = itemMap["id"].(string)
+			}
+			if callID != "" {
+				code, _ := itemMap["code"].(string)
+				argsJSON, _ := json.Marshal(map[string]interface{}{"code": code})
+				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+					"id":   callID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "code_interpreter",
+						"arguments": string(argsJSON),
+					},
+				})
+				flushToolCalls()
+				var outputStr string
+				if outputs := itemMap["outputs"]; outputs != nil {
+					if b, err := json.Marshal(outputs); err == nil {
+						outputStr = string(b)
+					}
+				}
+				messages = append(messages, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": callID,
+					"content":      outputStr,
+				})
+			}
+
+		case "file_search_call":
+			// Serialize search results as a synthetic function_call + tool result pair.
+			flushToolCalls()
+			callID, _ := itemMap["call_id"].(string)
+			if callID == "" {
+				callID, _ = itemMap["id"].(string)
+			}
+			if callID != "" {
+				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+					"id":   callID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      "file_search",
+						"arguments": "{}",
+					},
+				})
+				flushToolCalls()
+				var outputStr string
+				if results := itemMap["results"]; results != nil {
+					if b, err := json.Marshal(results); err == nil {
+						outputStr = string(b)
+					}
+				}
+				messages = append(messages, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": callID,
+					"content":      outputStr,
+				})
+			}
+
+		case "image_generation_call":
+			// Emit the generated image as an assistant message with an image_url part.
+			flushToolCalls()
+			result, _ := itemMap["result"].(string)
+			if result != "" {
+				messages = append(messages, map[string]interface{}{
+					"role": "assistant",
+					"content": []interface{}{
+						map[string]interface{}{
+							"type": "image_url",
+							"image_url": map[string]interface{}{
+								"url": result,
+							},
+						},
+					},
+				})
+			}
+
+		case "mcp_tool_call":
+			// Serialize as a synthetic function_call + tool result pair.
+			flushToolCalls()
+			callID, _ := itemMap["call_id"].(string)
+			if callID == "" {
+				callID, _ = itemMap["id"].(string)
+			}
+			if callID != "" {
+				name, _ := itemMap["name"].(string)
+				serverLabel, _ := itemMap["server_label"].(string)
+				if name == "" {
+					name = "mcp_tool"
+				}
+				if serverLabel != "" {
+					name = serverLabel + "_" + name
+				}
+				var argsStr string
+				if input := itemMap["input"]; input != nil {
+					if b, err := json.Marshal(input); err == nil {
+						argsStr = string(b)
+					}
+				}
+				if argsStr == "" {
+					argsStr = "{}"
+				}
+				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+					"id":   callID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      name,
+						"arguments": argsStr,
+					},
+				})
+				flushToolCalls()
+				var outputStr string
+				if output := itemMap["output"]; output != nil {
+					if b, err := json.Marshal(output); err == nil {
+						outputStr = string(b)
+					}
+				}
+				messages = append(messages, map[string]interface{}{
+					"role":         "tool",
+					"tool_call_id": callID,
+					"content":      outputStr,
+				})
+			}
+
+		case "compaction":
+			// A compaction item carries an encrypted_content summary of prior context.
+			// Inject it as a user message so the model has the compacted context.
+			flushToolCalls()
+			ec, _ := itemMap["encrypted_content"].(string)
+			if ec != "" {
+				messages = append(messages, map[string]interface{}{
+					"role":    "user",
+					"content": "[Conversation context summary]: " + ec,
+				})
+			}
 
 		default:
 			// Flush any pending tool calls before a regular message
@@ -630,12 +1076,12 @@ func convertTools(raw map[string]interface{}) error {
 		toolType, _ := toolMap["type"].(string)
 
 		if toolType != "function" {
-			// Non-function tools (web_search_preview, computer_use, google_search_retrieval,
-			// code_execution, etc.) are Responses-API built-in constructs.
-			// Pass them through as-is: provider-specific converters downstream
-			// (Vertex, Anthropic, OpenAI) know which tools they support and will
-			// map or drop them accordingly.
-			converted = append(converted, toolMap)
+			// Non-function tools (web_search_preview, file_search, code_interpreter,
+			// computer_use, etc.) are Responses-API built-in constructs with no
+			// equivalent in the generic Chat Completions tools array. Providers that
+			// reach this path (converted fallback) don't understand these types and
+			// will reject the request. Skip them — provider-specific native paths
+			// (Vertex, Anthropic) handle built-in tools through their own converters.
 			continue
 		}
 
@@ -671,6 +1117,8 @@ func convertTools(raw map[string]interface{}) error {
 		raw["tools"] = converted
 	} else {
 		delete(raw, "tools")
+		// tool_choice without tools is invalid for Chat Completions providers.
+		delete(raw, "tool_choice")
 	}
 	return nil
 }
@@ -787,4 +1235,6 @@ func deleteResponsesFields(raw map[string]interface{}) {
 	delete(raw, "service_tier")
 	delete(raw, "background")
 	delete(raw, "prompt")
+	delete(raw, "prompt_cache_key")
+	delete(raw, "prompt_cache_retention")
 }

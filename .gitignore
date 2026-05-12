@@ -35,3 +35,4 @@ examples/extract_litellm_models_and_creds.py
 anyllm_example.py
 logs/*.txt
 bedrock_docs/
+skills/

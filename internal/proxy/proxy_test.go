@@ -86,7 +86,7 @@ func TestProxyRequest_InvalidMasterKey(t *testing.T) {
 
 func TestProxyRequest_ValidRequest(t *testing.T) {
 	// Create mock upstream server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify upstream receives correct Authorization header
 		assert.Contains(t, r.Header.Get("Authorization"), "Bearer upstream-key-")
 
@@ -114,7 +114,7 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 
 func TestProxyRequest_WithModel(t *testing.T) {
 	// Create mock upstream server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"result": "ok"})
 	}))
@@ -199,7 +199,7 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 
 func TestProxyRequest_UpstreamError(t *testing.T) {
 	// Create mock server that returns error
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error": "upstream error"}`))
 	}))
@@ -220,7 +220,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 
 func TestProxyRequest_Streaming(t *testing.T) {
 	// Create mock server that returns streaming response
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
@@ -634,7 +634,7 @@ func TestDecodeResponseBody(t *testing.T) {
 
 func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	// Create mock server to verify headers
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify custom headers are forwarded
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "custom-value", r.Header.Get("X-Custom-Header"))
@@ -664,7 +664,7 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 }
 
 func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 
 		var bodyMap map[string]interface{}
@@ -707,7 +707,7 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 
 func TestProxyRequest_QueryParameters(t *testing.T) {
 	// Create mock server to verify query params
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "value1", r.URL.Query().Get("param1"))
 		assert.Equal(t, "value2", r.URL.Query().Get("param2"))
 
@@ -729,7 +729,7 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 }
 
 func TestVisualHealthCheck(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer mockServer.Close()

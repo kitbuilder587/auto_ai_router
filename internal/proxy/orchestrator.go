@@ -32,7 +32,8 @@ type orchestratedRequest struct {
 	cred                 *config.CredentialConfig
 	isResponsesAPI       bool
 	convertedResp        bool
-	passthroughResponses bool                         // true for codex models: Responses API forwarded as-is (no Chat Completions conversion)
+	passthroughResponses bool                         // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
+	nativeResponses      bool                         // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
 }
 
@@ -69,6 +70,7 @@ func (p *Proxy) orchestrateRequest(
 
 	convertedResp := false
 	passthroughResponses := false
+	nativeResponses := false
 	var responsesMetadata *responses.ResponsesMetadata
 	var prevEntry *responsestore.StoredEntry
 	preferredCredentialName := ""
@@ -139,21 +141,28 @@ func (p *Proxy) orchestrateRequest(
 		// This must happen after any history prepending but before RequestToChat removes "input".
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(body)
 
-		if p.modelManager.IsPassthroughResponses(modelID) {
+		switch {
+		case p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
 			// Passthrough: forward to the provider's native /v1/responses endpoint.
-			// Enabled automatically for codex models; can be overridden per-model via
+			// Default for OpenAI credentials; can be overridden per-model via
 			// passthrough_responses: true/false in the models[] config section.
 			// PrepareCodexPassthrough strips proxy-internal fields and normalises the
 			// body to match what OpenAI's Responses API actually accepts.
 			body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
 			passthroughResponses = true
 			p.logger.Debug("Native Responses API passthrough",
-				"model", modelID, "streaming", streaming)
-		} else {
-			// Non-codex: convert to Chat Completions format so all providers work uniformly.
-			// Even "openai"-type credentials may point to Azure OpenAI or other
-			// OpenAI-compatible endpoints that don't support the native /v1/responses
-			// endpoint. Chat Completions API is universally supported.
+				"model", modelID, "provider", cred.Type, "streaming", streaming)
+
+		case responses.HasNativeResponsesForModel(cred.Type, realModelID):
+			// Provider has a native Responses converter (Vertex AI, Anthropic).
+			// Keep body in Responses API format — it will be converted by
+			// ProviderResponses.RequestFrom() in proxy.go.
+			nativeResponses = true
+			p.logger.Debug("Native Responses converter path",
+				"model", modelID, "provider", cred.Type, "streaming", streaming)
+
+		default:
+			// Fallback: convert to Chat Completions format so all providers work uniformly.
 			chatBody, convErr := responses.RequestToChat(body)
 			if convErr != nil {
 				p.logger.Error("Failed to convert Responses API request", "error", convErr)
@@ -197,6 +206,7 @@ func (p *Proxy) orchestrateRequest(
 		isResponsesAPI:       isResponsesAPI,
 		convertedResp:        convertedResp,
 		passthroughResponses: passthroughResponses,
+		nativeResponses:      nativeResponses,
 		responsesMetadata:    responsesMetadata,
 	}, true
 }
@@ -421,9 +431,11 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	errCode := http.StatusTooManyRequests
-	errorMsg := fmt.Sprintf("No credentials available: %v", err)
+	var errorMsg string
 	if errors.Is(err, balancer.ErrRateLimitExceeded) || errors.Is(fallbackErr, balancer.ErrRateLimitExceeded) {
 		errorMsg = "Rate limit exceeded"
+	} else {
+		errorMsg = fmt.Sprintf("No credentials available for model %s", modelID)
 	}
 
 	p.logger.Error("No credentials available (regular and fallback)",

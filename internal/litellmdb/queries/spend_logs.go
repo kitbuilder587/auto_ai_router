@@ -33,7 +33,6 @@ const (
 			requester_ip_address,
 			status,
 			session_id,
-			agent_id,
 			mcp_namespaced_tool_name,
 			request_tags,
 			messages,
@@ -41,7 +40,7 @@ const (
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, $25, NULL, NULL
+			$21, $22, $23, $24, NULL, NULL
 		)
 		ON CONFLICT (request_id) DO NOTHING
 	`
@@ -74,7 +73,6 @@ const (
 			team_id,
 			organization_id,
 			end_user,
-			agent_id,
 			request_tags
 		FROM "LiteLLM_SpendLogs"
 		WHERE request_id = ANY($1)
@@ -213,39 +211,6 @@ const (
 			updated_at = now()
 	`
 
-	// QueryUpsertDailyAgentSpend upserts into LiteLLM_DailyAgentSpend
-	QueryUpsertDailyAgentSpend = `
-		INSERT INTO "LiteLLM_DailyAgentSpend" (
-			id,
-			agent_id,
-			date,
-			api_key,
-			model,
-			model_group,
-			custom_llm_provider,
-			mcp_namespaced_tool_name,
-			endpoint,
-			prompt_tokens,
-			completion_tokens,
-			spend,
-			api_requests,
-			successful_requests,
-			failed_requests,
-			created_at,
-			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
-		ON CONFLICT (agent_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
-		DO UPDATE SET
-			model_group = EXCLUDED.model_group,
-			prompt_tokens = "LiteLLM_DailyAgentSpend".prompt_tokens + EXCLUDED.prompt_tokens,
-			completion_tokens = "LiteLLM_DailyAgentSpend".completion_tokens + EXCLUDED.completion_tokens,
-			spend = "LiteLLM_DailyAgentSpend".spend + EXCLUDED.spend,
-			api_requests = "LiteLLM_DailyAgentSpend".api_requests + EXCLUDED.api_requests,
-			successful_requests = "LiteLLM_DailyAgentSpend".successful_requests + EXCLUDED.successful_requests,
-			failed_requests = "LiteLLM_DailyAgentSpend".failed_requests + EXCLUDED.failed_requests,
-			updated_at = now()
-	`
-
 	// QueryUpsertDailyTagSpend upserts into LiteLLM_DailyTagSpend
 	QueryUpsertDailyTagSpend = `
 		INSERT INTO "LiteLLM_DailyTagSpend" (
@@ -289,7 +254,7 @@ const (
 )
 
 // Number of parameters per SpendLogEntry in batch insert
-const spendLogParamCount = 25
+const spendLogParamCount = 24
 
 // BuildBatchInsertQuery builds a query for batch INSERT
 func BuildBatchInsertQuery(count int) string {
@@ -307,7 +272,7 @@ func BuildBatchInsertQuery(count int) string {
 			model, model_id, model_group, custom_llm_provider, api_base,
 			"user", "metadata", team_id, organization_id, end_user,
 			requester_ip_address, status, session_id,
-			agent_id, mcp_namespaced_tool_name, request_tags,
+			mcp_namespaced_tool_name, request_tags,
 			messages, response
 		) VALUES `)
 

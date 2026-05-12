@@ -1,475 +1,308 @@
 # Responses API
 
-Auto AI Router supports the [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses) at the `/v1/responses` endpoint. Requests are automatically converted to Chat Completions format internally, so all configured providers (OpenAI, Vertex AI, Anthropic) work transparently.
+Auto AI Router implements the [OpenAI Responses API](../refs/openai_responses_api.md) and routes requests natively to Anthropic, Vertex AI, and AWS Bedrock — without converting through Chat Completions format as an intermediary.
 
-## How It Works
+## Endpoints
 
-Detection is automatic: if the request body contains an `input` field and no `messages` field, it is treated as a Responses API request. The proxy then:
+| Method | Path                    | Description                                    |
+| ------ | ----------------------- | ---------------------------------------------- |
+| `POST` | `/v1/responses`         | Create a response (HTTP, optionally streaming) |
+| `GET`  | `/v1/responses`         | Create a response via WebSocket                |
+| `GET`  | `/v1/responses/{id}`    | Retrieve a stored response by ID               |
+| `POST` | `/v1/responses/compact` | Compact a conversation into a summary item     |
 
-1. Converts `input` → `messages` (Chat Completions format)
-2. Converts all Responses-specific parameters
-3. Forwards to the backend provider
-4. Converts the response back to Responses API format
+## Request Parameters
 
-The OpenAI SDK's `client.responses.create()` and `client.responses.stream()` work without any changes.
+All standard Responses API parameters are supported. The table below lists the full set recognized by the router:
 
-## Conversion Architecture
+| Parameter                | Type             | Description                                             |
+| ------------------------ | ---------------- | ------------------------------------------------------- |
+| `model`                  | string           | Model ID (required)                                     |
+| `input`                  | string \| array  | Conversation input: plain string or input items         |
+| `instructions`           | string \| null   | System-level instructions prepended to the request      |
+| `max_output_tokens`      | integer          | Maximum tokens in the response                          |
+| `max_tool_calls`         | integer          | Maximum number of tool calls per response               |
+| `temperature`            | float            | Sampling temperature                                    |
+| `top_p`                  | float            | Top-p (nucleus) sampling                                |
+| `presence_penalty`       | float            | Presence penalty                                        |
+| `frequency_penalty`      | float            | Frequency penalty                                       |
+| `top_logprobs`           | integer          | Number of log probabilities to return                   |
+| `stop`                   | string \| array  | Stop sequences                                          |
+| `stream`                 | boolean          | Enable SSE streaming                                    |
+| `background`             | boolean          | Run as a background job                                 |
+| `tools`                  | array            | Tools available to the model                            |
+| `tool_choice`            | string \| object | Tool selection mode                                     |
+| `reasoning`              | object           | Reasoning/thinking configuration                        |
+| `text`                   | object           | Text output configuration (e.g. `response_format`)      |
+| `store`                  | boolean          | Persist the response (enables `GET /v1/responses/{id}`) |
+| `previous_response_id`   | string           | Continue a multi-turn conversation                      |
+| `metadata`               | object           | Key-value metadata attached to the response             |
+| `include`                | array            | Extra fields to include in the response                 |
+| `truncation`             | string           | Truncation mode (`"auto"` \| `"disabled"`)              |
+| `user`                   | string           | User identifier                                         |
+| `parallel_tool_calls`    | boolean          | Allow parallel tool calls                               |
+| `service_tier`           | string           | Service tier hint                                       |
+| `prompt_cache_key`       | string           | Cache key for prompt caching                            |
+| `prompt_cache_retention` | string           | Cache retention duration                                |
+| `conversation`           | interface        | Conversation context (passthrough)                      |
 
-### High-Level Flow
+!!! note "Provider coverage"
+Not all providers support every parameter. See the [Provider Support](#provider-support) table below.
 
-```mermaid
-flowchart LR
-    Client["Client (openai SDK)"]
-    Detect["IsResponsesAPI() has 'input' && !has 'messages'"]
-    IsPassthrough{"IsPassthroughResponses()?"}
-    ConvReq["RequestToChat() convert request"]
-    Providers["Backend Providers (OpenAI / Vertex AI / Anthropic)"]
-    ConvResp["ChatToResponse() or TransformChatStreamToResponses()"]
-    Passthrough["Native /v1/responses passthrough"]
-    Client2["Client (Response object)"]
+## Content Types
 
-    Client -->|"POST /v1/responses Responses API body"| Detect
-    Detect -->|"yes"| IsPassthrough
-    Detect -->|"no → pass through"| Providers
-    IsPassthrough -->|"yes"| Passthrough
-    IsPassthrough -->|"no"| ConvReq
-    Passthrough -->|"Responses API body (proxy fields stripped)"| Providers
-    ConvReq -->|"Chat Completions body"| Providers
-    Providers -->|"Chat Completions response (streaming or non-streaming)"| ConvResp
-    Providers -->|"Responses API response (passthrough)"| Client2
-    ConvResp -->|"Responses API response"| Client2
+The `input` array accepts items of different types. Supported `ContentPart` types within messages:
+
+| `type`        | Fields                                                       | Description               |
+| ------------- | ------------------------------------------------------------ | ------------------------- |
+| `input_text`  | `text`                                                       | Plain text                |
+| `input_image` | `image_url` (string or `{url, detail}`), `file_id`, `detail` | Image from URL or file ID |
+| `input_audio` | `data` (base64), `format`                                    | Audio clip                |
+| `input_file`  | `file_id`, `filename`, `file_url`                            | File reference            |
+
+Input items can also be function call / function call output items for multi-turn tool use:
+
+```json
+{"type": "function_call", "call_id": "call_abc", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"}
+{"type": "function_call_output", "call_id": "call_abc", "output": "{\"temp\":22}"}
 ```
 
-### Native Passthrough Models
+## Multi-Turn Conversations
 
-Some models natively support the `/v1/responses` endpoint and can be forwarded without Chat Completions conversion. The proxy determines whether to use passthrough via `IsPassthroughResponses()`:
+### Storing Responses
 
-- **Auto-detect**: models whose name contains `codex` (e.g. `gpt-5.3-codex`) default to passthrough.
-- **Explicit config**: any model can be forced to passthrough or forced to conversion via `passthrough_responses` in the `models` config section.
+Set `"store": true` to persist a response. A stored response can be retrieved later:
 
-```yaml
-models:
-  - model: "gpt-5.3-codex"
-    passthrough_responses: true    # explicit (also auto-detected from name)
-
-  - model: "my-responses-model"
-    passthrough_responses: true    # non-codex model with native /v1/responses support
-
-  - model: "gpt-4o"
-    passthrough_responses: false   # force conversion (default for non-codex)
+```bash
+curl http://localhost:8080/v1/responses/resp_01abc... \
+  -H "Authorization: Bearer sk-your-key"
 ```
 
-When passthrough is active, the proxy:
+### Continuing a Conversation
 
-1. Strips proxy-only fields (`store`, `metadata`, `ttl`) from the forwarded body.
-2. Handles `previous_response_id` from the local store (prepends history to `input`), or keeps it in the body for the provider if not found locally.
-3. Normalizes the body for provider compatibility:
-   - `input` as a single dict is wrapped into an array (`[dict]`).
-   - `instructions` as an array of messages is joined into a single string.
-   - Tools in nested Chat Completions format (`{function:{name:...}}`) are flattened to `{name:...}`.
-4. Forwards the body to the provider's `/v1/responses` endpoint.
-5. Saves the completed response to the local store if `store: true`.
-
-All response store features (`store`, `previous_response_id`, `metadata`, `ttl`, `GET /v1/responses/{id}`) work the same as for converted models.
-
-## Supported Input Formats
-
-### Simple String Input
+Pass `previous_response_id` to continue from a prior response. The router reconstructs the previous output as input context before sending to the provider:
 
 ```python
-response = client.responses.create(
-    model="gpt-4o",
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="sk-your-key")
+
+first = client.responses.create(
+    model="claude-sonnet-4-20250514",
     input="What is the capital of France?",
+    store=True,
 )
-```
 
-### Array of Messages
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    input=[
-        {"role": "user", "content": "My favorite number is 42."},
-        {"role": "assistant", "content": "That's the answer to everything!"},
-        {"role": "user", "content": "What number did I mention?"},
-    ],
+second = client.responses.create(
+    model="claude-sonnet-4-20250514",
+    input="And what language do they speak there?",
+    previous_response_id=first.id,
+    store=True,
 )
-```
-
-Supported roles: `user`, `assistant`, `system`, `developer`.
-
-### Single Message Object
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    input={"role": "user", "content": "Hello"},
-)
-```
-
-### Multipart Content
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    input=[
-        {
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": "What color is this image?"},
-                {"type": "input_image", "image_url": "https://..."},
-            ],
-        }
-    ],
-)
-```
-
-Supported content part types:
-
-| Type             | Description                                                          |
-| ---------------- | -------------------------------------------------------------------- |
-| `input_text`     | Plain text                                                           |
-| `input_image`    | Image by URL or data URL (`image_url` field). `detail` is forwarded. |
-| `input_audio`    | Audio data (`data` + `format` fields)                                |
-| `output_text`    | Assistant text (for passing history)                                 |
-| `output_refusal` | Assistant refusal (for passing history)                              |
-
-> **Not supported:** `input_image` with `file_id`, and `input_file`.
-
-## Instructions
-
-The `instructions` field is converted to a `developer`-role message prepended before `input`.
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    instructions="You are a helpful math tutor. Be concise.",
-    input="What is 5+3?",
-)
-```
-
-Instructions can also be passed as an array of messages:
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    instructions=[
-        {"role": "system", "content": "You are a pirate."},
-        {"role": "developer", "content": "Reply in one short sentence."},
-    ],
-    input="Greet me.",
-)
-```
-
-## Multi-Turn with Tool Calls
-
-Function calls and their outputs can be embedded in the `input` array for multi-turn conversations. Consecutive `function_call` items are merged into a single assistant message with multiple `tool_calls`:
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    input=[
-        {"role": "user", "content": "What's the weather in Paris?"},
-        {
-            "type": "function_call",
-            "call_id": "call_abc",
-            "name": "get_weather",
-            "arguments": '{"location": "Paris"}',
-        },
-        {
-            "type": "function_call_output",
-            "call_id": "call_abc",
-            "output": '{"temperature": 18, "condition": "sunny"}',
-        },
-    ],
-    tools=[...],
-)
-```
-
-## Tools
-
-Both the flat Responses API format and the nested Chat Completions format are accepted for `function` tools:
-
-```python
-# Flat Responses API format (converted to nested Chat Completions internally)
-tools = [
-    {
-        "type": "function",
-        "name": "get_weather",
-        "description": "Get weather for a location",
-        "parameters": {
-            "type": "object",
-            "properties": {"location": {"type": "string"}},
-            "required": ["location"],
-        },
-        "strict": True,
-    }
-]
-```
-
-### Non-Function Tools
-
-Non-function tool types (`web_search`, `web_search_preview`, `computer_use`, `code_execution`, `google_search_retrieval`, etc.) are passed through the `RequestToChat` conversion as-is. Provider-specific handling applies downstream:
-
-| Tool type                           | OpenAI (Chat Completions)                                                                   | Vertex AI      | Anthropic      |
-| ----------------------------------- | ------------------------------------------------------------------------------------------- | -------------- | -------------- |
-| `web_search` / `web_search_preview` | Forwarded with `web_search_options` **only for `search-preview` models**; dropped otherwise | Dropped        | Dropped        |
-| `computer_use`                      | Dropped                                                                                     | Dropped        | Native support |
-| `code_execution`                    | Dropped                                                                                     | Native support | Dropped        |
-| `google_search_retrieval`           | Dropped                                                                                     | Native support | Dropped        |
-
-When a non-function tool is not supported by the target provider, it is silently dropped before the request is forwarded.
-
-### Tool Choice
-
-| Value                               | Behavior                               |
-| ----------------------------------- | -------------------------------------- |
-| `"auto"`                            | Model decides whether to call a tool   |
-| `"none"`                            | Model must not call any tool           |
-| `"required"`                        | Model must call at least one tool      |
-| `{"type": "function", "name": "x"}` | Model must call the specified function |
-
-Non-function `tool_choice` object types (e.g. `{"type": "file_search"}`) are passed through unchanged to the provider. For OpenAI Chat Completions, such values are dropped before forwarding since the endpoint only accepts `"auto"`, `"none"`, `"required"`, or a function reference.
-
-## Parameters Mapping
-
-| Responses API          | Chat Completions              | Notes                                                                                             |
-| ---------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------- |
-| `input`                | `messages`                    | Converted as described above                                                                      |
-| `instructions`         | prepended `developer` message |                                                                                                   |
-| `max_output_tokens`    | `max_tokens`                  | Renamed to `max_completion_tokens` for reasoning models (o1/o3/o4/gpt-5) by post-conversion rules |
-| `reasoning.effort`     | `reasoning_effort`            | `"low"`, `"medium"`, `"high"`                                                                     |
-| `text.format`          | `response_format`             | See below                                                                                         |
-| `tools`                | `tools`                       | Flat → nested conversion                                                                          |
-| `tool_choice`          | `tool_choice`                 | Object form re-wrapped                                                                            |
-| `temperature`          | `temperature`                 | Passed through                                                                                    |
-| `top_p`                | `top_p`                       | Passed through                                                                                    |
-| `stream`               | `stream`                      | Passed through                                                                                    |
-| `store`                | —                             | Handled server-side; see Response Storage                                                         |
-| `previous_response_id` | —                             | History prepended before conversion                                                               |
-| `metadata`             | —                             | Echoed back in response; not forwarded                                                            |
-| `ttl`                  | —                             | Response expiry in seconds (0 = no expiry)                                                        |
-
-### Structured Output (text.format)
-
-```python
-response = client.responses.create(
-    model="gpt-4o",
-    input="List three colors as JSON.",
-    text={
-        "format": {
-            "type": "json_schema",
-            "name": "colors",
-            "schema": {
-                "type": "object",
-                "properties": {
-                    "colors": {"type": "array", "items": {"type": "string"}}
-                },
-                "required": ["colors"],
-            },
-            "strict": True,
-        }
-    },
-)
-```
-
-The flat Responses API `json_schema` format is converted to the nested Chat Completions format automatically. `"text"` and `"json_object"` formats pass through unchanged.
-
-## Response Format
-
-The response is a `Response` object with `object: "response"`:
-
-```json
-{
-  "id": "resp_abc123",
-  "object": "response",
-  "created_at": 1234567890,
-  "model": "gpt-4o",
-  "status": "completed",
-  "output": [
-    {
-      "type": "message",
-      "id": "msg_abc",
-      "status": "completed",
-      "role": "assistant",
-      "content": [
-        {
-          "type": "output_text",
-          "text": "Paris.",
-          "annotations": []
-        }
-      ]
-    }
-  ],
-  "usage": {
-    "input_tokens": 15,
-    "output_tokens": 3,
-    "total_tokens": 18,
-    "input_tokens_details": {"cached_tokens": 0},
-    "output_tokens_details": {"reasoning_tokens": 0}
-  }
-}
-```
-
-### Status Values
-
-| Status         | Cause                                     |
-| -------------- | ----------------------------------------- |
-| `"completed"`  | Normal completion                         |
-| `"incomplete"` | Hit `max_output_tokens` or content filter |
-
-When status is `"incomplete"`, `incomplete_details` contains `{"reason": "max_output_tokens"}` or `{"reason": "content_filter"}`.
-
-Tool calls appear as additional output items with `"type": "function_call"`:
-
-```json
-{
-  "type": "function_call",
-  "id": "fc_abc",
-  "call_id": "call_xyz",
-  "name": "get_weather",
-  "arguments": "{\"location\": \"Paris\"}",
-  "status": "completed"
-}
 ```
 
 ## Streaming
 
-Use `client.responses.stream()` to receive Server-Sent Events in Responses API format.
-
-```python
-with client.responses.stream(
-    model="gpt-4o",
-    input="Count from 1 to 5.",
-) as stream:
-    for event in stream:
-        if isinstance(event, ResponseTextDeltaEvent):
-            print(event.delta, end="", flush=True)
-        elif isinstance(event, ResponseCompletedEvent):
-            print("\nDone. Tokens:", event.response.usage.total_tokens)
-```
-
-### SSE Event Sequence
-
-**Text response:**
-
-```
-response.created          → initial response object (status: in_progress)
-response.in_progress      → same response object
-response.output_item.added      (type: message, output_index: 0)
-response.content_part.added     (type: output_text, content_index: 0)
-response.output_text.delta  ×N  (one per chunk)
-response.output_text.done
-response.content_part.done
-response.output_item.done
-response.completed        → full response with usage
-```
-
-**Tool call response:**
+Add `"stream": true` to receive Server-Sent Events. The event sequence follows the Responses API specification:
 
 ```
 response.created
 response.in_progress
-response.output_item.added      (type: function_call)
-response.function_call_arguments.delta  ×N
-response.function_call_arguments.done
-response.output_item.done       (type: function_call)
+  response.output_item.added
+  response.content_part.added
+  response.output_text.delta  (repeated)
+  response.output_text.done
+  response.content_part.done
+  response.output_item.done
 response.completed
+[DONE]
 ```
 
-Usage (`input_tokens`, `output_tokens`, `total_tokens`) is available in the `response.completed` event.
-
-## Response Storage
-
-When `store: true` is set, the completed response is persisted and can later be retrieved or referenced via `previous_response_id`.
-
 ```python
-response = client.responses.create(
-    model="gpt-4o",
-    input="What is the capital of France?",
-    store=True,
-    metadata={"session": "abc123"},
-    ttl=3600,  # optional: expire after 1 hour
+stream = client.responses.create(
+    model="gemini-2.5-flash",
+    input="Tell me about Paris",
+    stream=True,
 )
-print(response.id)  # e.g. "resp_abc123"
+
+for event in stream:
+    if event.type == "response.output_text.delta":
+        print(event.delta, end="", flush=True)
 ```
 
-Stored responses can be retrieved with `GET /v1/responses/{id}`:
+## WebSocket Protocol
 
-```python
-stored = client.get("https://your-proxy/v1/responses/resp_abc123")
+The router accepts WebSocket connections on `GET /v1/responses` (with `Upgrade: websocket` header). This allows multiple request-response turns on a single persistent connection.
+
+### Connection
+
+```javascript
+const ws = new WebSocket("ws://localhost:8080/v1/responses", {
+  headers: { "Authorization": "Bearer sk-your-key" }
+});
 ```
 
-### Storage Backends
+### Sending a Request
 
-Auto AI Router supports two storage backends selected automatically based on configuration:
+Send a JSON message with `"type": "response.create"` and any standard Responses API fields:
 
-| Backend                | When used                       | Key format                                                                |
-| ---------------------- | ------------------------------- | ------------------------------------------------------------------------- |
-| **bbolt** (local file) | Redis not configured            | `/data/auto_ai_router/responses.db` or `/tmp/auto_ai_router/responses.db` |
-| **Redis / Valkey**     | `redis.enabled: true` in config | `{key_prefix}response:{id}` (e.g. `rl:response:resp_abc123`)              |
-
-With the **Redis backend**:
-
-- Responses are shared across all replicas — any pod can retrieve a response stored by another.
-- TTL is enforced natively by Redis (`EX` on `SET`); no background cleanup worker is needed.
-- Responses with `ttl: 0` persist until Redis evicts them under memory pressure (depends on `maxmemory-policy`).
-
-With the **bbolt backend**:
-
-- Responses are local to the pod that stored them.
-- Expired entries are cleaned up by an hourly background worker.
-- Location: `/data/auto_ai_router/responses.db` if `/data/auto_ai_router` exists, otherwise `/tmp/auto_ai_router/responses.db`.
-
-See [Redis Integration](./redis.md) for setup instructions.
-
-### Multi-Turn with previous_response_id
-
-Pass `previous_response_id` to continue a conversation from a stored response. The proxy automatically prepends the full history (accumulated input + previous output) before forwarding to the provider:
-
-```python
-response2 = client.responses.create(
-    model="gpt-4o",
-    input="And what is the population of that city?",
-    previous_response_id=response.id,
-    store=True,
-)
+```json
+{
+  "type": "response.create",
+  "model": "claude-sonnet-4-20250514",
+  "input": "Hello! What is 2+2?",
+  "stream": true
+}
 ```
 
-The previous response must have been stored with `store=True` and must belong to the same API key (or be accessed via master key).
+The `type` field is stripped before forwarding to the provider.
 
-## Field Handling Reference
+### Receiving Events
 
-### Forwarded to Provider (pass-through)
+The server sends each SSE event as a plain JSON text message (no `data:` prefix, no `[DONE]`). Turn completion is signaled by a terminal event (`response.completed`, `response.failed`, `response.incomplete`, `error`).
 
-These fields survive conversion and are sent to the backend as-is in the Chat Completions body:
+```javascript
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === "response.output_text.delta") {
+    process.stdout.write(data.delta);
+  } else if (data.type === "response.completed") {
+    console.log("\nDone");
+  } else if (data.type === "error") {
+    console.error(data.error.message);
+  }
+};
+```
 
-| Field                  | Notes                                                     |
-| ---------------------- | --------------------------------------------------------- |
-| `temperature`, `top_p` | Standard Chat Completions params                          |
-| `user`                 | Forwarded; providers that support it (OpenAI) will use it |
-| `parallel_tool_calls`  | Valid Chat Completions param, forwarded as-is             |
+### Error Events
 
-### Handled Server-Side (not forwarded to provider)
+HTTP errors are converted to structured WebSocket error events:
 
-These fields are consumed by the proxy before the request reaches the provider:
+```json
+{
+  "type": "error",
+  "sequence_number": 0,
+  "error": {
+    "code": "api_error",
+    "message": "Rate limit exceeded",
+    "type": "server_error",
+    "param": null
+  }
+}
+```
 
-| Field                  | Behavior                                                       |
-| ---------------------- | -------------------------------------------------------------- |
-| `store`                | `true` → response saved to bbolt store after completion        |
-| `previous_response_id` | History prepended to `input` from the stored previous response |
-| `metadata`             | Stored alongside response; echoed back in the Response object  |
-| `ttl`                  | Response expiry in seconds; 0 = no expiry                      |
+### Connection-Local Cache
 
-### Deleted Before Forwarding (not yet implemented)
+When `store: false` is explicitly set, completed responses are cached in connection-local memory for the duration of the WebSocket connection. This allows `previous_response_id` continuations within the same session without a persistent store. The cache is cleared on reconnect.
 
-These fields are stripped in `deleteResponsesFields()` before the request reaches the provider:
+When `store` is absent or `true`, the persistent response store handles continuations across reconnects.
 
-| Field               | Reason not forwarded                                       |
-| ------------------- | ---------------------------------------------------------- |
-| `conversation`      | Requires server-side conversation management               |
-| `include`           | Each includable needs separate implementation              |
-| `stream_options`    | We inject our own `include_usage:true`; user settings lost |
-| `truncation`        | Context truncation not yet implemented                     |
-| `service_tier`      | Not mapped to credential selection yet                     |
-| `safety_identifier` | No provider-agnostic mapping                               |
+### Multi-Turn Example
+
+```javascript
+// First turn
+ws.send(JSON.stringify({
+  type: "response.create",
+  model: "claude-sonnet-4-20250514",
+  input: "What is the capital of France?",
+  store: false,
+}));
+
+// Wait for response.completed, capture response ID, then:
+ws.send(JSON.stringify({
+  type: "response.create",
+  model: "claude-sonnet-4-20250514",
+  input: "What language do they speak there?",
+  previous_response_id: "<id from first turn>",
+  store: false,
+}));
+```
+
+## Compact API
+
+`POST /v1/responses/compact` summarizes a conversation into a single compaction item. This is useful for reducing context size while preserving essential information.
+
+### Request
+
+```bash
+curl -X POST http://localhost:8080/v1/responses/compact \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "input": [
+      {"role": "user", "content": "What is photosynthesis?"},
+      {"role": "assistant", "content": "Photosynthesis is the process by which plants..."}
+    ]
+  }'
+```
+
+**Requirements:**
+
+- `model` is required
+- Request body limit: 10 MB
+
+### Response
+
+```json
+{
+  "id": "resp_01abc...",
+  "object": "response.compaction",
+  "created_at": 1234567890,
+  "output": [
+    {
+      "type": "compaction",
+      "id": "compact_01xyz...",
+      "encrypted_content": "<summary of the conversation>"
+    }
+  ],
+  "usage": {
+    "input_tokens": 120,
+    "output_tokens": 45,
+    "total_tokens": 165
+  }
+}
+```
+
+The `encrypted_content` field contains the model's summary. Use this item in `input` for subsequent requests to continue the conversation from the compacted context.
+
+## Native vs Passthrough Mode
+
+The router uses two modes for Responses API requests:
+
+| Mode            | Description                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------ |
+| **Native**      | Responses API request → provider-specific format directly. Preserves all provider features |
+| **Passthrough** | Responses API request → Chat Completions → provider, then Chat Completions → Responses API |
+
+Native mode is used automatically for **Anthropic**, **Vertex AI**, and **AWS Bedrock**. Passthrough is used for OpenAI and other providers that already speak Responses API natively.
+
+The mode can be overridden via model configuration:
+
+```yaml
+models:
+  - name: "my-model"
+    passthrough_responses: true  # force passthrough
+```
+
+## Provider Support
+
+| Feature                  | Anthropic | Vertex AI | Bedrock | OpenAI |
+| ------------------------ | --------- | --------- | ------- | ------ |
+| Non-streaming            | ✅        | ✅        | ✅      | ✅     |
+| Streaming (SSE)          | ✅        | ✅        | ✅      | ✅     |
+| WebSocket                | ✅        | ✅        | ✅      | ✅     |
+| `store` / response store | ✅        | ✅        | ✅      | ✅     |
+| `previous_response_id`   | ✅        | ✅        | ✅      | ✅     |
+| `tools` (function)       | ✅        | ✅        | ✅      | ✅     |
+| `reasoning`              | ✅        | ✅        | ✅      | ✅     |
+| `presence_penalty`       | ❌        | ✅        | ❌      | ✅     |
+| `frequency_penalty`      | ❌        | ✅        | ❌      | ✅     |
+| `top_logprobs`           | ❌        | ✅        | ❌      | ✅     |
+| `compact` endpoint       | ✅        | ✅        | ✅      | ✅     |
+
+## Retry and Fallback
+
+When a provider credential returns a rate-limit error (429), the router automatically tries the next available credential of the same type. The original HTTP error code is preserved in the final response — the client receives 429 (not 502) when all credentials of the appropriate type are exhausted.
+
+When no credentials are available at all, the router returns 503 Service Unavailable.

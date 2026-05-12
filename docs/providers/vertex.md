@@ -69,6 +69,12 @@ credentials:
 
 Requests are distributed across credentials using round-robin. See [Load Balancing](../advanced/balancing.md).
 
+## Responses API
+
+Vertex AI is fully supported via the [Responses API](../advanced/responses.md). Requests are converted natively to the Vertex AI GenerateContent API — no Chat Completions intermediate format is used.
+
+Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
+
 ## OpenAI-Compatible API
 
 The router accepts requests in **OpenAI Chat Completion format** and automatically converts them to Vertex AI (GenAI) format. Responses are converted back to OpenAI format, so any OpenAI SDK works transparently.

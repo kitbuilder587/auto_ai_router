@@ -1,8 +1,12 @@
 package anthropic
 
 import (
+	"encoding/base64"
+	"io"
 	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 )
 
 // convertOpenAIContentToAnthropic converts an OpenAI message content value (string or
@@ -111,16 +115,108 @@ func convertImageURLToAnthropic(url string) *ContentBlock {
 	}
 
 	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-		return &ContentBlock{
-			Type: "image",
-			Source: &MediaSource{
-				Type: "url",
-				URL:  url,
-			},
-		}
+		return DownloadAndEncodeImage(url)
 	}
 
 	return nil
+}
+
+var imageHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// allowedImageMediaTypes lists the media types accepted by the Anthropic API.
+var allowedImageMediaTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// DownloadAndEncodeImage fetches an image from an HTTP/HTTPS URL and returns a base64
+// ContentBlock. Anthropic does not support URL sources, so we must download and encode.
+func DownloadAndEncodeImage(imgURL string) *ContentBlock {
+	req, err := http.NewRequest(http.MethodGet, imgURL, nil)
+	if err != nil {
+		slog.Warn("Failed to create image download request for Anthropic", "url", imgURL, "error", err)
+		return nil
+	}
+	// Use a browser-like User-Agent to avoid bot-blocking (e.g. Wikimedia returns 403 for Go-http-client).
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; auto-ai-router/1.0)")
+
+	resp, err := imageHTTPClient.Do(req)
+	if err != nil {
+		slog.Warn("Failed to download image for Anthropic", "url", imgURL, "error", err)
+		return nil
+	}
+	defer func() {
+		err := resp.Body.Close()
+		if err != nil {
+			slog.Warn("Failed to close body", "error", err)
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("Image download returned non-200 status for Anthropic",
+			"url", imgURL, "status", resp.StatusCode)
+		return nil
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Warn("Failed to read image body for Anthropic", "url", imgURL, "error", err)
+		return nil
+	}
+
+	mediaType := resp.Header.Get("Content-Type")
+	if idx := strings.Index(mediaType, ";"); idx != -1 {
+		mediaType = strings.TrimSpace(mediaType[:idx])
+	}
+	// If Content-Type is missing or not an accepted image type, detect from magic bytes.
+	if !allowedImageMediaTypes[mediaType] {
+		mediaType = detectImageMediaType(data, imgURL)
+	}
+
+	if !allowedImageMediaTypes[mediaType] {
+		slog.Warn("Unsupported image media type for Anthropic, skipping",
+			"url", imgURL, "media_type", mediaType)
+		return nil
+	}
+
+	return &ContentBlock{
+		Type: "image",
+		Source: &MediaSource{
+			Type:      "base64",
+			MediaType: mediaType,
+			Data:      base64.StdEncoding.EncodeToString(data),
+		},
+	}
+}
+
+// detectImageMediaType detects image format from magic bytes, falling back to URL extension.
+func detectImageMediaType(data []byte, imgURL string) string {
+	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return "image/jpeg"
+	}
+	if len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n" {
+		return "image/png"
+	}
+	if len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a") {
+		return "image/gif"
+	}
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp"
+	}
+	// Fall back to URL extension.
+	lower := strings.ToLower(imgURL)
+	switch {
+	case strings.Contains(lower, ".jpg") || strings.Contains(lower, ".jpeg"):
+		return "image/jpeg"
+	case strings.Contains(lower, ".png"):
+		return "image/png"
+	case strings.Contains(lower, ".gif"):
+		return "image/gif"
+	case strings.Contains(lower, ".webp"):
+		return "image/webp"
+	}
+	return ""
 }
 
 // convertDataURLToDocument converts a data URL into an Anthropic document block.
