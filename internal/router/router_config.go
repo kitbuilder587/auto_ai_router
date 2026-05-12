@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 )
 
@@ -16,8 +15,8 @@ type ConfigView struct {
 
 func (r *Router) handleVisualConfig(w http.ResponseWriter, req *http.Request) {
 	view := ConfigView{
-		Version: proxy.Version,
-		Commit:  proxy.Commit,
+		Version: r.proxy.GetVersion(),
+		Commit:  r.proxy.GetCommit(),
 		Config:  r.appConfig,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

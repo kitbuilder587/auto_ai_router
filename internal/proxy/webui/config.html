@@ -1,19 +1,32 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Server Config</title>
   <link rel="stylesheet" href="/webui/style.css">
   <style>
-    .cfg-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+    .cfg-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: var(--fs-sm);
+    }
+
     .cfg-table td {
       padding: 5px var(--sp-3);
       border-bottom: 1px solid var(--line);
       vertical-align: top;
     }
-    .cfg-table tr:last-child td { border-bottom: none; }
-    .cfg-table tr:hover td { background: var(--bg-2); }
+
+    .cfg-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .cfg-table tr:hover td {
+      background: var(--bg-2);
+    }
+
     .cfg-table td:first-child {
       color: var(--fg-dim);
       font-size: var(--fs-xs);
@@ -22,8 +35,18 @@
       width: 35%;
       white-space: nowrap;
     }
-    .masked { color: var(--fg-dim); font-style: italic; }
-    .cred-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--sp-3); }
+
+    .masked {
+      color: var(--fg-dim);
+      font-style: italic;
+    }
+
+    .cred-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: var(--sp-3);
+    }
+
     .cred-models-hdr {
       font-size: var(--fs-xs);
       text-transform: uppercase;
@@ -31,7 +54,13 @@
       color: var(--fg-dim);
       margin: var(--sp-3) 0 var(--sp-2);
     }
-    .sub-table { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
+
+    .sub-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: var(--fs-xs);
+    }
+
     .sub-table th {
       text-align: left;
       padding: 3px var(--sp-2);
@@ -40,245 +69,417 @@
       letter-spacing: 0.07em;
       border-bottom: 1px solid var(--line);
     }
+
     .sub-table td {
       padding: 3px var(--sp-2);
       border-bottom: 1px solid var(--line);
       color: var(--fg-muted);
     }
-    .sub-table tr:last-child td { border-bottom: none; }
+
+    .sub-table tr:last-child td {
+      border-bottom: none;
+    }
   </style>
 </head>
+
 <body>
-<div class="wf">
-  <div class="wf-logo">
-    <span class="dot"></span>
-    <span class="name">air</span>
-    <span class="ver">{{ .Version }}{{ if .Commit }} / {{ slice7 .Commit }}{{ end }}</span>
-  </div>
-  <div class="wf-topbar">
-    <div class="crumbs">
-      <span>workspace</span>
-      <span class="sep">/</span>
-      <span class="here">server config</span>
+  <div class="wf">
+    <div class="wf-logo">
+      <span class="dot"></span>
+      <span class="name">air</span>
+      <div class="ver-wrapper">
+        <span class="ver">{{ .Version }}</span>
+        {{ if .Commit }}
+        <span class="commit-line">{{ slice7 .Commit }}</span>
+        {{ end }}
+      </div>
     </div>
-    <div class="spacer"></div>
-    <button class="pill" onclick="toggleTheme()">theme</button>
-  </div>
-  <nav class="wf-nav">
-    <div class="group">workspace</div>
-    <a class="item" href="/vhealth"><span class="glyph">▸</span> system health</a>
-    <a class="item" href="/vtrace"><span class="glyph">▸</span> router trace</a>
-    <a class="item active" href="/vconfig"><span class="glyph">▸</span> server config</a>
-  </nav>
-  <main class="wf-main">
-    <div style="margin-bottom:var(--sp-5);">
-      <h1 class="wf-h1">Server config</h1>
-      <p class="wf-sub">read-only · sensitive values masked</p>
+    <div class="wf-topbar">
+      <div class="crumbs">
+        <span>workspace</span>
+        <span class="sep">/</span>
+        <span class="here">server config</span>
+      </div>
+      <div class="spacer"></div>
+      <button class="pill" onclick="toggleTheme()">theme</button>
     </div>
+    <nav class="wf-nav">
+      <div class="group">workspace</div>
+      <a class="item" href="/vhealth"><span class="glyph">▸</span> system health</a>
+      <a class="item" href="/vtrace"><span class="glyph">▸</span> router trace</a>
+      <a class="item active" href="/vconfig"><span class="glyph">▸</span> server config</a>
+    </nav>
+    <main class="wf-main">
+      <div style="margin-bottom:var(--sp-5);">
+        <h1 class="wf-h1">Server config</h1>
+        <p class="wf-sub">read-only · sensitive values masked</p>
+      </div>
 
-    {{/* ── SERVER ── */}}
-    <div class="wf-section-title">server</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="cfg-table">
-        <tbody>
-          <tr><td>port</td><td>{{ .Config.Server.Port }}</td></tr>
-          <tr><td>max body size</td><td>{{ .Config.Server.MaxBodySizeMB }} MB (response ×{{ .Config.Server.ResponseBodyMultiplier }})</td></tr>
-          <tr><td>request timeout</td><td>{{ fmtDur .Config.Server.RequestTimeout }}</td></tr>
-          <tr><td>write timeout</td><td>{{ fmtDur .Config.Server.WriteTimeout }}</td></tr>
-          <tr><td>idle conn timeout</td><td>{{ fmtDur .Config.Server.IdleConnTimeout }}</td></tr>
-          <tr><td>max idle conns</td><td>{{ .Config.Server.MaxIdleConns }} (per host: {{ .Config.Server.MaxIdleConnsPerHost }})</td></tr>
-          <tr><td>logging level</td><td>{{ .Config.Server.LoggingLevel }}</td></tr>
-          <tr><td>master key</td><td><span class="masked">{{ maskAPIKey .Config.Server.MasterKey }}</span></td></tr>
-          <tr><td>max provider retries</td><td>{{ .Config.Server.MaxProviderRetries }}</td></tr>
-          <tr><td>session sticky</td><td>
-            {{ fmtBool .Config.Server.SessionStickyEnabled }}
-            {{- if .Config.Server.SessionStickyEnabled }}
-              · auto cache ctrl: {{ fmtBool .Config.Server.SessionStickyAutoCacheCtrl }}
-              · ttl: {{ if .Config.Server.SessionStickyTTL }}{{ .Config.Server.SessionStickyTTL }} min{{ else }}default (6 min){{ end }}
-            {{- end }}
-          </td></tr>
-          {{ if .Config.Server.ModelPricesLink }}<tr><td>model prices link</td><td><span class="masked">{{ maskURL .Config.Server.ModelPricesLink }}</span></td></tr>{{ end }}
-        </tbody>
-      </table>
-    </div>
-
-    {{/* ── FAIL2BAN ── */}}
-    <div class="wf-section-title">fail2ban</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="cfg-table">
-        <tbody>
-          <tr><td>max attempts</td><td>{{ .Config.Fail2Ban.MaxAttempts }}</td></tr>
-          <tr><td>ban duration</td><td>{{ if .Config.Fail2Ban.BanDuration }}{{ fmtDur .Config.Fail2Ban.BanDuration }}{{ else }}—{{ end }}</td></tr>
-          <tr><td>error codes</td><td>{{ joinInts .Config.Fail2Ban.ErrorCodes }}</td></tr>
-          {{ if .Config.Fail2Ban.ErrorCodeRules }}
-          <tr><td>per-code rules</td><td>
-            <table class="sub-table">
-              <thead><tr><th>code</th><th>max attempts</th><th>ban duration</th></tr></thead>
-              <tbody>
-                {{ range .Config.Fail2Ban.ErrorCodeRules }}
-                <tr>
-                  <td>{{ .Code }}</td>
-                  <td>{{ .MaxAttempts }}</td>
-                  <td>{{ .BanDuration }}</td>
-                </tr>
-                {{ end }}
-              </tbody>
-            </table>
-          </td></tr>
-          {{ end }}
-        </tbody>
-      </table>
-    </div>
-
-    {{/* ── CREDENTIALS ── */}}
-    <div class="wf-section-title">credentials · {{ len .Config.Credentials }}</div>
-    <div class="cred-grid">
-      {{ range .Config.Credentials }}
-      <div class="wf-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-3);">
-          <span style="font-size:var(--fs-lg);font-weight:600;word-break:break-all;">{{ .Name }}</span>
-          <span class="wf-badge {{ credClass .Type }}" style="margin-left:8px;flex-shrink:0;">{{ .Type }}{{ if .IsFallback }} · fallback{{ end }}</span>
-        </div>
+      {{/* ── SERVER ── */}}
+      <div class="wf-section-title">server</div>
+      <div class="wf-card" style="padding:0;">
         <table class="cfg-table">
           <tbody>
-            {{ if .APIKey }}<tr><td>api key</td><td><span class="masked">{{ maskAPIKey .APIKey }}</span></td></tr>{{ end }}
-            {{ if .BaseURL }}<tr><td>base url</td><td><span class="masked">{{ maskURL .BaseURL }}</span></td></tr>{{ end }}
-            {{ if .ProjectID }}<tr><td>project id</td><td>{{ .ProjectID }}</td></tr>{{ end }}
-            {{ if .Location }}<tr><td>location</td><td>{{ .Location }}</td></tr>{{ end }}
-            {{ if .CredentialsFile }}<tr><td>credentials file</td><td>{{ .CredentialsFile }}</td></tr>{{ end }}
-            {{ if .CredentialsJSON }}<tr><td>credentials json</td><td><span class="masked">*** set ***</span></td></tr>{{ end }}
-            <tr><td>RPM / TPM</td><td>{{ fmtLimit .RPM }} / {{ fmtLimit .TPM }}</td></tr>
+            <tr>
+              <td>port</td>
+              <td>{{ .Config.Server.Port }}</td>
+            </tr>
+            <tr>
+              <td>max body size</td>
+              <td>{{ .Config.Server.MaxBodySizeMB }} MB (response ×{{ .Config.Server.ResponseBodyMultiplier }})</td>
+            </tr>
+            <tr>
+              <td>request timeout</td>
+              <td>{{ fmtDur .Config.Server.RequestTimeout }}</td>
+            </tr>
+            <tr>
+              <td>write timeout</td>
+              <td>{{ fmtDur .Config.Server.WriteTimeout }}</td>
+            </tr>
+            <tr>
+              <td>idle conn timeout</td>
+              <td>{{ fmtDur .Config.Server.IdleConnTimeout }}</td>
+            </tr>
+            <tr>
+              <td>max idle conns</td>
+              <td>{{ .Config.Server.MaxIdleConns }} (per host: {{ .Config.Server.MaxIdleConnsPerHost }})</td>
+            </tr>
+            <tr>
+              <td>logging level</td>
+              <td>{{ .Config.Server.LoggingLevel }}</td>
+            </tr>
+            <tr>
+              <td>master key</td>
+              <td><span class="masked">{{ maskAPIKey .Config.Server.MasterKey }}</span></td>
+            </tr>
+            <tr>
+              <td>max provider retries</td>
+              <td>{{ .Config.Server.MaxProviderRetries }}</td>
+            </tr>
+            <tr>
+              <td>session sticky</td>
+              <td>
+                {{ fmtBool .Config.Server.SessionStickyEnabled }}
+                {{- if .Config.Server.SessionStickyEnabled }}
+                · auto cache ctrl: {{ fmtBool .Config.Server.SessionStickyAutoCacheCtrl }}
+                · ttl: {{ if .Config.Server.SessionStickyTTL }}{{ .Config.Server.SessionStickyTTL }} min{{ else
+                }}default (6 min){{ end }}
+                {{- end }}
+              </td>
+            </tr>
+            {{ if .Config.Server.ModelPricesLink }}<tr>
+              <td>model prices link</td>
+              <td><span class="masked">{{ maskURL .Config.Server.ModelPricesLink }}</span></td>
+            </tr>{{ end }}
           </tbody>
         </table>
-        {{ if .Models }}
-        <div class="cred-models-hdr">models · {{ len .Models }}</div>
-        <table class="sub-table">
-          <thead><tr><th>name</th><th>model override</th><th>RPM</th><th>TPM</th></tr></thead>
+      </div>
+
+      {{/* ── FAIL2BAN ── */}}
+      <div class="wf-section-title">fail2ban</div>
+      <div class="wf-card" style="padding:0;">
+        <table class="cfg-table">
           <tbody>
-            {{ range .Models }}
             <tr>
-              <td>{{ .Name }}</td>
-              <td>{{ if .Model }}{{ .Model }}{{ else }}—{{ end }}</td>
-              <td>{{ fmtLimit .RPM }}</td>
-              <td>{{ fmtLimit .TPM }}</td>
+              <td>max attempts</td>
+              <td>{{ .Config.Fail2Ban.MaxAttempts }}</td>
+            </tr>
+            <tr>
+              <td>ban duration</td>
+              <td>{{ if .Config.Fail2Ban.BanDuration }}{{ fmtDur .Config.Fail2Ban.BanDuration }}{{ else }}—{{ end }}
+              </td>
+            </tr>
+            <tr>
+              <td>error codes</td>
+              <td>{{ joinInts .Config.Fail2Ban.ErrorCodes }}</td>
+            </tr>
+            {{ if .Config.Fail2Ban.ErrorCodeRules }}
+            <tr>
+              <td>per-code rules</td>
+              <td>
+                <table class="sub-table">
+                  <thead>
+                    <tr>
+                      <th>code</th>
+                      <th>max attempts</th>
+                      <th>ban duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {{ range .Config.Fail2Ban.ErrorCodeRules }}
+                    <tr>
+                      <td>{{ .Code }}</td>
+                      <td>{{ .MaxAttempts }}</td>
+                      <td>{{ .BanDuration }}</td>
+                    </tr>
+                    {{ end }}
+                  </tbody>
+                </table>
+              </td>
             </tr>
             {{ end }}
           </tbody>
         </table>
+      </div>
+
+      {{/* ── CREDENTIALS ── */}}
+      <div class="wf-section-title">credentials · {{ len .Config.Credentials }}</div>
+      <div class="cred-grid">
+        {{ range .Config.Credentials }}
+        <div class="wf-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-3);">
+            <span style="font-size:var(--fs-lg);font-weight:600;word-break:break-all;">{{ .Name }}</span>
+            <span class="wf-badge {{ credClass .Type }}" style="margin-left:8px;flex-shrink:0;">{{ .Type }}{{ if
+              .IsFallback }} · fallback{{ end }}</span>
+          </div>
+          <table class="cfg-table">
+            <tbody>
+              {{ if .APIKey }}<tr>
+                <td>api key</td>
+                <td><span class="masked">{{ maskAPIKey .APIKey }}</span></td>
+              </tr>{{ end }}
+              {{ if .BaseURL }}<tr>
+                <td>base url</td>
+                <td><span class="masked">{{ maskURL .BaseURL }}</span></td>
+              </tr>{{ end }}
+              {{ if .ProjectID }}<tr>
+                <td>project id</td>
+                <td>{{ .ProjectID }}</td>
+              </tr>{{ end }}
+              {{ if .Location }}<tr>
+                <td>location</td>
+                <td>{{ .Location }}</td>
+              </tr>{{ end }}
+              {{ if .CredentialsFile }}<tr>
+                <td>credentials file</td>
+                <td>{{ .CredentialsFile }}</td>
+              </tr>{{ end }}
+              {{ if .CredentialsJSON }}<tr>
+                <td>credentials json</td>
+                <td><span class="masked">*** set ***</span></td>
+              </tr>{{ end }}
+              <tr>
+                <td>RPM / TPM</td>
+                <td>{{ fmtLimit .RPM }} / {{ fmtLimit .TPM }}</td>
+              </tr>
+            </tbody>
+          </table>
+          {{ if .Models }}
+          <div class="cred-models-hdr">models · {{ len .Models }}</div>
+          <table class="sub-table">
+            <thead>
+              <tr>
+                <th>name</th>
+                <th>model override</th>
+                <th>RPM</th>
+                <th>TPM</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{ range .Models }}
+              <tr>
+                <td>{{ .Name }}</td>
+                <td>{{ if .Model }}{{ .Model }}{{ else }}—{{ end }}</td>
+                <td>{{ fmtLimit .RPM }}</td>
+                <td>{{ fmtLimit .TPM }}</td>
+              </tr>
+              {{ end }}
+            </tbody>
+          </table>
+          {{ end }}
+        </div>
         {{ end }}
       </div>
+
+      {{/* ── GLOBAL MODELS ── */}}
+      {{ if .Config.Models }}
+      <div class="wf-section-title">global models · {{ len .Config.Models }}</div>
+      <div class="wf-card" style="padding:0;">
+        <table class="wf-table">
+          <thead>
+            <tr>
+              <th>name</th>
+              <th>model override</th>
+              <th>credential</th>
+              <th>RPM</th>
+              <th>TPM</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range .Config.Models }}
+            <tr>
+              <td>{{ .Name }}</td>
+              <td class="muted">{{ if .Model }}{{ .Model }}{{ else }}—{{ end }}</td>
+              <td class="dim">{{ if .Credential }}{{ .Credential }}{{ else }}—{{ end }}</td>
+              <td class="muted">{{ fmtLimit .RPM }}</td>
+              <td class="muted">{{ fmtLimit .TPM }}</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
       {{ end }}
-    </div>
 
-    {{/* ── GLOBAL MODELS ── */}}
-    {{ if .Config.Models }}
-    <div class="wf-section-title">global models · {{ len .Config.Models }}</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="wf-table">
-        <thead>
-          <tr>
-            <th>name</th>
-            <th>model override</th>
-            <th>credential</th>
-            <th>RPM</th>
-            <th>TPM</th>
-          </tr>
-        </thead>
-        <tbody>
-          {{ range .Config.Models }}
-          <tr>
-            <td>{{ .Name }}</td>
-            <td class="muted">{{ if .Model }}{{ .Model }}{{ else }}—{{ end }}</td>
-            <td class="dim">{{ if .Credential }}{{ .Credential }}{{ else }}—{{ end }}</td>
-            <td class="muted">{{ fmtLimit .RPM }}</td>
-            <td class="muted">{{ fmtLimit .TPM }}</td>
-          </tr>
-          {{ end }}
-        </tbody>
-      </table>
-    </div>
-    {{ end }}
+      {{/* ── MODEL ALIASES ── */}}
+      {{ if .Config.ModelAlias }}
+      <div class="wf-section-title">model aliases · {{ len .Config.ModelAlias }}</div>
+      <div class="wf-card" style="padding:0;">
+        <table class="wf-table">
+          <thead>
+            <tr>
+              <th>alias</th>
+              <th>real model</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{ range $alias, $model := .Config.ModelAlias }}
+            <tr>
+              <td>{{ $alias }}</td>
+              <td class="muted">{{ $model }}</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+      {{ end }}
 
-    {{/* ── MODEL ALIASES ── */}}
-    {{ if .Config.ModelAlias }}
-    <div class="wf-section-title">model aliases · {{ len .Config.ModelAlias }}</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="wf-table">
-        <thead><tr><th>alias</th><th>real model</th></tr></thead>
-        <tbody>
-          {{ range $alias, $model := .Config.ModelAlias }}
-          <tr><td>{{ $alias }}</td><td class="muted">{{ $model }}</td></tr>
-          {{ end }}
-        </tbody>
-      </table>
-    </div>
-    {{ end }}
+      {{/* ── LITELLM DB ── */}}
+      <div class="wf-section-title">litellm db</div>
+      <div class="wf-card" style="padding:0;">
+        <table class="cfg-table">
+          <tbody>
+            <tr>
+              <td>enabled</td>
+              <td>{{ fmtBool .Config.LiteLLMDB.Enabled }}</td>
+            </tr>
+            {{ if .Config.LiteLLMDB.Enabled }}
+            <tr>
+              <td>required</td>
+              <td>{{ fmtBool .Config.LiteLLMDB.IsRequired }}</td>
+            </tr>
+            <tr>
+              <td>load db models</td>
+              <td>{{ fmtBool .Config.LiteLLMDB.LoadLitellmDBModels }}{{ if .Config.LiteLLMDB.LoadLitellmDBModels }} ·
+                sync every {{ fmtDur .Config.LiteLLMDB.LitellmDBSyncInterval }}{{ end }}</td>
+            </tr>
+            <tr>
+              <td>database url</td>
+              <td><span class="masked">{{ maskDBURL .Config.LiteLLMDB.DatabaseURL }}</span></td>
+            </tr>
+            <tr>
+              <td>conns</td>
+              <td>min {{ .Config.LiteLLMDB.MinConns }} / max {{ .Config.LiteLLMDB.MaxConns }}</td>
+            </tr>
+            <tr>
+              <td>health check</td>
+              <td>every {{ fmtDur .Config.LiteLLMDB.HealthCheckInterval }} · connect timeout {{ fmtDur
+                .Config.LiteLLMDB.ConnectTimeout }}</td>
+            </tr>
+            <tr>
+              <td>auth cache</td>
+              <td>ttl {{ fmtDur .Config.LiteLLMDB.AuthCacheTTL }} · size {{ .Config.LiteLLMDB.AuthCacheSize }}</td>
+            </tr>
+            <tr>
+              <td>spend log</td>
+              <td>queue {{ .Config.LiteLLMDB.LogQueueSize }} · batch {{ .Config.LiteLLMDB.LogBatchSize }} · flush {{
+                fmtDur .Config.LiteLLMDB.LogFlushInterval }}</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
 
-    {{/* ── LITELLM DB ── */}}
-    <div class="wf-section-title">litellm db</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="cfg-table">
-        <tbody>
-          <tr><td>enabled</td><td>{{ fmtBool .Config.LiteLLMDB.Enabled }}</td></tr>
-          {{ if .Config.LiteLLMDB.Enabled }}
-          <tr><td>required</td><td>{{ fmtBool .Config.LiteLLMDB.IsRequired }}</td></tr>
-          <tr><td>load db models</td><td>{{ fmtBool .Config.LiteLLMDB.LoadLitellmDBModels }}{{ if .Config.LiteLLMDB.LoadLitellmDBModels }} · sync every {{ fmtDur .Config.LiteLLMDB.LitellmDBSyncInterval }}{{ end }}</td></tr>
-          <tr><td>database url</td><td><span class="masked">{{ maskDBURL .Config.LiteLLMDB.DatabaseURL }}</span></td></tr>
-          <tr><td>conns</td><td>min {{ .Config.LiteLLMDB.MinConns }} / max {{ .Config.LiteLLMDB.MaxConns }}</td></tr>
-          <tr><td>health check</td><td>every {{ fmtDur .Config.LiteLLMDB.HealthCheckInterval }} · connect timeout {{ fmtDur .Config.LiteLLMDB.ConnectTimeout }}</td></tr>
-          <tr><td>auth cache</td><td>ttl {{ fmtDur .Config.LiteLLMDB.AuthCacheTTL }} · size {{ .Config.LiteLLMDB.AuthCacheSize }}</td></tr>
-          <tr><td>spend log</td><td>queue {{ .Config.LiteLLMDB.LogQueueSize }} · batch {{ .Config.LiteLLMDB.LogBatchSize }} · flush {{ fmtDur .Config.LiteLLMDB.LogFlushInterval }}</td></tr>
-          {{ end }}
-        </tbody>
-      </table>
-    </div>
+      {{/* ── REDIS ── */}}
+      <div class="wf-section-title">redis / valkey</div>
+      <div class="wf-card" style="padding:0;">
+        <table class="cfg-table">
+          <tbody>
+            <tr>
+              <td>enabled</td>
+              <td>{{ fmtBool .Config.Redis.Enabled }}</td>
+            </tr>
+            {{ if .Config.Redis.Enabled }}
+            <tr>
+              <td>addresses</td>
+              <td>{{ join .Config.Redis.InitAddresses }}</td>
+            </tr>
+            {{ if .Config.Redis.Username }}<tr>
+              <td>username</td>
+              <td>{{ .Config.Redis.Username }}</td>
+            </tr>{{ end }}
+            {{ if .Config.Redis.Password }}<tr>
+              <td>password</td>
+              <td><span class="masked">{{ maskAPIKey .Config.Redis.Password }}</span></td>
+            </tr>{{ end }}
+            <tr>
+              <td>key prefix</td>
+              <td>{{ .Config.Redis.KeyPrefix }}</td>
+            </tr>
+            <tr>
+              <td>key ttl</td>
+              <td>{{ .Config.Redis.KeyTTL }}s</td>
+            </tr>
+            <tr>
+              <td>tls</td>
+              <td>{{ fmtBool .Config.Redis.TLSEnabled }}</td>
+            </tr>
+            <tr>
+              <td>force single client</td>
+              <td>{{ fmtBool .Config.Redis.ForceSingleClient }}</td>
+            </tr>
+            <tr>
+              <td>pool</td>
+              <td>idle min {{ .Config.Redis.MinIdleConns }} / max {{ .Config.Redis.MaxIdleConns }} · lifetime {{ fmtDur
+                .Config.Redis.MaxConnLifetime }}</td>
+            </tr>
+            <tr>
+              <td>timeouts</td>
+              <td>connect {{ fmtDur .Config.Redis.ConnectTimeout }} · write {{ fmtDur .Config.Redis.ConnWriteTimeout }}
+                · cmd {{ fmtDur .Config.Redis.CommandTimeout }}</td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
 
-    {{/* ── REDIS ── */}}
-    <div class="wf-section-title">redis / valkey</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="cfg-table">
-        <tbody>
-          <tr><td>enabled</td><td>{{ fmtBool .Config.Redis.Enabled }}</td></tr>
-          {{ if .Config.Redis.Enabled }}
-          <tr><td>addresses</td><td>{{ join .Config.Redis.InitAddresses }}</td></tr>
-          {{ if .Config.Redis.Username }}<tr><td>username</td><td>{{ .Config.Redis.Username }}</td></tr>{{ end }}
-          {{ if .Config.Redis.Password }}<tr><td>password</td><td><span class="masked">{{ maskAPIKey .Config.Redis.Password }}</span></td></tr>{{ end }}
-          <tr><td>key prefix</td><td>{{ .Config.Redis.KeyPrefix }}</td></tr>
-          <tr><td>key ttl</td><td>{{ .Config.Redis.KeyTTL }}s</td></tr>
-          <tr><td>tls</td><td>{{ fmtBool .Config.Redis.TLSEnabled }}</td></tr>
-          <tr><td>force single client</td><td>{{ fmtBool .Config.Redis.ForceSingleClient }}</td></tr>
-          <tr><td>pool</td><td>idle min {{ .Config.Redis.MinIdleConns }} / max {{ .Config.Redis.MaxIdleConns }} · lifetime {{ fmtDur .Config.Redis.MaxConnLifetime }}</td></tr>
-          <tr><td>timeouts</td><td>connect {{ fmtDur .Config.Redis.ConnectTimeout }} · write {{ fmtDur .Config.Redis.ConnWriteTimeout }} · cmd {{ fmtDur .Config.Redis.CommandTimeout }}</td></tr>
-          {{ end }}
-        </tbody>
-      </table>
-    </div>
+      {{/* ── MONITORING ── */}}
+      <div class="wf-section-title">monitoring</div>
+      <div class="wf-card" style="padding:0;">
+        <table class="cfg-table">
+          <tbody>
+            <tr>
+              <td>prometheus</td>
+              <td>{{ fmtBool .Config.Monitoring.PrometheusEnabled }}</td>
+            </tr>
+            <tr>
+              <td>health check path</td>
+              <td>{{ .Config.Monitoring.HealthCheckPath }}</td>
+            </tr>
+            <tr>
+              <td>log errors</td>
+              <td>{{ fmtBool .Config.Monitoring.LogErrors }}</td>
+            </tr>
+            {{ if .Config.Monitoring.ErrorsLogPath }}<tr>
+              <td>errors log path</td>
+              <td>{{ .Config.Monitoring.ErrorsLogPath }}</td>
+            </tr>{{ end }}
+          </tbody>
+        </table>
+      </div>
 
-    {{/* ── MONITORING ── */}}
-    <div class="wf-section-title">monitoring</div>
-    <div class="wf-card" style="padding:0;">
-      <table class="cfg-table">
-        <tbody>
-          <tr><td>prometheus</td><td>{{ fmtBool .Config.Monitoring.PrometheusEnabled }}</td></tr>
-          <tr><td>health check path</td><td>{{ .Config.Monitoring.HealthCheckPath }}</td></tr>
-          <tr><td>log errors</td><td>{{ fmtBool .Config.Monitoring.LogErrors }}</td></tr>
-          {{ if .Config.Monitoring.ErrorsLogPath }}<tr><td>errors log path</td><td>{{ .Config.Monitoring.ErrorsLogPath }}</td></tr>{{ end }}
-        </tbody>
-      </table>
-    </div>
-
-  </main>
-</div>
-<script>
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-  const next = cur === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('theme', next);
-}
-(function() {
-  document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
-})();
-</script>
+    </main>
+  </div>
+  <script>
+    function toggleTheme() {
+      const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function () {
+      document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
+    })();
+  </script>
 </body>
+
 </html>

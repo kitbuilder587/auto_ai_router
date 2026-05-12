@@ -87,7 +87,12 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	// Build model_id as credential.name:model_name
-	modelIDFormatted := logCtx.Credential.Name + ":" + logCtx.ModelID
+	// For proxy credentials, use the actual upstream credential name if available
+	credName := logCtx.Credential.Name
+	if logCtx.ActualCredentialName != "" {
+		credName = logCtx.ActualCredentialName
+	}
+	modelIDFormatted := credName + ":" + logCtx.ModelID
 	hashedToken := litellmdb.HashToken(logCtx.Token)
 
 	// Extract user info from tokenInfo (or use empty strings as fallback)
@@ -168,7 +173,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	if teamID == "" {
-		teamID = logCtx.Credential.Name
+		teamID = credName
 	}
 
 	return p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
