@@ -13,6 +13,8 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	healthy, status := r.proxy.HealthCheck()
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Router-Version", proxy.Version)
+	w.Header().Set("X-Router-Commit", proxy.Commit)
 	if !healthy {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {

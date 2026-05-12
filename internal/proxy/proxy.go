@@ -3,11 +3,9 @@ package proxy
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -38,9 +36,6 @@ import (
 // relative to maxBodySizeMB. Responses can be larger than requests (e.g., base64 images).
 // Can be overridden via Config.ResponseBodyMultiplier.
 const DefaultResponseBodyMultiplier = 10
-
-//go:embed health.html
-var healthHTML string
 
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
@@ -112,7 +107,6 @@ type Proxy struct {
 	rateLimiter         *ratelimit.RPMLimiter
 	tokenManager        *auth.VertexTokenManager
 	routerID            string                     // Identifier for this router used in /trace responses
-	healthTemplate      *template.Template         // Cached template
 	modelManager        *models.Manager            // Model manager for getting configured models
 	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration
 	healthChecker       HealthChecker              // Cached DB health status (optional)
@@ -129,29 +123,6 @@ var (
 )
 
 func New(cfg *Config) *Proxy {
-	// Parse template once at startup
-	tmpl, err := template.New("health").Funcs(template.FuncMap{
-		"div": func(a, b int) int {
-			if b == 0 {
-				return 0
-			}
-			return a / b
-		},
-		"mul": func(a, b int) int {
-			return a * b
-		},
-		"version": func() string {
-			return cfg.Version
-		},
-		"commit": func() string {
-			return cfg.Commit
-		},
-	}).Parse(healthHTML)
-	if err != nil {
-		cfg.Logger.Error("Failed to parse health template at startup", "error", err)
-		// Continue without template - will cause error on /vhealth requests
-	}
-
 	// Create HTTP client using centralized factory with request-specific timeout
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
 	httpClientCfg.Timeout = cfg.RequestTimeout
@@ -195,7 +166,6 @@ func New(cfg *Config) *Proxy {
 		masterKey:           cfg.MasterKey,
 		rateLimiter:         cfg.RateLimiter,
 		tokenManager:        cfg.TokenManager,
-		healthTemplate:      tmpl,
 		modelManager:        cfg.ModelManager,
 		LiteLLMDB:           cfg.LiteLLMDB,
 		healthChecker:       cfg.HealthChecker,

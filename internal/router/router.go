@@ -9,20 +9,23 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 )
 
 type Router struct {
 	proxy            *proxy.Proxy
 	modelManager     *models.Manager
 	monitoringConfig *config.MonitoringConfig
+	appConfig        *config.Config
 	logger           *slog.Logger
 }
 
-func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger) *Router {
+func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger, appConfig *config.Config) *Router {
 	return &Router{
 		proxy:            p,
 		modelManager:     modelManager,
 		monitoringConfig: monitoringConfig,
+		appConfig:        appConfig,
 		logger:           logger,
 	}
 }
@@ -30,6 +33,18 @@ func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.URL.Path == r.monitoringConfig.HealthCheckPath {
 		r.handleHealth(w, req)
+		return
+	}
+
+	// WebUI static assets
+	if req.URL.Path == "/webui/style.css" {
+		webui.ServeCSS(w, req)
+		return
+	}
+
+	// Visual config dashboard
+	if req.URL.Path == "/vconfig" {
+		r.handleVisualConfig(w, req)
 		return
 	}
 
