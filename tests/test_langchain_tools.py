@@ -1,8 +1,8 @@
 """
-LangChain ChatOpenAI with tool_calls integration tests for Vertex AI
+LangChain ChatOpenAI with tool_calls integration tests
 
 Tests tool calling and structured outputs when using LangChain
-ChatOpenAI client with Vertex AI backend via auto_ai_router
+ChatOpenAI client via auto_ai_router with various model providers.
 """
 
 import pytest
@@ -10,15 +10,26 @@ from typing import Optional
 
 try:
     from langchain_openai import ChatOpenAI
-    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
-    from langchain.tools import tool
+    from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-    from pydantic import BaseModel, Field
+    from langchain.tools import tool
 except ImportError:
     pytest.skip("LangChain not installed", allow_module_level=True)
 
+from test_helpers import TestModels
 
-# Tool definitions for testing
+# Model sets for different test scenarios
+LANGCHAIN_ALL_MODELS = (
+    TestModels.OPENAI_MODELS
+    + TestModels.VERTEX_MODELS
+    + TestModels.ANTHROPIC_MODELS
+)
+
+
+# ---------------------------------------------------------------------------
+# Shared tool definitions
+# ---------------------------------------------------------------------------
+
 @tool
 def get_weather(location: str) -> str:
     """Get weather information for a location"""
@@ -26,7 +37,8 @@ def get_weather(location: str) -> str:
         "New York": "Cloudy, 15°C",
         "London": "Rainy, 10°C",
         "Tokyo": "Sunny, 22°C",
-        "Sydney": "Warm, 25°C"
+        "Sydney": "Warm, 25°C",
+        "Paris": "Partly cloudy, 18°C",
     }
     return weather_data.get(location, "Weather data not available")
 
@@ -40,12 +52,9 @@ def calculate_distance(location1: str, location2: str) -> float:
         ("London", "Tokyo"): 9570,
         ("Sydney", "Tokyo"): 7820,
     }
-
-    key = tuple(sorted([location1, location2]))
     for k, v in distances.items():
-        if set(k) == set([location1, location2]):
+        if set(k) == {location1, location2}:
             return float(v)
-
     return 0.0
 
 
@@ -55,136 +64,114 @@ def list_cities() -> list:
     return ["New York", "London", "Tokyo", "Sydney"]
 
 
-class WeatherInfo(BaseModel):
-    """Weather information schema"""
-    location: str = Field(description="Location name")
-    temperature: str = Field(description="Temperature reading")
-    conditions: str = Field(description="Weather conditions")
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
 
+def make_llm(model: str, base_url: str, api_key: str, **kwargs) -> ChatOpenAI:
+    """Create a ChatOpenAI instance pointed at the router."""
+    return ChatOpenAI(
+        model=model,
+        openai_api_base=base_url,
+        openai_api_key=api_key,
+        **kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Basic tool calling tests
+# ---------------------------------------------------------------------------
 
 class TestLangChainBasicTools:
     """Basic tool calling functionality tests"""
 
-    def test_tool_calling_single_call(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calling_single_call(self, openai_client, base_url, model):
         """Test basic tool calling with ChatOpenAI"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.5
-        )
+        llm = make_llm(model, base_url, openai_client.api_key, temperature=0.5)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance, list_cities])
 
-        # Bind tools to the model
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
+        response = model_with_tools.invoke("What's the weather in Tokyo?")
 
-        # Query that should trigger tool call
-        response = model_with_tools.invoke(
-            "What's the weather in Tokyo?"
-        )
-
-        # Verify response structure
         assert response is not None
         assert hasattr(response, 'tool_calls') or hasattr(response, 'content')
 
-    def test_tool_calling_multiple_calls(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calling_multiple_calls(self, openai_client, base_url, model):
         """Test tool calling with multiple tool invocations"""
-        model = ChatOpenAI(
-            model="gemini-2.5-flash",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.3
-        )
+        llm = make_llm(model, base_url, openai_client.api_key, temperature=0.3)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance, list_cities])
 
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
-
-        # Query that should trigger multiple tool calls
         response = model_with_tools.invoke(
             "What cities are available? Show me the weather in the first two."
         )
 
         assert response is not None
 
-    def test_tool_with_specific_tool_choice(self, openai_client):
-        """Test tool calling with forced tool selection"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_with_auto_tool_choice(self, openai_client, base_url, model):
+        """Test tool calling with tool_choice='auto'"""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools(
+            [get_weather, calculate_distance, list_cities],
+            tool_choice="auto",
         )
 
-        tools = [get_weather, calculate_distance, list_cities]
-        # Force using specific tool
-        model_with_tools = model.bind_tools(
-            tools,
-            tool_choice="auto"
-        )
-
-        response = model_with_tools.invoke(
-            "What's the weather in London?"
-        )
+        response = model_with_tools.invoke("What's the weather in London?")
 
         assert response is not None
 
-    def test_message_with_tool_results(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_message_with_tool_results(self, openai_client, base_url, model):
         """Test conversation with tool calls and results"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance, list_cities])
 
-        from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
-
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
-
-        # First turn - get tool call
         messages = [HumanMessage("What's the weather in Tokyo?")]
         response = model_with_tools.invoke(messages)
 
         assert response is not None
 
 
+# ---------------------------------------------------------------------------
+# Agent tests
+# ---------------------------------------------------------------------------
+
 class TestLangChainAgents:
     """Agent-based tool calling tests"""
 
-    def test_tool_calling_agent_creation(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calling_agent_creation(self, openai_client, base_url, model):
         """Test creating a tool-calling agent with ChatOpenAI"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.3
-        )
+        try:
+            from langchain_classic.agents import create_tool_calling_agent
+        except ImportError:
+            pytest.skip("langchain_classic not installed")
 
+        llm = make_llm(model, base_url, openai_client.api_key, temperature=0.3)
         tools = [get_weather, calculate_distance, list_cities]
 
-        # Create agent prompt
         prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a helpful assistant that can access various tools."),
             ("user", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
 
-        # Create agent (may fail if model doesn't support tool_choice properly)
         try:
-            agent = create_tool_calling_agent(model, tools, prompt)
+            agent = create_tool_calling_agent(llm, tools, prompt)
             assert agent is not None
         except Exception as e:
-            # Tool calling might not be fully supported
             pytest.skip(f"Tool calling agent not supported: {str(e)}")
 
-    def test_agent_with_executor(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_agent_with_executor(self, openai_client, base_url, model):
         """Test tool-calling agent with executor"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.3
-        )
+        try:
+            from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+        except ImportError:
+            pytest.skip("langchain_classic not installed")
 
+        llm = make_llm(model, base_url, openai_client.api_key, temperature=0.3)
         tools = [get_weather, calculate_distance, list_cities]
 
         prompt = ChatPromptTemplate.from_messages([
@@ -194,7 +181,7 @@ class TestLangChainAgents:
         ])
 
         try:
-            agent = create_tool_calling_agent(model, tools, prompt)
+            agent = create_tool_calling_agent(llm, tools, prompt)
             agent_executor = AgentExecutor.from_agent_and_tools(
                 agent=agent,
                 tools=tools,
@@ -206,37 +193,36 @@ class TestLangChainAgents:
                 "input": "What's the weather in Tokyo and London? Also tell me the distance between them."
             })
 
-            assert "output" in result or result is not None
+            assert result is not None
         except Exception as e:
             pytest.skip(f"Agent executor not fully supported: {str(e)}")
 
 
+# ---------------------------------------------------------------------------
+# Tool schema tests
+# ---------------------------------------------------------------------------
+
 class TestLangChainToolSchema:
     """Test tool schema and parameter validation"""
 
-    def test_tool_definition_schema(self, openai_client):
-        """Test that tool schema is properly defined"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_definition_schema(self, openai_client, base_url, model):
+        """Test that tool schema is properly bound"""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance, list_cities])
 
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
-
-        # Verify tools are bound
         bound_tools = model_with_tools.kwargs.get('tools')
         if bound_tools:
             assert len(bound_tools) > 0
 
-    def test_tool_with_complex_parameters(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_with_complex_parameters(self, openai_client, base_url, model):
         """Test tool calling with complex parameter types"""
         @tool
         def search_locations(
             query: str,
             radius_km: Optional[float] = None,
-            limit: Optional[int] = None
+            limit: Optional[int] = None,
         ) -> list:
             """Search for locations matching criteria"""
             return [
@@ -245,14 +231,8 @@ class TestLangChainToolSchema:
                 {"name": "Kyoto", "distance": 470},
             ]
 
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [search_locations]
-        model_with_tools = model.bind_tools(tools)
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([search_locations])
 
         response = model_with_tools.invoke(
             "Find locations near Tokyo within 500km, limit to 10 results"
@@ -261,65 +241,47 @@ class TestLangChainToolSchema:
         assert response is not None
 
 
-class TestLangChainIntegration:
-    """Integration tests with vertex transform layer"""
+# ---------------------------------------------------------------------------
+# Integration tests
+# ---------------------------------------------------------------------------
 
-    def test_tool_calls_with_parameters_transformation(self, openai_client):
-        """Test that parameters are properly transformed through Vertex"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
+class TestLangChainIntegration:
+    """Integration tests with the router transform layer"""
+
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calls_with_parameters_transformation(self, openai_client, base_url, model):
+        """Test that parameters are properly transformed through the router"""
+        llm = make_llm(
+            model, base_url, openai_client.api_key,
             temperature=0.7,
             max_tokens=500,
             top_p=0.9,
             frequency_penalty=0.1,
             presence_penalty=0.1,
         )
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance])
 
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
-
-        response = model_with_tools.invoke(
-            "What's the weather in London?"
-        )
+        response = model_with_tools.invoke("What's the weather in London?")
 
         assert response is not None
 
-    def test_streaming_with_tool_calls(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_streaming_with_tool_calls(self, openai_client, base_url, model):
         """Test streaming response with tool calling"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            streaming=True,
-        )
+        llm = make_llm(model, base_url, openai_client.api_key, streaming=True)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance])
 
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
-
-        # Streaming with tool_calls now supported in Vertex and Anthropic
         try:
-            chunks = []
-            for chunk in model_with_tools.stream(
-                "What's the weather in Tokyo?"
-            ):
-                chunks.append(chunk)
-
+            chunks = list(model_with_tools.stream("What's the weather in Tokyo?"))
             assert len(chunks) > 0
         except Exception as e:
             pytest.skip(f"Streaming with tools error: {str(e)}")
 
-    def test_concurrent_tool_calls(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_concurrent_tool_calls(self, openai_client, base_url, model):
         """Test parallel tool execution"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance, list_cities])
 
         response = model_with_tools.invoke(
             "Get weather for Tokyo, London, and Sydney, and calculate distances between them"
@@ -327,91 +289,21 @@ class TestLangChainIntegration:
 
         assert response is not None
 
-    def test_model_response_format(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_model_response_format(self, openai_client, base_url, model):
         """Test response format compatibility"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [get_weather]
-        model_with_tools = model.bind_tools(tools)
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather])
 
         response = model_with_tools.invoke("What's the weather in Tokyo?")
 
         assert hasattr(response, 'content') or hasattr(response, 'tool_calls')
 
-    def test_error_handling_with_tools(self, openai_client):
-        """Test error handling when tools fail"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        @tool
-        def failing_tool(query: str) -> str:
-            """Tool that might fail"""
-            raise ValueError("Intentional failure")
-
-        tools = [failing_tool, get_weather]
-        model_with_tools = model.bind_tools(tools)
-
-        try:
-            response = model_with_tools.invoke("Help me with something")
-            assert response is not None
-        except Exception as e:
-            assert "Intentional failure" in str(e) or response is not None
-
-    def test_vertex_tool_calls_google_model(self, openai_client):
-        """Test tool calling with Google Vertex AI Gemini model"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.5,
-        )
-
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
-
-        response = model_with_tools.invoke(
-            "What's the weather in Tokyo? Also list all available cities."
-        )
-
-        assert response is not None
-        assert hasattr(response, 'content') or hasattr(response, 'tool_calls')
-
-    def test_anthropic_tool_calls_claude_model(self, openai_client):
-        """Test tool calling with Anthropic Claude model"""
-        model = ChatOpenAI(
-            model="claude-opus-4-1",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.5,
-        )
-
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
-
-        response = model_with_tools.invoke(
-            "What's the weather in London? Calculate distance to Paris."
-        )
-
-        assert response is not None
-        assert hasattr(response, 'content') or hasattr(response, 'tool_calls')
-
-    def test_vertex_multiple_function_calls(self, openai_client):
-        """Test Vertex AI with multiple concurrent function calls"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_multiple_function_calls(self, openai_client, base_url, model):
+        """Test handling multiple concurrent function calls"""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance])
 
         response = model_with_tools.invoke(
             "Get weather for Tokyo and London. Calculate distance between them."
@@ -419,209 +311,95 @@ class TestLangChainIntegration:
 
         assert response is not None
 
-    def test_anthropic_multiple_function_calls(self, openai_client):
-        """Test Anthropic with multiple concurrent function calls"""
-        model = ChatOpenAI(
-            model="claude-opus-4-1",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
 
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
-
-        response = model_with_tools.invoke(
-            "Get weather for Tokyo and Sydney. Calculate distance between them."
-        )
-
-        assert response is not None
-
+# ---------------------------------------------------------------------------
+# Provider comparison tests
+# ---------------------------------------------------------------------------
 
 class TestProviderComparison:
-    """Compare tool calling behavior between Google Vertex and Anthropic"""
+    """Compare tool calling behavior between providers"""
 
-    def test_google_vs_anthropic_same_prompt(self, openai_client):
-        """Test same tool calling prompt with both providers"""
-        # Google Vertex AI
-        google_model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.3,
-        )
-
-        # Anthropic Claude
-        anthropic_model = ChatOpenAI(
-            model="claude-opus-4-1",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.3,
-        )
-
-        tools = [get_weather, calculate_distance]
-
-        google_with_tools = google_model.bind_tools(tools)
-        anthropic_with_tools = anthropic_model.bind_tools(tools)
-
-        prompt = "What's the weather in Tokyo? How far is it from London?"
-
-        try:
-            google_response = google_with_tools.invoke(prompt)
-            anthropic_response = anthropic_with_tools.invoke(prompt)
-
-            # Both should return valid responses
-            assert google_response is not None
-            assert anthropic_response is not None
-        except Exception as e:
-            pytest.skip(f"Provider comparison test failed: {str(e)}")
-
-    def test_google_vertex_tool_response_structure(self, openai_client):
-        """Verify Google Vertex AI tool response structure"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [get_weather]
-        model_with_tools = model.bind_tools(tools)
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_vertex_tool_response_structure(self, openai_client, base_url, model):
+        """Verify Vertex AI tool response structure"""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather])
 
         response = model_with_tools.invoke("What's the weather in London?")
 
-        # Should have either content or tool_calls
         assert hasattr(response, 'content') or hasattr(response, 'tool_calls')
 
-    def test_anthropic_tool_response_structure(self, openai_client):
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_anthropic_tool_response_structure(self, openai_client, base_url, model):
         """Verify Anthropic tool response structure"""
-        model = ChatOpenAI(
-            model="claude-opus-4-1",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [get_weather]
-        model_with_tools = model.bind_tools(tools)
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather])
 
         response = model_with_tools.invoke("What's the weather in Paris?")
 
-        # Should have either content or tool_calls
         assert hasattr(response, 'content') or hasattr(response, 'tool_calls')
 
+    def test_google_vs_anthropic_same_prompt(self, openai_client, base_url):
+        """Test same tool calling prompt with both provider types"""
+        tools = [get_weather, calculate_distance]
+        prompt = "What's the weather in Tokyo? How far is it from London?"
+
+        for model in LANGCHAIN_ALL_MODELS + LANGCHAIN_ALL_MODELS:
+            try:
+                llm = make_llm(model, base_url, openai_client.api_key, temperature=0.3)
+                model_with_tools = llm.bind_tools(tools)
+                response = model_with_tools.invoke(prompt)
+                assert response is not None, f"Expected response for model {model}"
+            except Exception as e:
+                pytest.skip(f"Provider comparison test failed for {model}: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Streaming tool support tests
+# ---------------------------------------------------------------------------
 
 class TestStreamingToolSupport:
     """Tests for streaming tool call support"""
 
-    def test_vertex_streaming_text_only(self, openai_client):
-        """Test Vertex streaming with text content"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            streaming=True,
-        )
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_streaming_text_only(self, openai_client, base_url, model):
+        """Test streaming with text content only"""
+        llm = make_llm(model, base_url, openai_client.api_key, streaming=True)
 
-        # Without tools, streaming should work fine
         try:
-            chunks = []
-            for chunk in model.stream("Say hello"):
-                chunks.append(chunk)
+            chunks = list(llm.stream("Say hello"))
             assert len(chunks) > 0
         except Exception as e:
             pytest.skip(f"Basic streaming failed: {str(e)}")
 
-    def test_vertex_streaming_with_tools(self, openai_client):
-        """Test Vertex streaming with tool calls"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            streaming=True,
-        )
-
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_streaming_with_tools(self, openai_client, base_url, model):
+        """Test streaming with tool calls"""
+        llm = make_llm(model, base_url, openai_client.api_key, streaming=True)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance])
 
         try:
-            chunks = []
-            for chunk in model_with_tools.stream(
-                "What's the weather in London?"
-            ):
-                chunks.append(chunk)
+            chunks = list(model_with_tools.stream("What's the weather in London?"))
             assert len(chunks) > 0
         except Exception as e:
-            pytest.skip(f"Vertex streaming with tools: {str(e)}")
-
-    def test_anthropic_streaming_with_tools(self, openai_client):
-        """Test Anthropic Claude streaming with tool_use calls"""
-        model = ChatOpenAI(
-            model="claude-opus-4-1",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            streaming=True,
-        )
-
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
-
-        try:
-            chunks = []
-            for chunk in model_with_tools.stream(
-                "What's the weather in Paris?"
-            ):
-                chunks.append(chunk)
-            assert len(chunks) > 0
-        except Exception as e:
-            pytest.skip(f"Anthropic streaming with tools: {str(e)}")
-
-    def test_google_streaming_with_tools(self, openai_client):
-        """Test Google Vertex AI streaming with tool calls"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            streaming=True,
-        )
-
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
-
-        try:
-            chunks = []
-            for chunk in model_with_tools.stream(
-                "What's the weather in Tokyo?"
-            ):
-                chunks.append(chunk)
-            assert len(chunks) > 0
-        except Exception as e:
-            pytest.skip(f"Google streaming with tools: {str(e)}")
+            pytest.skip(f"Streaming with tools error: {str(e)}")
 
 
-class TestVertexToolCallsWithHistory:
-    """Test Vertex AI tool calling with conversation history"""
+# ---------------------------------------------------------------------------
+# Tool calls with conversation history
+# ---------------------------------------------------------------------------
 
-    def test_vertex_tool_calls_with_developer_role(self, openai_client):
-        """Test Vertex tool calling with developer role messages and tool_calls in history"""
-        from langchain_core.messages import (
-            HumanMessage,
-            AIMessage,
-            SystemMessage,
-            ToolMessage,
-        )
+class TestToolCallsWithHistory:
+    """Test tool calling with conversation history"""
 
-        model = ChatOpenAI(
-            model="gemini-2.5-flash",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=1,
-        )
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calls_with_system_role(self, openai_client, base_url, model):
+        """Test tool calling with system role message in history"""
+        llm = make_llm(model, base_url, openai_client.api_key, temperature=1)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance])
 
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
-
-        # Build conversation history with tool calls
-        # Using LangChain's ToolCall format instead of OpenAI format
         messages = [
-            SystemMessage("You are a helpful assistant with access to weather and distance calculation tools."),
+            SystemMessage("You are a helpful assistant with access to weather and distance tools."),
             HumanMessage("What's the weather in Tokyo?"),
             AIMessage(
                 "I'll check the weather for Tokyo.",
@@ -633,10 +411,7 @@ class TestVertexToolCallsWithHistory:
                     }
                 ],
             ),
-            ToolMessage(
-                "Sunny, 22°C",
-                tool_call_id="call_weather_001",
-            ),
+            ToolMessage("Sunny, 22°C", tool_call_id="call_weather_001"),
             HumanMessage("How far is Tokyo from London?"),
         ]
 
@@ -644,27 +419,12 @@ class TestVertexToolCallsWithHistory:
         assert response is not None
         assert hasattr(response, "content") or hasattr(response, "tool_calls")
 
-    def test_vertex_multiple_function_calls_in_sequence(self, openai_client):
-        """Test Vertex handling multiple function calls with proper sequence"""
-        from langchain_core.messages import (
-            HumanMessage,
-            AIMessage,
-            ToolMessage,
-        )
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_multiple_function_calls_in_sequence(self, openai_client, base_url, model):
+        """Test handling multiple function calls with proper sequence"""
+        llm = make_llm(model, base_url, openai_client.api_key, temperature=0.7, seed=42)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance, list_cities])
 
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-            temperature=0.7,
-            seed=42,
-        )
-
-        tools = [get_weather, calculate_distance, list_cities]
-        model_with_tools = model.bind_tools(tools)
-
-        # Simulate conversation with multiple tool calls
-        # Using LangChain's ToolCall format (id, name, args)
         messages = [
             HumanMessage("Get weather for Tokyo and London, then calculate distance between them"),
             AIMessage(
@@ -695,16 +455,14 @@ class TestVertexToolCallsWithHistory:
 
         response = model_with_tools.invoke(messages)
         assert response is not None
-        # Response should include content about packing recommendations
         if hasattr(response, "content"):
             assert len(response.content) > 0
 
-    def test_vertex_tool_calls_with_all_parameters(self, openai_client):
-        """Test Vertex tool calling with all OpenAI-compatible parameters"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calls_with_all_parameters(self, openai_client, base_url, model):
+        """Test tool calling with all OpenAI-compatible parameters"""
+        llm = make_llm(
+            model, base_url, openai_client.api_key,
             temperature=1,
             seed=42,
             top_p=0.9,
@@ -712,51 +470,38 @@ class TestVertexToolCallsWithHistory:
             presence_penalty=0.1,
             max_tokens=500,
         )
-
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools)
+        model_with_tools = llm.bind_tools([get_weather, calculate_distance])
 
         response = model_with_tools.invoke(
             "What's the weather in Tokyo and how far is it from London?"
         )
         assert response is not None
 
-    def test_vertex_tool_calls_response_format(self, openai_client):
-        """Test that Vertex returns proper tool_calls format"""
-        model = ChatOpenAI(
-            model="gemini-2.5-flash",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
-        )
-
-        tools = [get_weather]
-        model_with_tools = model.bind_tools(tools)
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_calls_response_format(self, openai_client, base_url, model):
+        """Test that router returns proper tool_calls format"""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools([get_weather])
 
         response = model_with_tools.invoke("What's the weather in Tokyo?")
         assert response is not None
 
-        # If tool_calls are present, verify LangChain format
-        # LangChain transforms OpenAI format to its own format
         if hasattr(response, "tool_calls") and response.tool_calls:
             for tool_call in response.tool_calls:
-                # LangChain format: {"id": "...", "name": "...", "args": {...}, "type": "tool_call"}
                 assert "id" in tool_call
                 assert "name" in tool_call
                 assert "args" in tool_call or "arguments" in tool_call
-                # Type can be either "function" (OpenAI format) or "tool_call" (LangChain format)
                 if "type" in tool_call:
                     assert tool_call["type"] in ["function", "tool_call"]
 
-    def test_vertex_tool_choice_auto(self, openai_client):
-        """Test Vertex with tool_choice='auto' parameter"""
-        model = ChatOpenAI(
-            model="gemini-2.5-pro",
-            openai_api_base="http://localhost:8080/v1",
-            openai_api_key=openai_client.api_key,
+    @pytest.mark.parametrize("model", LANGCHAIN_ALL_MODELS)
+    def test_tool_choice_auto(self, openai_client, base_url, model):
+        """Test with tool_choice='auto' parameter"""
+        llm = make_llm(model, base_url, openai_client.api_key)
+        model_with_tools = llm.bind_tools(
+            [get_weather, calculate_distance],
+            tool_choice="auto",
         )
-
-        tools = [get_weather, calculate_distance]
-        model_with_tools = model.bind_tools(tools, tool_choice="auto")
 
         response = model_with_tools.invoke(
             "Get weather for London and compare with Paris distance"
