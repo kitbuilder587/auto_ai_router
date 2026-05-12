@@ -271,7 +271,6 @@ func TestSpendLogQueryConstants(t *testing.T) {
 	assert.NotEmpty(t, QueryUpsertDailyTeamSpend)
 	assert.NotEmpty(t, QueryUpsertDailyOrganizationSpend)
 	assert.NotEmpty(t, QueryUpsertDailyEndUserSpend)
-	assert.NotEmpty(t, QueryUpsertDailyAgentSpend)
 	assert.NotEmpty(t, QueryUpsertDailyTagSpend)
 	assert.NotEmpty(t, QueryMarkSpendLogsAsProcessed)
 }
@@ -301,6 +300,5 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryUpsertDailyTeamSpend, "team_id")
 	assert.Contains(t, QueryUpsertDailyOrganizationSpend, "organization_id")
 	assert.Contains(t, QueryUpsertDailyEndUserSpend, "end_user_id")
-	assert.Contains(t, QueryUpsertDailyAgentSpend, "agent_id")
 	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
 }

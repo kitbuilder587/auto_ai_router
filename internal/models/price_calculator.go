@@ -143,3 +143,8 @@ func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
 	}
 	return costs.TotalCost
 }
+
+// CalculateCosts returns the full cost breakdown for all token types.
+func (p *ModelPrice) CalculateCosts(usage *converter.TokenUsage) *converter.TokenCosts {
+	return CalculateTokenCosts(usage, p)
+}

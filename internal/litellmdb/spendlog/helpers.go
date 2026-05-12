@@ -39,15 +39,14 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 		entry.RequesterIP,           // $20
 		entry.Status,                // $21
 		entry.SessionID,             // $22
-		entry.AgentID,               // $23
-		entry.MCPNamespacedToolName, // $24
-		requestTags,                 // $25 (JSON array as string)
+		entry.MCPNamespacedToolName, // $23
+		requestTags,                 // $24 (JSON array as string)
 	}
 }
 
 // GetBatchParams returns all parameters for batch insert
 func GetBatchParams(entries []*models.SpendLogEntry) []interface{} {
-	params := make([]interface{}, 0, len(entries)*25) // 25 params per entry
+	params := make([]interface{}, 0, len(entries)*24) // 24 params per entry
 	for _, entry := range entries {
 		params = append(params, GetSpendLogParams(entry)...)
 	}

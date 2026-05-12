@@ -105,9 +105,8 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 	}
 }
 
-// buildMetadata builds metadata JSON with user/team alias and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage) string {
-	// Extract user info from tokenInfo (or use empty strings as fallback)
+// buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts) string {
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
 		userID = tokenInfo.UserID
@@ -115,48 +114,87 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		organizationID = tokenInfo.OrganizationID
 	}
 
-	// Base metadata always includes additional_usage_values
-	metadata := map[string]interface{}{
-		"additional_usage_values": map[string]interface{}{
-			"prompt_tokens_details":     nil, // {"text_tokens": null, "audio_tokens": null, "image_tokens": null, "reasoning_tokens": 127, "accepted_prediction_tokens": null, "rejected_prediction_tokens": null}
-			"completion_tokens_details": nil,
-		},
-		"user_api_key":         hashedToken,
-		"user_api_key_org_id":  organizationID,
-		"user_api_key_team_id": teamID,
-		"user_api_key_user_id": userID,
-		"usage_object":         nil,
-		"status":               "success",
+	// Build usage_object and additional_usage_values
+	promptTokensDetails := map[string]interface{}{
+		"text_tokens":   nil,
+		"audio_tokens":  0,
+		"image_tokens":  nil,
+		"cached_tokens": 0,
+	}
+	completionTokensDetails := map[string]interface{}{
+		"text_tokens":                nil,
+		"audio_tokens":               0,
+		"image_tokens":               nil,
+		"reasoning_tokens":           0,
+		"accepted_prediction_tokens": 0,
+		"rejected_prediction_tokens": 0,
 	}
 
+	var usageObject interface{}
 	if usage != nil {
-		prompt_tokens_details := map[string]interface{}{
-			"text_tokens":                  usage.PromptTokens + usage.CompletionTokens,
-			"audio_tokens":                 usage.AudioInputTokens + usage.AudioOutputTokens,
-			"image_tokens":                 usage.ImageTokens,
-			"reasoning_tokens":             usage.ReasoningTokens,
-			"accepted_prediction_tokens":   nil,
-			"rejected_prediction_tokens":   nil,
-			"web_search_requests":          nil,
-			"character_count":              nil,
-			"image_count":                  usage.ImageCount,
-			"video_length_seconds":         nil,
-			"cache_creation_tokens":        usage.CacheCreationTokens,
-			"cache_creation_token_details": nil,
-		}
-
-		if details, ok := metadata["additional_usage_values"].(map[string]interface{}); ok {
-			details["prompt_tokens_details"] = prompt_tokens_details
-		}
-		if usage_object, ok := metadata["usage_object"].(map[string]interface{}); ok {
-			usage_object["completion_tokens_details"] = prompt_tokens_details
-			usage_object["total_tokens"] = usage.Total()
-			usage_object["prompt_tokens"] = usage.PromptTokens
-			usage_object["completion_tokens"] = usage.CompletionTokens
+		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
+		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
+		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
+		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
+		completionTokensDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
+		completionTokensDetails["rejected_prediction_tokens"] = usage.RejectedPredictionTokens
+		usageObject = map[string]interface{}{
+			"total_tokens":              usage.Total(),
+			"prompt_tokens":             usage.PromptTokens,
+			"completion_tokens":         usage.CompletionTokens,
+			"prompt_tokens_details":     promptTokensDetails,
+			"completion_tokens_details": completionTokensDetails,
 		}
 	}
 
-	// Add aliases from tokenInfo if available
+	additionalUsage := map[string]interface{}{
+		"prompt_tokens_details": map[string]interface{}{
+			"audio_tokens":  promptTokensDetails["audio_tokens"],
+			"cached_tokens": promptTokensDetails["cached_tokens"],
+		},
+		"completion_tokens_details": map[string]interface{}{
+			"audio_tokens":               completionTokensDetails["audio_tokens"],
+			"reasoning_tokens":           completionTokensDetails["reasoning_tokens"],
+			"accepted_prediction_tokens": completionTokensDetails["accepted_prediction_tokens"],
+			"rejected_prediction_tokens": completionTokensDetails["rejected_prediction_tokens"],
+		},
+	}
+
+	// Build cost_breakdown
+	var costBreakdown interface{}
+	if costs != nil {
+		costBreakdown = map[string]interface{}{
+			"input_cost":          costs.InputCost,
+			"output_cost":         costs.OutputCost,
+			"total_cost":          costs.TotalCost,
+			"original_cost":       costs.TotalCost,
+			"margin_percent":      0.0,
+			"discount_amount":     0.0,
+			"tool_usage_cost":     0.0,
+			"discount_percent":    0.0,
+			"margin_fixed_amount": 0.0,
+			"margin_total_amount": 0.0,
+		}
+	}
+
+	metadata := map[string]interface{}{
+		"batch_models":                  nil,
+		"usage_object":                  usageObject,
+		"user_api_key":                  hashedToken,
+		"cost_breakdown":                costBreakdown,
+		"applied_guardrails":            []interface{}{},
+		"user_api_key_org_id":           organizationID,
+		"requester_ip_address":          requesterIP,
+		"user_api_key_team_id":          teamID,
+		"user_api_key_user_id":          userID,
+		"guardrail_information":         nil,
+		"mcp_tool_call_metadata":        nil,
+		"additional_usage_values":       additionalUsage,
+		"cold_storage_object_key":       nil,
+		"vector_store_request_metadata": nil,
+		"status":                        "success",
+	}
+
 	if tokenInfo != nil {
 		if tokenInfo.KeyAlias != "" {
 			metadata["user_api_key_alias"] = tokenInfo.KeyAlias
@@ -169,23 +207,17 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		}
 	}
 
-	// Add error field if request failed
 	if errorMsg != "" {
-		// Determine error class based on HTTP status code (using LiteLLM exception types)
-		errorClass := mapHTTPStatusToErrorClass(httpStatus)
-
 		metadata["error_information"] = map[string]interface{}{
 			"error_message": errorMsg,
 			"error_code":    httpStatus,
-			"error_class":   errorClass,
+			"error_class":   mapHTTPStatusToErrorClass(httpStatus),
 		}
 		metadata["status"] = "failure"
 	}
 
-	// Convert to JSON
 	jsonBytes, err := json.Marshal(metadata)
 	if err != nil {
-		// Fallback to simple format if marshaling fails
 		return fmt.Sprintf(`{"user_api_key":"%s","user_api_key_org_id":"%s","user_api_key_team_id":"%s","user_api_key_user_id":"%s"}`, hashedToken, organizationID, teamID, userID)
 	}
 	return string(jsonBytes)
