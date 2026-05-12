@@ -258,12 +258,12 @@ func (p *Proxy) executeProxyRequest(
 			)
 		}
 		p.balancer.RecordResponse(cred.Name, modelID, statusCode)
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, statusCode, time.Since(start))
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		return nil, err
 	}
 	// Record response
 	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
-	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
+	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 	p.logger.Debug("Proxy request forwarded",
 		"credential", cred.Name,
@@ -823,7 +823,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				shouldRetry = true
 				retryReason = RetryReasonAuthErr
 				p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
-				p.metrics.RecordRequest(cred.Name, r.URL.Path, http.StatusInternalServerError, time.Since(start))
+				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusInternalServerError, time.Since(start))
 				continue
 			}
 		}
@@ -900,7 +900,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					"credential", cred.Name, "error", doErr, "url", targetURL)
 			}
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
-			p.metrics.RecordRequest(cred.Name, r.URL.Path, statusCode, time.Since(start))
+			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 			shouldRetry = true
 			retryReason = RetryReasonNetErr
 			transportErr = doErr
@@ -918,7 +918,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 		// Debug: log response headers
 		maskedRespHeaders := security.MaskSensitiveHeaders(resp.Header)

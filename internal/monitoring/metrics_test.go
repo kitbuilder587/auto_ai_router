@@ -28,14 +28,14 @@ func TestRecordRequest_Enabled(t *testing.T) {
 	m := New(true)
 
 	// Record a successful request
-	m.RecordRequest("cred1", "/v1/chat/completions", 200, 100*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 200, 100*time.Millisecond)
 
 	// Verify RequestsTotal metric
 	count := testutil.CollectAndCount(RequestsTotal)
 	assert.Greater(t, count, 0)
 
 	// Record an error request
-	m.RecordRequest("cred1", "/v1/chat/completions", 500, 150*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 500, 150*time.Millisecond)
 
 	// Verify CredentialErrorsTotal metric was incremented
 	count = testutil.CollectAndCount(CredentialErrorsTotal)
@@ -48,8 +48,8 @@ func TestRecordRequest_Disabled(t *testing.T) {
 	m := New(false)
 
 	// Record requests when disabled
-	m.RecordRequest("cred1", "/v1/chat/completions", 200, 100*time.Millisecond)
-	m.RecordRequest("cred1", "/v1/chat/completions", 500, 150*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 200, 100*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 500, 150*time.Millisecond)
 
 	// Metrics should not be recorded when disabled
 	// (They actually will be because metrics are global, but the method should return early)
@@ -65,7 +65,7 @@ func TestRecordRequest_DifferentStatusCodes(t *testing.T) {
 	// Record requests with different status codes
 	statusCodes := []int{200, 201, 400, 401, 403, 429, 500, 502, 503}
 	for _, code := range statusCodes {
-		m.RecordRequest("cred1", "/v1/test", code, 50*time.Millisecond)
+		m.RecordRequest("cred1", "/v1/test", "test-model", code, 50*time.Millisecond)
 	}
 
 	// Verify metrics were collected
@@ -79,9 +79,9 @@ func TestRecordRequest_MultipleCredentials(t *testing.T) {
 	m := New(true)
 
 	// Record requests for different credentials
-	m.RecordRequest("cred1", "/v1/chat/completions", 200, 100*time.Millisecond)
-	m.RecordRequest("cred2", "/v1/chat/completions", 200, 150*time.Millisecond)
-	m.RecordRequest("cred3", "/v1/embeddings", 200, 80*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 200, 100*time.Millisecond)
+	m.RecordRequest("cred2", "/v1/chat/completions", "test-model", 200, 150*time.Millisecond)
+	m.RecordRequest("cred3", "/v1/embeddings", "test-model", 200, 80*time.Millisecond)
 
 	// Verify metrics were collected
 	count := testutil.CollectAndCount(RequestsTotal)
@@ -145,12 +145,12 @@ func TestMetrics_Integration(t *testing.T) {
 	m := New(true)
 
 	// Simulate a series of requests
-	m.RecordRequest("cred1", "/v1/chat/completions", 200, 100*time.Millisecond)
-	m.RecordRequest("cred1", "/v1/chat/completions", 200, 120*time.Millisecond)
-	m.RecordRequest("cred1", "/v1/chat/completions", 500, 150*time.Millisecond) // Error
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 200, 100*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 200, 120*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 500, 150*time.Millisecond) // Error
 
-	m.RecordRequest("cred2", "/v1/embeddings", 200, 80*time.Millisecond)
-	m.RecordRequest("cred2", "/v1/embeddings", 429, 90*time.Millisecond) // Rate limit error
+	m.RecordRequest("cred2", "/v1/embeddings", "test-model", 200, 80*time.Millisecond)
+	m.RecordRequest("cred2", "/v1/embeddings", "test-model", 429, 90*time.Millisecond) // Rate limit error
 
 	// Update RPM metrics
 	m.UpdateCredentialRPM("cred1", 3)
@@ -189,13 +189,13 @@ func TestRecordRequest_ErrorIncrementsCounter(t *testing.T) {
 	m := New(true)
 
 	// Record successful request (200)
-	m.RecordRequest("cred1", "/v1/test", 200, 50*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/test", "test-model", 200, 50*time.Millisecond)
 
 	// Get initial error count (should be 0)
 	initialErrors := testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1"))
 
 	// Record error request
-	m.RecordRequest("cred1", "/v1/test", 500, 50*time.Millisecond)
+	m.RecordRequest("cred1", "/v1/test", "test-model", 500, 50*time.Millisecond)
 
 	// Error count should increase
 	finalErrors := testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1"))
@@ -231,7 +231,7 @@ func TestMultipleEndpoints(t *testing.T) {
 	}
 
 	for _, endpoint := range endpoints {
-		m.RecordRequest("cred1", endpoint, 200, 100*time.Millisecond)
+		m.RecordRequest("cred1", endpoint, "test-model", 200, 100*time.Millisecond)
 	}
 
 	// All endpoints should be tracked separately

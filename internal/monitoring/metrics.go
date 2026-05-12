@@ -14,7 +14,7 @@ var (
 			Name: "auto_ai_router_requests_total",
 			Help: "Total number of requests",
 		},
-		[]string{"credential", "endpoint", "status"},
+		[]string{"credential", "model", "endpoint", "status"},
 	)
 
 	RequestDuration = promauto.NewHistogramVec(
@@ -177,13 +177,13 @@ func (m *Metrics) updateModelMetric(gauge *prometheus.GaugeVec, credential, mode
 	gauge.WithLabelValues(credential, model).Set(float64(value))
 }
 
-func (m *Metrics) RecordRequest(credential, endpoint string, statusCode int, duration time.Duration) {
+func (m *Metrics) RecordRequest(credential, endpoint, model string, statusCode int, duration time.Duration) {
 	if !m.isEnabled() {
 		return
 	}
 
 	status := strconv.Itoa(statusCode)
-	RequestsTotal.WithLabelValues(credential, endpoint, status).Inc()
+	RequestsTotal.WithLabelValues(credential, model, endpoint, status).Inc()
 	RequestDuration.WithLabelValues(credential, endpoint).Observe(duration.Seconds())
 
 	if statusCode != 200 {
