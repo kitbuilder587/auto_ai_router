@@ -253,15 +253,15 @@ func isNativeResponsesModel(modelID string) bool {
 }
 
 // providerPassthroughDefaults maps provider types to their default passthrough behaviour.
-// OpenAI natively supports /v1/responses so it defaults to true.
+// OpenAI and Proxy natively support /v1/responses so they default to true.
 // Vertex AI and Anthropic use the native ProviderResponses converter (Phase 4) instead.
 var providerPassthroughDefaults = map[config.ProviderType]bool{
 	config.ProviderTypeOpenAI:    true,
+	config.ProviderTypeProxy:     true,
 	config.ProviderTypeVertexAI:  false,
 	config.ProviderTypeGemini:    false,
 	config.ProviderTypeAnthropic: false,
 	config.ProviderTypeBedrock:   false,
-	config.ProviderTypeProxy:     false,
 }
 
 // IsPassthroughResponses reports whether Responses API requests for modelID
