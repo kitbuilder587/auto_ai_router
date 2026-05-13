@@ -272,12 +272,18 @@ func (p *Proxy) executeProxyRequest(
 				"url", targetURL,
 			)
 		}
-		p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+		// Proxy credentials are dynamic relays — don't record them in fail2ban.
+		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
+		if cred.Type != config.ProviderTypeProxy {
+			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+		}
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		return nil, err
 	}
-	// Record response
-	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+	// Proxy credentials are dynamic relays — don't record them in fail2ban.
+	if cred.Type != config.ProviderTypeProxy {
+		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+	}
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 	p.logger.Debug("Proxy request forwarded",

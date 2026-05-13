@@ -751,14 +751,16 @@ func startProxyStatsUpdater(
 	wg *sync.WaitGroup,
 	updateMutex *sync.Mutex,
 ) {
+	// Run initial update synchronously so proxy model lists are populated before
+	// the HTTP server starts accepting requests. Without this, the first few requests
+	// arrive before credentialModels is populated, causing HasModel to fall through
+	// to the permissive fallback and routing requests to the wrong proxy.
+	modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
-		// Update immediately on startup
-		modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
-
-		// Then update periodically
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
