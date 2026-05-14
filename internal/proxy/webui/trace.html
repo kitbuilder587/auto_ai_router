@@ -131,11 +131,12 @@
 
     // ── mermaid diagram builder ────────────────────────────────────────────────
     function buildMermaid(trace) {
-      const nodeDefs = [];
-      const edgeDefs = [];
-      const styleDefs = [];
-      const defined = new Set();
-      let nc = 0;
+      const sgBlocks  = [];   // subgraph blocks (arrays of lines)
+      const edgeDefs  = [];   // inter-node edges
+      const animDefs  = [];   // animate declarations
+      const styleDefs = [];   // style overrides
+      const defined   = new Set();
+      let nc = 0, ec = 0;
       const idMap = new Map();
 
       function nid(key) {
@@ -143,50 +144,105 @@
         return idMap.get(key);
       }
 
+      function addEdge(from, to, label) {
+        const eId = 'e' + ec++;
+        edgeDefs.push(label
+          ? `  ${from} ${eId}@==>|"${label}"| ${to}`
+          : `  ${from} ${eId}@==> ${to}`);
+        animDefs.push(`  ${eId}@{ animate: true }`);
+      }
+
       function statusFill(s) {
         return { healthy: '#22c55e', degraded: '#f59e0b', unhealthy: '#ef4444' }[s] || '#5f656d';
       }
 
-      function addRouter(t) {
+      function sumUpstreamRPM(up) {
+        if (!up || up.fetch_error) return 0;
+        let total = 0;
+        for (const [name, cred] of Object.entries(up.credentials || {})) {
+          total += cred.type === 'proxy'
+            ? sumUpstreamRPM((up.upstreams || {})[name])
+            : (cred.current_rpm || 0);
+        }
+        return total;
+      }
+
+      function addRouter(t, alias) {
         const rid = nid('r:' + t.router_id);
         if (defined.has(rid)) return rid;
         defined.add(rid);
 
-        const creds = t.credentials || {};
-        const total = Object.keys(creds).length;
-        const banned = Object.values(creds).filter(c => c.is_banned).length;
-        const lbl = `🖥 ${esc(t.router_id)}<br/>${esc(t.status || '?')}<br/>${total - banned}/${total} ok`;
-        nodeDefs.push(`    ${rid}["${lbl}"]`);
-        styleDefs.push(`    style ${rid} fill:${statusFill(t.status)},color:#fff,stroke:#fff`);
+        const creds    = t.credentials || {};
+        const nonProxy = Object.entries(creds).filter(([, c]) => c.type !== 'proxy');
+        const total    = Object.keys(creds).length;
+        const banned   = Object.values(creds).filter(c => c.is_banned).length;
+        const dark     = isDark();
 
-        for (const [name, cred] of Object.entries(creds)) {
-          if (cred.type === 'proxy') continue;
-          const lid = nid('c:' + t.router_id + ':' + name);
-          const icon = cred.is_banned ? '✗' : '✓';
+        // subgraph title = alias if set, else router_id
+        const sgTitle = alias && alias !== t.router_id ? esc(alias) : esc(t.router_id);
+        const sgId    = rid + 'sg';
+        const sgFill  = dark ? '#1e2124' : '#f0f0ee';
+        const sgStroke = statusFill(t.status);
+        styleDefs.push(`  style ${sgId} fill:${sgFill},stroke:${sgStroke},stroke-width:2px`);
+
+        const sg = [`  subgraph ${sgId} ["🖥 ${sgTitle}"]`];
+
+        // router node (processes shape = stacked rectangle)
+        const routerLbl = `${esc(t.router_id)}<br/>${esc(t.status || '?')} · ${total - banned}/${total} ok`;
+        sg.push(`    ${rid}@{ shape: processes, label: "${routerLbl}" }`);
+        styleDefs.push(`  style ${rid} fill:${statusFill(t.status)},color:#fff,stroke:#fff`);
+
+        // credential nodes (notch-rect = card shape)
+        for (const [name, cred] of nonProxy) {
+          const lid    = nid('c:' + t.router_id + ':' + name);
+          const icon   = cred.is_banned ? '✗' : '✓';
           const errStr = Object.entries(cred.banned_error_counts || {}).map(([c, n]) => `${n}×${c}`).join(' ');
-          const credLbl = `${icon} ${esc(name)}<br/>${esc(cred.type)}${errStr ? '<br/>' + esc(errStr) : ''}`;
-          nodeDefs.push(`    ${lid}["${credLbl}"]`);
-          styleDefs.push(`    style ${lid} fill:${cred.is_banned ? '#ef4444' : '#475569'},color:#fff,stroke:none`);
-          edgeDefs.push(`    ${rid} --> ${lid}`);
+          const lbl    = `${icon} ${esc(name)}<br/>${esc(cred.type)}${errStr ? '<br/>' + esc(errStr) : ''}`;
+          sg.push(`    ${lid}@{ shape: notch-rect, label: "${lbl}" }`);
+          styleDefs.push(`  style ${lid} fill:${cred.is_banned ? '#ef4444' : '#475569'},color:#fff,stroke:none`);
         }
 
+        sg.push(`  end`);
+        sgBlocks.push(sg);
+
+        // edges: router → credentials
+        for (const [name, cred] of nonProxy) {
+          const lid = nid('c:' + t.router_id + ':' + name);
+          addEdge(rid, lid, cred.current_rpm > 0 ? `${fmtNum(cred.current_rpm)} rpm` : null);
+        }
+
+        // edges: router → upstream routers
         for (const [credName, up] of Object.entries(t.upstreams || {})) {
+          const upRPM = sumUpstreamRPM(up);
+          const label = upRPM > 0 ? `${fmtNum(upRPM)} rpm` : null;
           if (up.fetch_error) {
-            const eid = nid('e:' + t.router_id + ':' + credName);
-            nodeDefs.push(`    ${eid}["⚠ ${esc(credName)}<br/>unreachable"]`);
-            styleDefs.push(`    style ${eid} fill:#5f656d,color:#fff,stroke:none`);
-            edgeDefs.push(`    ${rid} -->|"${esc(credName)}"| ${eid}`);
+            const errId  = nid('err:' + t.router_id + ':' + credName);
+            const errSgId = errId + 'sg';
+            sgBlocks.push([
+              `  subgraph ${errSgId} ["⚠ ${esc(credName)}"]`,
+              `    ${errId}@{ shape: notch-rect, label: "unreachable" }`,
+              `  end`,
+            ]);
+            styleDefs.push(`  style ${errId} fill:#5f656d,color:#fff,stroke:none`);
+            styleDefs.push(`  style ${errSgId} fill:${dark ? '#1e2124' : '#f0f0ee'},stroke:#5f656d,stroke-width:2px`);
+            addEdge(rid, errId, label);
           } else {
-            const uid = addRouter(up);
-            edgeDefs.push(`    ${rid} -->|"${esc(credName)}"| ${uid}`);
+            const uid = addRouter(up, credName);
+            addEdge(rid, uid, label);
           }
         }
 
         return rid;
       }
 
-      addRouter(trace);
-      return ['flowchart LR', ...nodeDefs, ...edgeDefs, ...styleDefs].join('\n');
+      addRouter(trace, null);
+      return [
+        'flowchart LR',
+        ...sgBlocks.flat(),
+        ...edgeDefs,
+        ...animDefs,
+        ...styleDefs,
+      ].join('\n');
     }
 
     async function renderDiagram(trace) {
