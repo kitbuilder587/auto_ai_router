@@ -397,6 +397,10 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 		}
 	}
 
+	if vertexResp.UsageMetadata != nil {
+		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
+	}
+
 	return json.Marshal(openAIResp)
 }
 

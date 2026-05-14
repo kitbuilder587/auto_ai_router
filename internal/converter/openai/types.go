@@ -209,6 +209,7 @@ type OpenAIImageData struct {
 type OpenAIImageResponse struct {
 	Created int64             `json:"created"`
 	Data    []OpenAIImageData `json:"data"`
+	Usage   *OpenAIUsage      `json:"usage,omitempty"`
 }
 
 // Embedding types

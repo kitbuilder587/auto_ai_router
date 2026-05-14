@@ -997,6 +997,59 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 	return -1
 }
 
+// providerTypeLiteLLMPrefix maps our provider type to the LiteLLM-compatible model prefix.
+// vertex-ai uses underscore to match LiteLLM's "vertex_ai/model" convention.
+var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
+	config.ProviderTypeOpenAI:    "openai",
+	config.ProviderTypeVertexAI:  "vertex_ai",
+	config.ProviderTypeGemini:    "gemini",
+	config.ProviderTypeAnthropic: "anthropic",
+	config.ProviderTypeBedrock:   "bedrock",
+	config.ProviderTypeProxy:     "openai",
+}
+
+// GetAllModelsWithAccessGroups returns all models in "provider/model-id" format,
+// used when the caller requests ?include_model_access_groups=True.
+// Each (provider, model) pair appears at most once in the response.
+func (m *Manager) GetAllModelsWithAccessGroups() ModelsResponse {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	credProvider := make(map[string]string, len(m.credentials))
+	for _, cred := range m.credentials {
+		prefix, ok := providerTypeLiteLLMPrefix[cred.Type]
+		if !ok {
+			prefix = string(cred.Type)
+		}
+		credProvider[cred.Name] = prefix
+	}
+
+	seen := make(map[string]bool)
+	result := make([]Model, 0, len(m.modelToCredentials))
+
+	for modelID, creds := range m.modelToCredentials {
+		for _, credName := range creds {
+			prefix, ok := credProvider[credName]
+			if !ok {
+				continue
+			}
+			prefixedID := prefix + "/" + modelID
+			if seen[prefixedID] {
+				continue
+			}
+			seen[prefixedID] = true
+			result = append(result, Model{
+				ID:      prefixedID,
+				Object:  "model",
+				Created: converterutil.GetCurrentTimestamp(),
+				OwnedBy: prefix,
+			})
+		}
+	}
+
+	return ModelsResponse{Object: "list", Data: result}
+}
+
 // GetModelsForCredential returns all models available for a specific credential.
 //
 // Behavior:
