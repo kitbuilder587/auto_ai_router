@@ -394,6 +394,47 @@ details.wf-card > summary:hover { background: var(--bg-2); border-radius: var(--
 details.wf-card[open] > summary { border-bottom: 1px solid var(--line); border-radius: var(--r-md) var(--r-md) 0 0; }
 details.wf-card > .detail-body { padding: var(--sp-2) 0; }
 
+/* collapsible diagram section */
+details.diagram-section { margin: var(--sp-6) 0 0; }
+details.diagram-section > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+details.diagram-section > summary::-webkit-details-marker { display: none; }
+details.diagram-section > summary::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+details.diagram-section > summary:hover { color: var(--fg-muted); }
+details.diagram-section > summary .diagram-arrow {
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+/* group header rows in models table */
+.wf-table tr.group-header td {
+  background: var(--bg-2);
+  color: var(--fg-dim);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px var(--sp-3);
+  border-bottom: 1px solid var(--line-strong);
+  border-top: 1px solid var(--line);
+}
+.wf-table tr.group-header:hover td { background: var(--bg-2); }
+
 /* scrollbar */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }

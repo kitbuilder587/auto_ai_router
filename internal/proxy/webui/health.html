@@ -234,7 +234,21 @@
         return 0;
       });
 
-      document.getElementById('modelsTbody').innerHTML = entries.map(([, m]) => {
+      const useGrouping = currentSort === 'name' || currentSort === 'credential';
+      let lastGroupKey = null;
+      const rows = [];
+
+      for (const [, m] of entries) {
+        if (useGrouping) {
+          const groupKey = currentSort === 'credential'
+            ? m.credential
+            : m.model[0].toUpperCase();
+          if (groupKey !== lastGroupKey) {
+            lastGroupKey = groupKey;
+            rows.push(`<tr class="group-header"><td colspan="5">${esc(groupKey)}</td></tr>`);
+          }
+        }
+
         const errCounts = m.error_code_counts || {};
         let statusBadge;
         if (m.is_banned) {
@@ -243,14 +257,16 @@
         } else {
           statusBadge = badge('ok', 'ok');
         }
-        return `<tr>
+        rows.push(`<tr>
       <td>${esc(m.model)}</td>
       <td class="muted">${esc(m.credential)}</td>
       <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
       <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
       <td>${statusBadge}</td>
-    </tr>`;
-      }).join('');
+    </tr>`);
+      }
+
+      document.getElementById('modelsTbody').innerHTML = rows.join('');
     }
 
     function sortModels(type, btn) {

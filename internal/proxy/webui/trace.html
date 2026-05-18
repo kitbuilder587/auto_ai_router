@@ -47,11 +47,16 @@
         </div>
       </div>
 
-      <div class="wf-section-title">chain diagram</div>
-      <div class="wf-card" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;"
-        id="diagramWrap">
-        <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
-      </div>
+      <details class="diagram-section" id="diagramSection" open>
+        <summary id="diagramSummary">
+          <span class="diagram-arrow" id="diagramArrow">▾</span>
+          chain diagram
+        </summary>
+        <div class="wf-card" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;"
+          id="diagramWrap">
+          <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
+        </div>
+      </details>
 
       <div class="wf-section-title">router &amp; credential data</div>
       <div id="routerList"></div>
@@ -380,6 +385,15 @@
             if (arrow) arrow.textContent = det.open ? '▾' : '▸';
           });
         });
+
+        // wire diagram section toggle arrow
+        const diagramSec = document.getElementById('diagramSection');
+        if (diagramSec) {
+          diagramSec.addEventListener('toggle', () => {
+            const arrow = document.getElementById('diagramArrow');
+            if (arrow) arrow.textContent = diagramSec.open ? '▾' : '▸';
+          });
+        }
       } catch (e) {
         document.getElementById('diagramWrap').innerHTML =
           `<p style="color:var(--status-err);padding:var(--sp-4);">Failed to load trace: ${esc(e.message)}</p>`;
