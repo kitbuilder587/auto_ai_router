@@ -114,6 +114,15 @@
       document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
     })();
 
+    // ── model family extraction ────────────────────────────────────────────────
+    function modelFamily(name) {
+      if (!name) return '?';
+      const slashIdx = name.indexOf('/');
+      if (slashIdx > 0) return name.slice(0, slashIdx);
+      const match = name.match(/^[a-zA-Z]+/);
+      return match ? match[0] : name.split('-')[0];
+    }
+
     // ── formatting helpers ─────────────────────────────────────────────────────
     function fmtNum(n) {
       if (n === undefined || n === null) return '—';
@@ -153,7 +162,7 @@
         : (cur > 0 ? `${fmtNum(cur)} / ∞` : '—');
       return `<div style="display:flex;align-items:center;gap:6px;">
     <div class="wf-bar" style="flex:1;min-width:60px;"><i style="width:${p}%" class="${cls}"></i></div>
-    <span style="font-size:11px;color:var(--fg-muted);white-space:nowrap;">${label}</span>
+    <span style="font-size:var(--fs-xs);color:var(--fg-muted);white-space:nowrap;">${label}</span>
   </div>`;
     }
 
@@ -187,7 +196,7 @@
           const parts = Object.entries(errCounts)
             .map(([code, n]) => `${n}×${code}`)
             .join('  ');
-          errHtml = `<div style="font-size:11px;color:var(--status-err);margin-bottom:8px;">${esc(parts)}</div>`;
+          errHtml = `<div style="font-size:var(--fs-xs);color:var(--status-err);margin-bottom:8px;">${esc(parts)}</div>`;
         }
 
         return `<div class="wf-card${bannedCls}">
@@ -198,11 +207,11 @@
       ${errHtml}
       <div style="display:grid;gap:8px;">
         <div>
-          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px;">RPM</div>
+          <div style="font-size:var(--fs-xs);color:var(--fg-dim);margin-bottom:4px;">RPM</div>
           ${renderBar(c.current_rpm, c.limit_rpm)}
         </div>
         <div>
-          <div style="font-size:11px;color:var(--fg-dim);margin-bottom:4px;">TPM</div>
+          <div style="font-size:var(--fs-xs);color:var(--fg-dim);margin-bottom:4px;">TPM</div>
           ${renderBar(c.current_tpm, c.limit_tpm)}
         </div>
       </div>
@@ -224,7 +233,10 @@
       entries.sort(([, a], [, b]) => {
         let av, bv;
         switch (currentSort) {
-          case 'name': av = a.model.toLowerCase(); bv = b.model.toLowerCase(); break;
+          case 'name':
+            av = modelFamily(a.model) + '\x00' + a.model.toLowerCase();
+            bv = modelFamily(b.model) + '\x00' + b.model.toLowerCase();
+            break;
           case 'credential': av = a.credential.toLowerCase(); bv = b.credential.toLowerCase(); break;
           case 'rpm': av = pct(a.current_rpm, a.limit_rpm); bv = pct(b.current_rpm, b.limit_rpm); break;
           default: av = pct(a.current_tpm, a.limit_tpm); bv = pct(b.current_tpm, b.limit_tpm);
@@ -242,7 +254,7 @@
         if (useGrouping) {
           const groupKey = currentSort === 'credential'
             ? m.credential
-            : m.model[0].toUpperCase();
+            : modelFamily(m.model);
           if (groupKey !== lastGroupKey) {
             lastGroupKey = groupKey;
             rows.push(`<tr class="group-header"><td colspan="5">${esc(groupKey)}</td></tr>`);
