@@ -47,11 +47,16 @@
         </div>
       </div>
 
-      <div class="wf-section-title">chain diagram</div>
-      <div class="wf-card" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;"
-        id="diagramWrap">
-        <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
-      </div>
+      <details class="diagram-section wf-card" id="diagramSection" open>
+        <summary id="diagramSummary">
+          <span id="diagramArrow">▾</span>
+          chain diagram
+        </summary>
+        <div class="detail-body" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;"
+          id="diagramWrap">
+          <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
+        </div>
+      </details>
 
       <div class="wf-section-title">router &amp; credential data</div>
       <div id="routerList"></div>
@@ -254,7 +259,7 @@
         const { svg } = await mermaid.render(id, diagram);
         wrap.innerHTML = svg;
       } catch (e) {
-        wrap.innerHTML = `<pre style="color:var(--status-err);font-size:11px;text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
+        wrap.innerHTML = `<pre style="color:var(--status-err);font-size:var(--fs-xs);text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
       }
     }
 
@@ -274,7 +279,7 @@
         const cls = statusClass(t.status);
         const credCount = Object.keys(t.credentials || {}).length;
         const viaHtml = via
-          ? `<span style="color:var(--fg-dim);font-size:11px;">via ${esc(via)}</span>`
+          ? `<span style="color:var(--fg-dim);font-size:var(--fs-xs);">via ${esc(via)}</span>`
           : '';
 
         const rows = Object.entries(t.credentials || {}).sort().map(([name, c]) => {
@@ -288,7 +293,7 @@
         <td>${badge(sCls, sTxt)}</td>
         <td class="muted">${fmtRate(c.current_rpm, c.limit_rpm)}</td>
         <td class="muted">${fmtRate(c.current_tpm, c.limit_tpm)}</td>
-        <td style="font-size:11px;color:var(--status-err);">${esc(errs) || '—'}</td>
+        <td style="font-size:var(--fs-xs);color:var(--status-err);">${esc(errs) || '—'}</td>
       </tr>`;
         }).join('');
 
@@ -297,7 +302,7 @@
           .map(([credName, up]) => `<tr>
         <td>${esc(credName)}</td>
         <td class="dim">proxy</td>
-        <td colspan="3" style="color:var(--status-err);font-size:11px;font-style:italic;">
+        <td colspan="3" style="color:var(--status-err);font-size:var(--fs-xs);font-style:italic;">
           unreachable: ${esc(up.fetch_error)}
         </td>
         <td>—</td>
@@ -310,7 +315,7 @@
         <span style="font-size:13px;">${esc(t.router_id || '—')}</span>
         ${badge(cls, t.status || 'unknown')}
         ${viaHtml}
-        <span style="margin-left:auto;color:var(--fg-dim);font-size:11px;">${credCount} credentials</span>
+        <span style="margin-left:auto;color:var(--fg-dim);font-size:var(--fs-xs);">${credCount} credentials</span>
       </summary>
       <div class="detail-body">
         <table class="wf-table">
@@ -380,6 +385,15 @@
             if (arrow) arrow.textContent = det.open ? '▾' : '▸';
           });
         });
+
+        // wire diagram section toggle arrow
+        const diagramSec = document.getElementById('diagramSection');
+        if (diagramSec) {
+          diagramSec.addEventListener('toggle', () => {
+            const arrow = document.getElementById('diagramArrow');
+            if (arrow) arrow.textContent = diagramSec.open ? '▾' : '▸';
+          });
+        }
       } catch (e) {
         document.getElementById('diagramWrap').innerHTML =
           `<p style="color:var(--status-err);padding:var(--sp-4);">Failed to load trace: ${esc(e.message)}</p>`;
