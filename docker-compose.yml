@@ -3,7 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # container_name: auto-ai-router
+
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
 
     deploy:
       replicas: 3

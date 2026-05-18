@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -13,8 +12,8 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	healthy, status := r.proxy.HealthCheck()
 
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Router-Version", proxy.Version)
-	w.Header().Set("X-Router-Commit", proxy.Commit)
+	w.Header().Set("X-Router-Version", r.proxy.GetVersion())
+	w.Header().Set("X-Router-Commit", r.proxy.GetCommit())
 	if !healthy {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
@@ -46,7 +45,7 @@ type Readiness struct {
 func (r *Router) handleReadiness(w http.ResponseWriter, req *http.Request) {
 	var body = Readiness{
 		Status:         "healthy",
-		LitellmVersion: proxy.Version,
+		LitellmVersion: r.proxy.GetVersion(),
 		LastUpdated:    utils.NowUTC().Format(time.RFC3339),
 	}
 

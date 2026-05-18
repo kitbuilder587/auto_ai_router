@@ -149,6 +149,7 @@ func (p *Proxy) orchestrateRequest(
 			// PrepareCodexPassthrough strips proxy-internal fields and normalises the
 			// body to match what OpenAI's Responses API actually accepts.
 			body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
+			proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 			passthroughResponses = true
 			p.logger.Debug("Native Responses API passthrough",
 				"model", modelID, "provider", cred.Type, "streaming", streaming)

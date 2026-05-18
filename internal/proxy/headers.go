@@ -72,6 +72,10 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 		if key == "Accept-Encoding" {
 			continue
 		}
+		// Strip internal proxy marker — must not be forwarded to the actual provider.
+		if key == "X-Aar-Proxy-Client" {
+			continue
+		}
 		if key == "Authorization" {
 			// Handle Authorization header: use credential API key if available, otherwise copy original
 			if apiKey != "" {
@@ -107,6 +111,10 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 		if key == "Accept-Encoding" {
 			continue
 		}
+		// Strip internal proxy marker — must not be forwarded to the actual provider.
+		if key == "X-Aar-Proxy-Client" {
+			continue
+		}
 		for _, value := range values {
 			dst.Header.Add(key, value)
 		}
@@ -127,7 +135,8 @@ func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config
 		// - Content-Length will be set based on actual body size
 		// - Content-Encoding: Go's http.Client already decompressed the body,
 		//   so we skip upstream's Content-Encoding header and let caller set it if recompressing
-		if key == "Content-Length" || key == "Content-Encoding" {
+		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
+		if key == "Content-Length" || key == "Content-Encoding" || key == "X-Credential-Name" {
 			continue
 		}
 		for _, value := range values {

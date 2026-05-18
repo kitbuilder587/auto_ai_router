@@ -141,7 +141,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	var modelsResp models.ModelsResponse
 	if r.modelManager != nil {
-		modelsResp = r.modelManager.GetAllModels()
+		includeGroups := strings.EqualFold(req.URL.Query().Get("include_model_access_groups"), "true")
+		if includeGroups {
+			modelsResp = r.modelManager.GetAllModelsWithAccessGroups()
+		} else {
+			modelsResp = r.modelManager.GetAllModels()
+		}
 	} else {
 		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}
 	}

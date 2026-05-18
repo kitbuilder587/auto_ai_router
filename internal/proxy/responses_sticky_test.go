@@ -44,29 +44,27 @@ func (s *fakeResponseStore) Close() error                         { return nil }
 
 func TestProxyRequest_ResponsesAPIPreviousResponseIDUsesStoredCredential(t *testing.T) {
 	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "/v1/responses", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"id":"chatcmpl-1",
-			"object":"chat.completion",
-			"created":123,
+			"id":"resp-1",
+			"object":"response",
 			"model":"gpt-4",
-			"choices":[{"index":0,"message":{"role":"assistant","content":"from-cred-1"},"finish_reason":"stop"}],
-			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+			"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"from-cred-1"}]}],
+			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
 		}`))
 	}))
 	defer server1.Close()
 
 	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "/v1/responses", r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"id":"chatcmpl-2",
-			"object":"chat.completion",
-			"created":123,
+			"id":"resp-2",
+			"object":"response",
 			"model":"gpt-4",
-			"choices":[{"index":0,"message":{"role":"assistant","content":"from-cred-2"},"finish_reason":"stop"}],
-			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+			"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"from-cred-2"}]}],
+			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
 		}`))
 	}))
 	defer server2.Close()

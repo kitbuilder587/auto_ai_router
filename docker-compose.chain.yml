@@ -1,0 +1,141 @@
+services:
+  auto-ai-router-01:
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    configs:
+      - source: auto-ai-router-01-config
+        target: /app/config.yaml
+
+    depends_on:
+      auto-ai-router-02:
+        condition: service_healthy
+      auto-ai-router-03:
+        condition: service_healthy
+
+  auto-ai-router-02:
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
+    restart: unless-stopped
+    configs:
+      - source: auto-ai-router-02-config
+        target: /app/config.yaml
+
+    depends_on:
+      auto-ai-router-04:
+        condition: service_healthy
+
+  auto-ai-router-03:
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
+    restart: unless-stopped
+    configs:
+      - source: auto-ai-router-03-config
+        target: /app/config.yaml
+
+  auto-ai-router-04:
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
+    restart: unless-stopped
+    configs:
+      - source: auto-ai-router-04-config
+        target: /app/config.yaml
+
+configs:
+  auto-ai-router-01-config:
+    content: |
+      server:
+        port: 8080
+        max_body_size_mb: 100
+        request_timeout: 5m
+        logging_level: debug  # Options: info, debug, error
+        master_key: "sk-your-master-key-here"  # Required: Master key for client authentication
+
+      monitoring:
+        prometheus_enabled: true
+        log_errors: false
+
+      credentials:
+      - name: "auto-ai-router-02"
+        type: "proxy"
+        api_key: sk-auto-ai-router-02-key
+        base_url: http://auto-ai-router-02:8080
+      - name: "auto-ai-router-03"
+        type: "proxy"
+        api_key: sk-auto-ai-router-03-key
+        base_url: http://auto-ai-router-03:8080
+
+  auto-ai-router-02-config:
+    content: |
+      server:
+        port: 8080
+        max_body_size_mb: 100
+        request_timeout: 5m
+        logging_level: debug  # Options: info, debug, error
+        master_key: "sk-auto-ai-router-02-key"  # Required: Master key for client authentication
+
+      monitoring:
+        prometheus_enabled: true
+        log_errors: false
+
+      credentials:
+      - name: "openai_router_2"
+        type: "openai"
+        api_key: ${OPENAI_API_KEY}
+        base_url: ${OPENAI_BASE_URL}
+      - name: "auto-ai-router-04"
+        type: "proxy"
+        api_key: sk-auto-ai-router-04-key
+        base_url: http://auto-ai-router-04:8080
+
+      models:
+      - name: gpt-4o-mini
+        credential: openai_router_2
+
+  auto-ai-router-03-config:
+    content: |
+      server:
+        port: 8080
+        max_body_size_mb: 100
+        request_timeout: 5m
+        logging_level: debug  # Options: info, debug, error
+        master_key: "sk-auto-ai-router-03-key"  # Required: Master key for client authentication
+
+      monitoring:
+        prometheus_enabled: true
+        log_errors: false
+
+      credentials:
+      - name: "openai_router_3"
+        type: "openai"
+        api_key: ${OPENAI_API_KEY}
+        base_url: ${OPENAI_BASE_URL}
+
+      models:
+      - name: gpt-5-mini
+        credential: openai_router_3
+        passthrough_responses: true
+
+  auto-ai-router-04-config:
+    content: |
+      server:
+        port: 8080
+        max_body_size_mb: 100
+        request_timeout: 5m
+        logging_level: debug  # Options: info, debug, error
+        master_key: "sk-auto-ai-router-04-key"  # Required: Master key for client authentication
+
+      monitoring:
+        prometheus_enabled: true
+        log_errors: false
+
+      credentials:
+      - name: "openai_router_4"
+        type: "openai"
+        api_key: ${OPENAI_API_KEY}
+        base_url: ${OPENAI_BASE_URL}
+
+      models:
+      - name: gpt-5-mini
+        credential: openai_router_4
+        passthrough_responses: true

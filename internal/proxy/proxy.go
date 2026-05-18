@@ -60,6 +60,8 @@ type RequestLogContext struct {
 	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
 	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
 	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
+	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
+	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
 }
 
 // HealthChecker provides cached database health status
@@ -115,12 +117,9 @@ type Proxy struct {
 	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 	sessionStore        *SessionStore              // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl bool                       // Auto-inject Anthropic cache_control when session is active
+	version             string
+	commit              string
 }
-
-var (
-	Version = "dev"
-	Commit  = "unknown"
-)
 
 func New(cfg *Config) *Proxy {
 	// Create HTTP client using centralized factory with request-specific timeout
@@ -175,6 +174,8 @@ func New(cfg *Config) *Proxy {
 		sessionStore:        sessionStore,
 		stickyAutoCacheCtrl: cfg.SessionStickyAutoCacheCtrl,
 		client:              httputil.NewHTTPClient(httpClientCfg),
+		version:             cfg.Version,
+		commit:              cfg.Commit,
 	}
 }
 
@@ -204,13 +205,24 @@ func (p *Proxy) GetMasterKey() string {
 	return p.masterKey
 }
 
+// GetVersion returns the build version string.
+func (p *Proxy) GetVersion() string {
+	return p.version
+}
+
+// GetCommit returns the build commit hash.
+func (p *Proxy) GetCommit() string {
+	return p.commit
+}
+
 // ProxyResponse holds response details from a proxy credential
 type ProxyResponse struct {
-	StatusCode  int
-	Headers     http.Header
-	Body        []byte
-	StreamBody  io.ReadCloser
-	IsStreaming bool
+	StatusCode           int
+	Headers              http.Header
+	Body                 []byte
+	StreamBody           io.ReadCloser
+	IsStreaming          bool
+	ActualCredentialName string // Credential name from upstream X-Credential-Name header
 }
 
 // executeProxyRequest executes a request to a proxy credential and returns response details.
@@ -238,6 +250,9 @@ func (p *Proxy) executeProxyRequest(
 
 	// Copy headers (skip hop-by-hop headers)
 	copyRequestHeaders(proxyReq, r, cred.APIKey)
+	// Mark request as coming from an internal proxy client so the upstream router
+	// knows to include the X-Credential-Name response header.
+	proxyReq.Header.Set("X-Aar-Proxy-Client", "1")
 
 	// Send request
 	resp, err := p.client.Do(proxyReq)
@@ -257,12 +272,18 @@ func (p *Proxy) executeProxyRequest(
 				"url", targetURL,
 			)
 		}
-		p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+		// Proxy credentials are dynamic relays — don't record them in fail2ban.
+		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
+		if cred.Type != config.ProviderTypeProxy {
+			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+		}
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		return nil, err
 	}
-	// Record response
-	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+	// Proxy credentials are dynamic relays — don't record them in fail2ban.
+	if cred.Type != config.ProviderTypeProxy {
+		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+	}
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 	p.logger.Debug("Proxy request forwarded",
@@ -272,13 +293,16 @@ func (p *Proxy) executeProxyRequest(
 		"duration", time.Since(start),
 	)
 
+	actualCredName := resp.Header.Get("X-Credential-Name")
+
 	// For streaming responses, return body reader directly to avoid buffering entire stream.
 	if IsStreamingResponse(resp) {
 		return &ProxyResponse{
-			StatusCode:  resp.StatusCode,
-			Headers:     resp.Header,
-			StreamBody:  resp.Body,
-			IsStreaming: true,
+			StatusCode:           resp.StatusCode,
+			Headers:              resp.Header,
+			StreamBody:           resp.Body,
+			IsStreaming:          true,
+			ActualCredentialName: actualCredName,
 		}, nil
 	}
 
@@ -297,10 +321,11 @@ func (p *Proxy) executeProxyRequest(
 
 	// Return complete response information
 	return &ProxyResponse{
-		StatusCode:  resp.StatusCode,
-		Headers:     resp.Header,
-		Body:        respBody,
-		IsStreaming: false,
+		StatusCode:           resp.StatusCode,
+		Headers:              resp.Header,
+		Body:                 respBody,
+		IsStreaming:          false,
+		ActualCredentialName: actualCredName,
 	}, nil
 }
 
@@ -327,13 +352,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
 	requestID := uuid.New().String()
 
+	// Save and strip internal proxy marker. The marker is set by executeProxyRequest when
+	// acting as a proxy client. We save it here and delete it to prevent external spoofing.
+	isProxyRequest := r.Header.Get("X-Aar-Proxy-Client") == "1"
+	r.Header.Del("X-Aar-Proxy-Client")
+
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
 	logCtx := &RequestLogContext{
-		RequestID: requestID,
-		StartTime: start,
-		Request:   r,
-		Status:    "unknown",
+		RequestID:      requestID,
+		StartTime:      start,
+		Request:        r,
+		Status:         "unknown",
+		IsProxyRequest: isProxyRequest,
 	}
 
 	// Ensure request is logged at the end regardless of which path is taken
@@ -441,6 +472,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			proxyResp = resp
+			if proxyResp.ActualCredentialName != "" {
+				logCtx.ActualCredentialName = proxyResp.ActualCredentialName
+			}
 
 			if proxyResp.IsStreaming {
 				break // can't retry streaming
@@ -528,6 +562,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}()
 				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
 				fakeResp := &http.Response{
@@ -549,6 +586,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}()
 				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
 				fakeResp := &http.Response{
@@ -562,6 +602,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					streamCompleted = true
 				}
 			} else {
+				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
 				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
 				if err != nil {
 					p.logger.Error("Failed to write streaming proxy response",
@@ -634,6 +677,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+			}
 			p.writeProxyResponse(w, proxyResp, r)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
@@ -1175,6 +1221,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	copyResponseHeaders(w, resp.Header, cred.Type)
+	// Return credential name only to internal proxy clients, not to end users.
+	if logCtx.IsProxyRequest {
+		w.Header().Set("X-Credential-Name", cred.Name)
+	}
 
 	rc := http.NewResponseController(w)
 

@@ -253,15 +253,15 @@ func isNativeResponsesModel(modelID string) bool {
 }
 
 // providerPassthroughDefaults maps provider types to their default passthrough behaviour.
-// OpenAI natively supports /v1/responses so it defaults to true.
+// OpenAI and Proxy natively support /v1/responses so they default to true.
 // Vertex AI and Anthropic use the native ProviderResponses converter (Phase 4) instead.
 var providerPassthroughDefaults = map[config.ProviderType]bool{
 	config.ProviderTypeOpenAI:    true,
+	config.ProviderTypeProxy:     true,
 	config.ProviderTypeVertexAI:  false,
 	config.ProviderTypeGemini:    false,
 	config.ProviderTypeAnthropic: false,
 	config.ProviderTypeBedrock:   false,
-	config.ProviderTypeProxy:     false,
 }
 
 // IsPassthroughResponses reports whether Responses API requests for modelID
@@ -574,6 +574,29 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		}
 	}
 
+	// Preserve proxy credential model entries populated by AddModel/UpdateAllProxyCredentials.
+	// Proxy models are not in modelLimits so the rebuild above omits them. Without this,
+	// every DB sync cycle wipes dynamically-fetched proxy model data and causes routing gaps
+	// until the next UpdateAllProxyCredentials tick.
+	for _, c := range allCreds {
+		if c.Type != config.ProviderTypeProxy {
+			continue
+		}
+		if oldModels, ok := m.credentialModels[c.Name]; ok && len(oldModels) > 0 {
+			newCredentialModels[c.Name] = append([]string(nil), oldModels...)
+			// Restore modelToCredentials entries for this proxy credential.
+			for _, modelID := range oldModels {
+				if modelToCredentialsSet[modelID] == nil {
+					modelToCredentialsSet[modelID] = make(map[string]bool)
+				}
+				if !modelToCredentialsSet[modelID][c.Name] {
+					newModelToCredentials[modelID] = append(newModelToCredentials[modelID], c.Name)
+					modelToCredentialsSet[modelID][c.Name] = true
+				}
+			}
+		}
+	}
+
 	m.credentialModels = newCredentialModels
 	m.modelToCredentials = newModelToCredentials
 
@@ -789,12 +812,18 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 	// Check credentialModels map
 	if models, ok := m.credentialModels[credentialName]; ok {
 		credentialExists = true
-		// If credential exists, check if it has the model
 		for _, model := range models {
 			if model == modelID {
 				return true
 			}
 		}
+		// Credential has a non-empty registered model list (static or dynamic via AddModel)
+		// but the requested model isn't in it — deny authoritatively.
+		if len(models) > 0 {
+			return false
+		}
+		// len==0: credential was registered with an explicit empty list (non-proxy cred with
+		// no model config); fall through to the hasStaticModels check below.
 	}
 
 	// If we have static models configured and credential exists but model not found - deny
@@ -833,14 +862,16 @@ func (m *Manager) contains(slice []string, value string) bool {
 	return false
 }
 
-// IsEnabled returns whether model filtering should be used
-// Returns true if there are models defined in static config
+// IsEnabled returns whether model filtering should be used.
+// Returns true when static model limits are configured OR when dynamic proxy
+// model data has been fetched (modelToCredentials is non-empty). This ensures
+// that chain setups without a static models: section still benefit from
+// per-credential model filtering once proxy model lists are discovered.
 func (m *Manager) IsEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// Filtering is enabled if we have static models configured
-	return len(m.modelLimits) > 0
+	return len(m.modelLimits) > 0 || len(m.modelToCredentials) > 0
 }
 
 // findLimit searches for a limit value with optional credential filtering
@@ -875,8 +906,15 @@ func findLimit(limits []ModelLimits, credentialName string, fieldFunc func(*Mode
 }
 
 // findRPMLimit searches for RPM limit with optional credential filtering
+// Returns -1 for unlimited (when RPM is 0 or not set), same semantics as findTPMLimit.
 func findRPMLimit(limits []ModelLimits, credentialName string) (int, bool) {
-	return findLimit(limits, credentialName, func(ml *ModelLimits) int { return ml.RPM }, func(v int) int { return v })
+	convertRPM := func(v int) int {
+		if v == 0 {
+			return -1 // 0 means unlimited
+		}
+		return v
+	}
+	return findLimit(limits, credentialName, func(ml *ModelLimits) int { return ml.RPM }, convertRPM)
 }
 
 // GetModelRPM returns RPM limit for a specific model
@@ -957,6 +995,59 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 	}
 
 	return -1
+}
+
+// providerTypeLiteLLMPrefix maps our provider type to the LiteLLM-compatible model prefix.
+// vertex-ai uses underscore to match LiteLLM's "vertex_ai/model" convention.
+var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
+	config.ProviderTypeOpenAI:    "openai",
+	config.ProviderTypeVertexAI:  "vertex_ai",
+	config.ProviderTypeGemini:    "gemini",
+	config.ProviderTypeAnthropic: "anthropic",
+	config.ProviderTypeBedrock:   "bedrock",
+	config.ProviderTypeProxy:     "openai",
+}
+
+// GetAllModelsWithAccessGroups returns all models in "provider/model-id" format,
+// used when the caller requests ?include_model_access_groups=True.
+// Each (provider, model) pair appears at most once in the response.
+func (m *Manager) GetAllModelsWithAccessGroups() ModelsResponse {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	credProvider := make(map[string]string, len(m.credentials))
+	for _, cred := range m.credentials {
+		prefix, ok := providerTypeLiteLLMPrefix[cred.Type]
+		if !ok {
+			prefix = string(cred.Type)
+		}
+		credProvider[cred.Name] = prefix
+	}
+
+	seen := make(map[string]bool)
+	result := make([]Model, 0, len(m.modelToCredentials))
+
+	for modelID, creds := range m.modelToCredentials {
+		for _, credName := range creds {
+			prefix, ok := credProvider[credName]
+			if !ok {
+				continue
+			}
+			prefixedID := prefix + "/" + modelID
+			if seen[prefixedID] {
+				continue
+			}
+			seen[prefixedID] = true
+			result = append(result, Model{
+				ID:      prefixedID,
+				Object:  "model",
+				Created: converterutil.GetCurrentTimestamp(),
+				OwnedBy: prefix,
+			})
+		}
+	}
+
+	return ModelsResponse{Object: "list", Data: result}
 }
 
 // GetModelsForCredential returns all models available for a specific credential.

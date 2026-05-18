@@ -140,11 +140,20 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	if len(cfg.Models) > 0 && len(cfg.Models) <= 10 {
 		// Only show details if there are a few models
 		for i, model := range cfg.Models {
+			// Treat 0 as unlimited for display (same semantics as rate limiter)
+			rpm := model.RPM
+			if rpm == 0 {
+				rpm = -1
+			}
+			tpm := model.TPM
+			if tpm == 0 {
+				tpm = -1
+			}
 			logger.Info(fmt.Sprintf("  [%d] model", i),
 				"name", model.Name,
 				"credential", model.Credential,
-				"rpm", model.RPM,
-				"tpm", model.TPM,
+				"rpm", rpmToString(rpm),
+				"tpm", tpmToString(tpm),
 			)
 		}
 	}

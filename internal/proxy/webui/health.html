@@ -1,191 +1,196 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>System Health</title>
   <link rel="stylesheet" href="/webui/style.css">
 </head>
+
 <body>
-<div class="wf">
-  <div class="wf-logo">
-    <span class="dot"></span>
-    <span class="name">air</span>
-    <span class="ver" id="verLabel"></span>
+  <div class="wf">
+    <div class="wf-logo">
+      <span class="dot"></span>
+      <span class="name">air</span>
+      <div class="ver-wrapper">
+        <span class="ver" id="verLabel"></span>
+        <span class="commit-line" id="commitLabel"></span>
+      </div>
+    </div>
+    <div class="wf-topbar">
+      <div class="crumbs">
+        <span>workspace</span>
+        <span class="sep">/</span>
+        <span class="here">system health</span>
+      </div>
+      <div class="spacer"></div>
+      <span class="pill" id="countdown"></span>
+      <button class="pill" onclick="toggleTheme()">theme</button>
+    </div>
+    <nav class="wf-nav">
+      <div class="group">workspace</div>
+      <a class="item active" href="/vhealth"><span class="glyph">▸</span> system health</a>
+      <a class="item" href="/vtrace"><span class="glyph">▸</span> router trace</a>
+      <a class="item" href="/vconfig"><span class="glyph">▸</span> server config</a>
+    </nav>
+    <main class="wf-main">
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:var(--sp-4);">
+        <div>
+          <h1 class="wf-h1">System health</h1>
+          <p class="wf-sub" id="subtitle">loading…</p>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);align-items:center;">
+          <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">—</span></span>
+          <button class="wf-btn" onclick="load(true)">refresh <span class="key">R</span></button>
+        </div>
+      </div>
+
+      <div class="wf-section-title">overview</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);">
+        <div class="wf-stat">
+          <span class="label">credentials</span>
+          <span class="val" id="statTotal">—</span>
+        </div>
+        <div class="wf-stat">
+          <span class="label">available</span>
+          <span class="val" id="statAvail">—</span>
+          <span class="delta" id="statAvailDelta"></span>
+        </div>
+        <div class="wf-stat">
+          <span class="label">banned</span>
+          <span class="val" id="statBanned">—</span>
+        </div>
+        <div class="wf-stat">
+          <span class="label">active models</span>
+          <span class="val" id="statModels">—</span>
+        </div>
+      </div>
+
+      <div class="wf-section-title" id="credTitle">credentials</div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);" id="credsGrid"></div>
+
+      <div class="wf-section-title" id="modelsTitle">active models</div>
+      <div class="wf-card" style="padding:0;">
+        <div style="display:flex;gap:var(--sp-1);padding:var(--sp-2);border-bottom:1px solid var(--line);">
+          <button class="wf-btn" id="sortName" onclick="sortModels('name',this)">sort by name</button>
+          <button class="wf-btn" id="sortRpm" onclick="sortModels('rpm',this)">sort by RPM</button>
+          <button class="wf-btn primary" id="sortTpm" onclick="sortModels('tpm',this)">sort by TPM</button>
+          <button class="wf-btn" id="sortCred" onclick="sortModels('credential',this)">sort by cred</button>
+        </div>
+        <table class="wf-table">
+          <thead>
+            <tr>
+              <th>model</th>
+              <th>credential</th>
+              <th style="width:200px;">RPM</th>
+              <th style="width:200px;">TPM</th>
+              <th>status</th>
+            </tr>
+          </thead>
+          <tbody id="modelsTbody"></tbody>
+        </table>
+      </div>
+    </main>
   </div>
-  <div class="wf-topbar">
-    <div class="crumbs">
-      <span>workspace</span>
-      <span class="sep">/</span>
-      <span class="here">system health</span>
-    </div>
-    <div class="spacer"></div>
-    <span class="pill" id="countdown"></span>
-    <button class="pill" onclick="toggleTheme()">theme</button>
-  </div>
-  <nav class="wf-nav">
-    <div class="group">workspace</div>
-    <a class="item active" href="/vhealth"><span class="glyph">▸</span> system health</a>
-    <a class="item" href="/vtrace"><span class="glyph">▸</span> router trace</a>
-    <a class="item" href="/vconfig"><span class="glyph">▸</span> server config</a>
-  </nav>
-  <main class="wf-main">
-    <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:var(--sp-4);">
-      <div>
-        <h1 class="wf-h1">System health</h1>
-        <p class="wf-sub" id="subtitle">loading…</p>
-      </div>
-      <div style="display:flex;gap:var(--sp-2);align-items:center;">
-        <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">—</span></span>
-        <button class="wf-btn" onclick="load(true)">refresh <span class="key">R</span></button>
-      </div>
-    </div>
 
-    <div class="wf-section-title">overview</div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);">
-      <div class="wf-stat">
-        <span class="label">credentials</span>
-        <span class="val" id="statTotal">—</span>
-      </div>
-      <div class="wf-stat">
-        <span class="label">available</span>
-        <span class="val" id="statAvail">—</span>
-        <span class="delta" id="statAvailDelta"></span>
-      </div>
-      <div class="wf-stat">
-        <span class="label">banned</span>
-        <span class="val" id="statBanned">—</span>
-      </div>
-      <div class="wf-stat">
-        <span class="label">active models</span>
-        <span class="val" id="statModels">—</span>
-      </div>
-    </div>
+  <script>
+    'use strict';
 
-    <div class="wf-section-title" id="credTitle">credentials</div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);" id="credsGrid"></div>
+    let currentSort = 'tpm';
+    let sortAsc = false;
+    let countdownSecs = 30;
+    let countdownTimer = null;
+    let modelsData = {};
 
-    <div class="wf-section-title" id="modelsTitle">active models</div>
-    <div class="wf-card" style="padding:0;">
-      <div style="display:flex;gap:var(--sp-1);padding:var(--sp-2);border-bottom:1px solid var(--line);">
-        <button class="wf-btn" id="sortName" onclick="sortModels('name',this)">sort by name</button>
-        <button class="wf-btn" id="sortRpm"  onclick="sortModels('rpm',this)">sort by RPM</button>
-        <button class="wf-btn primary" id="sortTpm" onclick="sortModels('tpm',this)">sort by TPM</button>
-        <button class="wf-btn" id="sortCred" onclick="sortModels('credential',this)">sort by cred</button>
-      </div>
-      <table class="wf-table">
-        <thead>
-          <tr>
-            <th>model</th>
-            <th>credential</th>
-            <th style="width:200px;">RPM</th>
-            <th style="width:200px;">TPM</th>
-            <th>status</th>
-          </tr>
-        </thead>
-        <tbody id="modelsTbody"></tbody>
-      </table>
-    </div>
-  </main>
-</div>
+    // ── theme ──────────────────────────────────────────────────────────────────
+    function toggleTheme() {
+      const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+    }
+    (function initTheme() {
+      document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
+    })();
 
-<script>
-'use strict';
+    // ── formatting helpers ─────────────────────────────────────────────────────
+    function fmtNum(n) {
+      if (n === undefined || n === null) return '—';
+      if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+      if (n >= 1_000) return (n / 1_000).toFixed(0) + 'k';
+      return String(n);
+    }
 
-let currentSort = 'tpm';
-let sortAsc = false;
-let countdownSecs = 30;
-let countdownTimer = null;
-let modelsData = {};
+    function pct(cur, lim) {
+      if (!lim) return 0;
+      return Math.min(100, Math.round((cur / lim) * 100));
+    }
 
-// ── theme ──────────────────────────────────────────────────────────────────
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-  const next = cur === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('theme', next);
-}
-(function initTheme() {
-  document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
-})();
+    function barFillClass(p) {
+      if (p >= 80) return 'err';
+      if (p >= 60) return 'warn';
+      return '';
+    }
 
-// ── formatting helpers ─────────────────────────────────────────────────────
-function fmtNum(n) {
-  if (n === undefined || n === null) return '—';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-  if (n >= 1_000)     return (n / 1_000).toFixed(0) + 'k';
-  return String(n);
-}
+    function esc(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
 
-function pct(cur, lim) {
-  if (!lim) return 0;
-  return Math.min(100, Math.round((cur / lim) * 100));
-}
+    function badge(cls, text) {
+      return `<span class="wf-badge ${cls}"><span class="dotS"></span>${esc(text)}</span>`;
+    }
 
-function barFillClass(p) {
-  if (p >= 80) return 'err';
-  if (p >= 60) return 'warn';
-  return '';
-}
-
-function esc(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function badge(cls, text) {
-  return `<span class="wf-badge ${cls}"><span class="dotS"></span>${esc(text)}</span>`;
-}
-
-function renderBar(cur, lim) {
-  const p = pct(cur, lim);
-  const cls = barFillClass(p);
-  const label = lim > 0
-    ? `${fmtNum(cur)} / ${fmtNum(lim)}`
-    : (cur > 0 ? `${fmtNum(cur)} / ∞` : '—');
-  return `<div style="display:flex;align-items:center;gap:6px;">
+    function renderBar(cur, lim) {
+      const p = pct(cur, lim);
+      const cls = barFillClass(p);
+      const label = lim > 0
+        ? `${fmtNum(cur)} / ${fmtNum(lim)}`
+        : (cur > 0 ? `${fmtNum(cur)} / ∞` : '—');
+      return `<div style="display:flex;align-items:center;gap:6px;">
     <div class="wf-bar" style="flex:1;min-width:60px;"><i style="width:${p}%" class="${cls}"></i></div>
     <span style="font-size:11px;color:var(--fg-muted);white-space:nowrap;">${label}</span>
   </div>`;
-}
-
-// ── credential type → badge class ─────────────────────────────────────────
-const TYPE_CLASS = {
-  'proxy':      'info',
-  'openai':     'ok',
-  'vertex-ai':  'info',
-  'gemini':     'info',
-  'anthropic':  'warn',
-  'bedrock':    'warn',
-};
-
-// ── render credentials ─────────────────────────────────────────────────────
-function renderCreds(credentials) {
-  const entries = Object.entries(credentials).sort(([a], [b]) => a.localeCompare(b));
-  document.getElementById('credTitle').textContent = `credentials · ${entries.length}`;
-
-  document.getElementById('credsGrid').innerHTML = entries.map(([name, c]) => {
-    const rpmP = pct(c.current_rpm, c.limit_rpm);
-    const tpmP = pct(c.current_tpm, c.limit_tpm);
-    const bannedCls = c.is_banned ? ' banned' : '';
-
-    let badges = badge(TYPE_CLASS[c.type] || '', c.type);
-    if (c.is_fallback) badges += badge('', 'fallback');
-    if (c.is_banned)   badges += badge('err', 'banned');
-
-    let errHtml = '';
-    const errCounts = c.banned_error_counts || {};
-    if (c.is_banned && Object.keys(errCounts).length > 0) {
-      const parts = Object.entries(errCounts)
-        .map(([code, n]) => `${n}×${code}`)
-        .join('  ');
-      errHtml = `<div style="font-size:11px;color:var(--status-err);margin-bottom:8px;">${esc(parts)}</div>`;
     }
 
-    return `<div class="wf-card${bannedCls}">
+    // ── credential type → badge class ─────────────────────────────────────────
+    const TYPE_CLASS = {
+      'proxy': 'info',
+      'openai': 'ok',
+      'vertex-ai': 'info',
+      'gemini': 'info',
+      'anthropic': 'warn',
+      'bedrock': 'warn',
+    };
+
+    // ── render credentials ─────────────────────────────────────────────────────
+    function renderCreds(credentials) {
+      const entries = Object.entries(credentials).sort(([a], [b]) => a.localeCompare(b));
+      document.getElementById('credTitle').textContent = `credentials · ${entries.length}`;
+
+      document.getElementById('credsGrid').innerHTML = entries.map(([name, c]) => {
+        const rpmP = pct(c.current_rpm, c.limit_rpm);
+        const tpmP = pct(c.current_tpm, c.limit_tpm);
+        const bannedCls = c.is_banned ? ' banned' : '';
+
+        let badges = badge(TYPE_CLASS[c.type] || '', c.type);
+        if (c.is_fallback) badges += badge('', 'fallback');
+        if (c.is_banned) badges += badge('err', 'banned');
+
+        let errHtml = '';
+        const errCounts = c.banned_error_counts || {};
+        if (c.is_banned && Object.keys(errCounts).length > 0) {
+          const parts = Object.entries(errCounts)
+            .map(([code, n]) => `${n}×${code}`)
+            .join('  ');
+          errHtml = `<div style="font-size:11px;color:var(--status-err);margin-bottom:8px;">${esc(parts)}</div>`;
+        }
+
+        return `<div class="wf-card${bannedCls}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:12px;">
         <span style="font-size:13px;word-break:break-all;">${esc(name)}</span>
         <div style="display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badges}</div>
@@ -202,127 +207,130 @@ function renderCreds(credentials) {
         </div>
       </div>
     </div>`;
-  }).join('');
-}
-
-// ── render models table ────────────────────────────────────────────────────
-function renderModels(models) {
-  modelsData = models;
-  document.getElementById('modelsTitle').textContent =
-    `active models · ${Object.keys(models).length}`;
-  applySort();
-}
-
-function applySort() {
-  const entries = Object.entries(modelsData);
-
-  entries.sort(([, a], [, b]) => {
-    let av, bv;
-    switch (currentSort) {
-      case 'name':       av = a.model.toLowerCase();       bv = b.model.toLowerCase();       break;
-      case 'credential': av = a.credential.toLowerCase();  bv = b.credential.toLowerCase();  break;
-      case 'rpm':        av = pct(a.current_rpm, a.limit_rpm); bv = pct(b.current_rpm, b.limit_rpm); break;
-      default:           av = pct(a.current_tpm, a.limit_tpm); bv = pct(b.current_tpm, b.limit_tpm);
+      }).join('');
     }
-    if (av < bv) return sortAsc ? -1 : 1;
-    if (av > bv) return sortAsc ? 1 : -1;
-    return 0;
-  });
 
-  document.getElementById('modelsTbody').innerHTML = entries.map(([, m]) => {
-    const errCounts = m.error_code_counts || {};
-    let statusBadge;
-    if (m.is_banned) {
-      const errStr = Object.entries(errCounts).map(([c, n]) => `${n}×${c}`).join(' ');
-      statusBadge = badge('err', errStr ? `banned · ${errStr}` : 'banned');
-    } else {
-      statusBadge = badge('ok', 'ok');
+    // ── render models table ────────────────────────────────────────────────────
+    function renderModels(models) {
+      modelsData = models;
+      document.getElementById('modelsTitle').textContent =
+        `active models · ${Object.keys(models).length}`;
+      applySort();
     }
-    return `<tr>
+
+    function applySort() {
+      const entries = Object.entries(modelsData);
+
+      entries.sort(([, a], [, b]) => {
+        let av, bv;
+        switch (currentSort) {
+          case 'name': av = a.model.toLowerCase(); bv = b.model.toLowerCase(); break;
+          case 'credential': av = a.credential.toLowerCase(); bv = b.credential.toLowerCase(); break;
+          case 'rpm': av = pct(a.current_rpm, a.limit_rpm); bv = pct(b.current_rpm, b.limit_rpm); break;
+          default: av = pct(a.current_tpm, a.limit_tpm); bv = pct(b.current_tpm, b.limit_tpm);
+        }
+        if (av < bv) return sortAsc ? -1 : 1;
+        if (av > bv) return sortAsc ? 1 : -1;
+        return 0;
+      });
+
+      document.getElementById('modelsTbody').innerHTML = entries.map(([, m]) => {
+        const errCounts = m.error_code_counts || {};
+        let statusBadge;
+        if (m.is_banned) {
+          const errStr = Object.entries(errCounts).map(([c, n]) => `${n}×${c}`).join(' ');
+          statusBadge = badge('err', errStr ? `banned · ${errStr}` : 'banned');
+        } else {
+          statusBadge = badge('ok', 'ok');
+        }
+        return `<tr>
       <td>${esc(m.model)}</td>
       <td class="muted">${esc(m.credential)}</td>
       <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
       <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
       <td>${statusBadge}</td>
     </tr>`;
-  }).join('');
-}
+      }).join('');
+    }
 
-function sortModels(type, btn) {
-  if (currentSort === type) {
-    sortAsc = !sortAsc;
-  } else {
-    sortAsc = (type === 'name' || type === 'credential');
-    currentSort = type;
-  }
-  document.querySelectorAll('.wf-btn[id^="sort"]').forEach(b => b.classList.remove('primary'));
-  if (btn) btn.classList.add('primary');
-  applySort();
-}
+    function sortModels(type, btn) {
+      if (currentSort === type) {
+        sortAsc = !sortAsc;
+      } else {
+        sortAsc = (type === 'name' || type === 'credential');
+        currentSort = type;
+      }
+      document.querySelectorAll('.wf-btn[id^="sort"]').forEach(b => b.classList.remove('primary'));
+      if (btn) btn.classList.add('primary');
+      applySort();
+    }
 
-// ── data loading ───────────────────────────────────────────────────────────
-async function load() {
-  clearInterval(countdownTimer);
+    // ── data loading ───────────────────────────────────────────────────────────
+    async function load() {
+      clearInterval(countdownTimer);
 
-  try {
-    const resp = await fetch('/health');
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
+      try {
+        const resp = await fetch('/health');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
 
-    // version from header (added by router)
-    const ver = resp.headers.get('X-Router-Version') || '';
-    const commit = resp.headers.get('X-Router-Commit') || '';
-    document.getElementById('verLabel').textContent =
-      ver ? `${ver}${commit ? ' / ' + commit.slice(0, 7) : ''}` : '';
+        // version from header (added by router)
+        const ver = resp.headers.get('X-Router-Version') || '';
+        const commit = resp.headers.get('X-Router-Commit') || '';
+        document.getElementById('verLabel').textContent =
+          ver ? `${ver}` : '';
+        document.getElementById('commitLabel').textContent =
+          commit ? `${commit ? commit.slice(0, 7) : ''}` : '';
 
-    // status badge
-    const cls = data.status === 'healthy' ? 'ok'
-              : data.status === 'degraded' ? 'warn' : 'err';
-    const badgeEl = document.getElementById('statusBadge');
-    badgeEl.className = `wf-badge ${cls}`;
-    document.getElementById('statusText').textContent = data.status || '—';
+        // status badge
+        const cls = data.status === 'healthy' ? 'ok'
+          : data.status === 'degraded' ? 'warn' : 'err';
+        const badgeEl = document.getElementById('statusBadge');
+        badgeEl.className = `wf-badge ${cls}`;
+        document.getElementById('statusText').textContent = data.status || '—';
 
-    // subtitle
-    document.getElementById('subtitle').textContent =
-      `updated ${new Date().toLocaleTimeString()} · auto-refresh on`;
+        // subtitle
+        document.getElementById('subtitle').textContent =
+          `updated ${new Date().toLocaleTimeString()} · auto-refresh on`;
 
-    // stats
-    const total   = data.total_credentials ?? 0;
-    const avail   = data.credentials_available ?? 0;
-    const banned  = data.credentials_banned ?? 0;
-    const nModels = Object.keys(data.models || {}).length;
-    document.getElementById('statTotal').textContent  = String(total).padStart(2, '0');
-    document.getElementById('statAvail').textContent  = String(avail).padStart(2, '0');
-    document.getElementById('statBanned').textContent = String(banned).padStart(2, '0');
-    document.getElementById('statModels').textContent = nModels;
-    document.getElementById('statAvailDelta').textContent =
-      total > 0 ? `${Math.round((avail / total) * 100)}% up` : '';
+        // stats
+        const total = data.total_credentials ?? 0;
+        const avail = data.credentials_available ?? 0;
+        const banned = data.credentials_banned ?? 0;
+        const nModels = Object.keys(data.models || {}).length;
+        document.getElementById('statTotal').textContent = String(total).padStart(2, '0');
+        document.getElementById('statAvail').textContent = String(avail).padStart(2, '0');
+        document.getElementById('statBanned').textContent = String(banned).padStart(2, '0');
+        document.getElementById('statModels').textContent = nModels;
+        document.getElementById('statAvailDelta').textContent =
+          total > 0 ? `${Math.round((avail / total) * 100)}% up` : '';
 
-    renderCreds(data.credentials || {});
-    renderModels(data.models || {});
-  } catch (e) {
-    document.getElementById('subtitle').textContent = `error: ${e.message}`;
-  }
+        renderCreds(data.credentials || {});
+        renderModels(data.models || {});
+      } catch (e) {
+        document.getElementById('subtitle').textContent = `error: ${e.message}`;
+      }
 
-  // restart countdown
-  countdownSecs = 30;
-  tickCountdown();
-  countdownTimer = setInterval(() => {
-    countdownSecs--;
-    tickCountdown();
-    if (countdownSecs <= 0) { clearInterval(countdownTimer); load(); }
-  }, 1000);
-}
+      // restart countdown
+      countdownSecs = 30;
+      tickCountdown();
+      countdownTimer = setInterval(() => {
+        countdownSecs--;
+        tickCountdown();
+        if (countdownSecs <= 0) { clearInterval(countdownTimer); load(); }
+      }, 1000);
+    }
 
-function tickCountdown() {
-  document.getElementById('countdown').textContent = `refresh in ${countdownSecs}s`;
-}
+    function tickCountdown() {
+      document.getElementById('countdown').textContent = `refresh in ${countdownSecs}s`;
+    }
 
-document.addEventListener('keydown', e => {
-  if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
-});
+    document.addEventListener('keydown', e => {
+      if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
+    });
 
-load();
-</script>
+    load();
+  </script>
 </body>
+
 </html>
