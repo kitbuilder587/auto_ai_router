@@ -98,9 +98,9 @@
           primaryBorderColor: dark ? '#25282c' : '#d8d8d4',
           lineColor: dark ? '#5f656d' : '#8b9098',
           background: dark ? '#131517' : '#f4f4f2',
-          fontSize: '12px',
+          fontSize: '14px',
         },
-        flowchart: { htmlLabels: true, curve: 'basis' },
+        flowchart: { htmlLabels: true, curve: 'basis', nodeSpacing: 30, rankSpacing: 40 },
       };
     }
 
@@ -154,7 +154,7 @@
         edgeDefs.push(label
           ? `  ${from} ${eId}@==>|"${label}"| ${to}`
           : `  ${from} ${eId}@==> ${to}`);
-        animDefs.push(`  ${eId}@{ animate: true }`);
+        if (label) animDefs.push(`  ${eId}@{ animate: true }`);
       }
 
       function statusFill(s) {
@@ -217,6 +217,7 @@
         }
 
         // edges: router → upstream routers
+        const upstreamRids = [];
         for (const [credName, up] of Object.entries(t.upstreams || {})) {
           const upRPM = sumUpstreamRPM(up);
           const label = upRPM > 0 ? `${fmtNum(upRPM)} rpm` : null;
@@ -231,9 +232,19 @@
             styleDefs.push(`  style ${errId} fill:#5f656d,color:#fff,stroke:none`);
             styleDefs.push(`  style ${errSgId} fill:${dark ? '#1e2124' : '#f0f0ee'},stroke:#5f656d,stroke-width:2px`);
             addEdge(rid, errId, label);
+            upstreamRids.push(errId);
           } else {
             const uid = addRouter(up, credName);
             addEdge(rid, uid, label);
+            upstreamRids.push(uid);
+          }
+        }
+
+        // Force upstream routers to render below credential level using invisible rank edges
+        if (nonProxy.length > 0 && upstreamRids.length > 0) {
+          const firstCredId = nid('c:' + t.router_id + ':' + nonProxy[0][0]);
+          for (const uid of upstreamRids) {
+            edgeDefs.push(`  ${firstCredId} ~~~ ${uid}`);
           }
         }
 
@@ -242,7 +253,7 @@
 
       addRouter(trace, null);
       return [
-        'flowchart LR',
+        'flowchart TB',
         ...sgBlocks.flat(),
         ...edgeDefs,
         ...animDefs,
@@ -258,6 +269,13 @@
         const id = 'trace_' + Date.now();
         const { svg } = await mermaid.render(id, diagram);
         wrap.innerHTML = svg;
+        const svgEl = wrap.querySelector('svg');
+        if (svgEl && svgEl.getAttribute('viewBox')) {
+          svgEl.removeAttribute('width');
+          svgEl.removeAttribute('height');
+          svgEl.style.width = '100%';
+          svgEl.style.height = 'auto';
+        }
       } catch (e) {
         wrap.innerHTML = `<pre style="color:var(--status-err);font-size:var(--fs-xs);text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
       }

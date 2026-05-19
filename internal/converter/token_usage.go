@@ -27,14 +27,15 @@ func (tu *TokenUsage) Total() int {
 
 // TokenCosts contains cost breakdown by token type
 type TokenCosts struct {
-	InputCost        float64
-	OutputCost       float64
-	AudioInputCost   float64
-	AudioOutputCost  float64
-	ReasoningCost    float64
-	CachedInputCost  float64
-	CachedOutputCost float64
-	PredictionCost   float64
-	ImageCost        float64
-	TotalCost        float64
+	InputCost         float64
+	OutputCost        float64
+	AudioInputCost    float64
+	AudioOutputCost   float64
+	ReasoningCost     float64
+	CachedInputCost   float64
+	CacheCreationCost float64
+	CachedOutputCost  float64
+	PredictionCost    float64
+	ImageCost         float64
+	TotalCost         float64
 }
