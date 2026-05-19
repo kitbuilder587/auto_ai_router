@@ -470,3 +470,65 @@ func TestUpdateStatsFromRemoteProxy_Success(t *testing.T) {
 	assert.True(t, modelSet["gpt-4"], "gpt-4 model should be added (aggregated from multiple credentials)")
 	assert.True(t, modelSet["claude-3-opus"], "claude-3-opus model should be added")
 }
+
+func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {
+	mockMM := NewMockModelManager()
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"upstream-primary":  {IsFallback: false, LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 10, CurrentTPM: 100},
+			"upstream-fallback": {IsFallback: true, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 50, CurrentTPM: 500},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"p1": {Credential: "upstream-primary", Model: "primary-model", LimitRPM: 20, LimitTPM: 200, CurrentRPM: 2, CurrentTPM: 20},
+			"f1": {Credential: "upstream-fallback", Model: "fallback-model", LimitRPM: 80, LimitTPM: 800, CurrentRPM: 8, CurrentTPM: 80},
+		},
+	}
+
+	UpdateStatsFromHealth(health, &config.CredentialConfig{
+		Name:       "proxy-primary",
+		IsFallback: false,
+	}, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 100, rateLimiter.GetLimitRPM("proxy-primary"))
+	assert.Equal(t, 1000, rateLimiter.GetLimitTPM("proxy-primary"))
+	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("proxy-primary", "primary-model"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
+
+	addedModels := mockMM.GetAddedModels()
+	assert.Len(t, addedModels, 1)
+	assert.Equal(t, "primary-model", addedModels[0].model)
+}
+
+func TestUpdateStatsFromHealth_FiltersByFallbackParity_Fallback(t *testing.T) {
+	mockMM := NewMockModelManager()
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"upstream-primary":  {IsFallback: false, LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 10, CurrentTPM: 100},
+			"upstream-fallback": {IsFallback: true, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 50, CurrentTPM: 500},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"p1": {Credential: "upstream-primary", Model: "primary-model", LimitRPM: 20, LimitTPM: 200, CurrentRPM: 2, CurrentTPM: 20},
+			"f1": {Credential: "upstream-fallback", Model: "fallback-model", LimitRPM: 80, LimitTPM: 800, CurrentRPM: 8, CurrentTPM: 80},
+		},
+	}
+
+	UpdateStatsFromHealth(health, &config.CredentialConfig{
+		Name:       "proxy-fallback",
+		IsFallback: true,
+	}, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 500, rateLimiter.GetLimitRPM("proxy-fallback"))
+	assert.Equal(t, 5000, rateLimiter.GetLimitTPM("proxy-fallback"))
+	assert.Equal(t, 80, rateLimiter.GetModelLimitRPM("proxy-fallback", "fallback-model"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-fallback", "primary-model"))
+
+	addedModels := mockMM.GetAddedModels()
+	assert.Len(t, addedModels, 1)
+	assert.Equal(t, "fallback-model", addedModels[0].model)
+}

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
@@ -37,28 +40,24 @@ func TestGetRemoteModels_Caching(t *testing.T) {
 
 	// Create test server that returns different data on first vs subsequent requests
 	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
-
-		w.Header().Set("Content-Type", "application/json")
-
-		if requestCount == 1 {
-			// First request returns model-a
-			resp := ModelsResponse{
-				Object: "list",
-				Data: []Model{
-					{ID: "model-a", Object: "model", OwnedBy: "test-provider"},
-				},
+		switch r.URL.Path {
+		case "/health":
+			requestCount++
+			w.Header().Set("Content-Type", "application/json")
+			modelID := "model-a"
+			if requestCount > 1 {
+				modelID = "model-b"
 			}
-			_ = json.NewEncoder(w).Encode(resp)
-		} else {
-			// Subsequent requests return model-b (simulating server-side change)
-			resp := ModelsResponse{
-				Object: "list",
-				Data: []Model{
-					{ID: "model-b", Object: "model", OwnedBy: "test-provider"},
+			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+				Credentials: map[string]httputil.CredentialHealthStats{
+					"upstream-primary": {Type: "openai", IsFallback: false},
 				},
-			}
-			_ = json.NewEncoder(w).Encode(resp)
+				Models: map[string]httputil.ModelHealthStats{
+					"m1": {Credential: "upstream-primary", Model: modelID},
+				},
+			})
+		default:
+			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
@@ -122,29 +121,41 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 
 	// Create test server for proxy-1
 	server1 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCountProxy1++
-		w.Header().Set("Content-Type", "application/json")
-		resp := ModelsResponse{
-			Object: "list",
-			Data: []Model{
-				{ID: "proxy1-model", Object: "model", OwnedBy: "proxy1"},
-			},
+		switch r.URL.Path {
+		case "/health":
+			requestCountProxy1++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+				Credentials: map[string]httputil.CredentialHealthStats{
+					"upstream-primary": {Type: "openai", IsFallback: false},
+				},
+				Models: map[string]httputil.ModelHealthStats{
+					"m1": {Credential: "upstream-primary", Model: "proxy1-model"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
 		}
-		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server1.Close()
 
 	// Create test server for proxy-2
 	server2 := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCountProxy2++
-		w.Header().Set("Content-Type", "application/json")
-		resp := ModelsResponse{
-			Object: "list",
-			Data: []Model{
-				{ID: "proxy2-model", Object: "model", OwnedBy: "proxy2"},
-			},
+		switch r.URL.Path {
+		case "/health":
+			requestCountProxy2++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+				Credentials: map[string]httputil.CredentialHealthStats{
+					"upstream-primary": {Type: "openai", IsFallback: false},
+				},
+				Models: map[string]httputil.ModelHealthStats{
+					"m1": {Credential: "upstream-primary", Model: "proxy2-model"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
 		}
-		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server2.Close()
 
@@ -185,4 +196,129 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 	assert.Equal(t, "proxy2-model", models2b[0].ID)
 	assert.Equal(t, 1, requestCountProxy1)
 	assert.Equal(t, 1, requestCountProxy2, "Should still be 1 - using cache")
+}
+
+func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+				Credentials: map[string]httputil.CredentialHealthStats{
+					"primary-upstream":  {Type: "openai", IsFallback: false},
+					"fallback-upstream": {Type: "openai", IsFallback: true},
+				},
+				Models: map[string]httputil.ModelHealthStats{
+					"m1": {Credential: "primary-upstream", Model: "primary-only"},
+					"m2": {Credential: "fallback-upstream", Model: "fallback-only"},
+					"m3": {Credential: "primary-upstream", Model: "shared-model"},
+					"m4": {Credential: "fallback-upstream", Model: "shared-model"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+
+	primaryModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+		Name:       "proxy-primary",
+		Type:       config.ProviderTypeProxy,
+		BaseURL:    server.URL,
+		IsFallback: false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"primary-only", "shared-model"}, modelIDs(primaryModels))
+
+	fallbackModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+		Name:       "proxy-fallback",
+		Type:       config.ProviderTypeProxy,
+		BaseURL:    server.URL,
+		IsFallback: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"fallback-only", "shared-model"}, modelIDs(fallbackModels))
+}
+
+func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthUnavailable(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			http.NotFound(w, r)
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ModelsResponse{
+				Object: "list",
+				Data: []Model{
+					{ID: "fallback-model", Object: "model", OwnedBy: "proxy"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+		Name:    "proxy-1",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"fallback-model"}, modelIDs(models))
+}
+
+func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthLacksMetadata(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			// Simulate older/non-AAR proxy returning unrelated JSON shape.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ModelsResponse{
+				Object: "list",
+				Data: []Model{
+					{ID: "ignored-health-model", Object: "model"},
+				},
+			})
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ModelsResponse{
+				Object: "list",
+				Data: []Model{
+					{ID: "real-model", Object: "model", OwnedBy: "proxy"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+		Name:    "proxy-1",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"real-model"}, modelIDs(models))
+}
+
+func modelIDs(models []Model) []string {
+	result := make([]string, 0, len(models))
+	for _, model := range models {
+		result = append(result, model.ID)
+	}
+	return result
 }

@@ -2,7 +2,9 @@ package models
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
+
+var errProxyHealthModelMetadataUnavailable = fmt.Errorf("proxy health model metadata unavailable")
 
 // ModelPrice contains pricing information for a single model
 type ModelPrice struct {
@@ -1173,29 +1177,81 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 		"base_url", cred.BaseURL,
 	)
 
-	// Fetch models using httputil helper
-	var modelsResp ModelsResponse
-	if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
-		m.logger.Error("Failed to fetch remote models",
+	models, err := m.fetchRemoteModelsFromHealth(ctx, cred)
+	if err != nil {
+		m.logger.Debug("Failed to fetch remote models from proxy health; falling back to /v1/models",
 			"credential", cred.Name,
 			"error", err,
 		)
-		return nil, err
+
+		// Fallback for non-AAR proxies that expose /v1/models but not /health.
+		var modelsResp ModelsResponse
+		if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
+			m.logger.Error("Failed to fetch remote models",
+				"credential", cred.Name,
+				"error", err,
+			)
+			return nil, err
+		}
+		models = modelsResp.Data
 	}
 
 	// Cache the result
 	m.mu.Lock()
 	m.remoteModelsCache[cred.Name] = remoteModelCache{
-		models:    modelsResp.Data,
+		models:    models,
 		expiresAt: utils.NowUTC().Add(m.cacheExpiration),
 	}
 	m.mu.Unlock()
 
 	m.logger.Debug("Cached remote models",
 		"credential", cred.Name,
-		"models_count", len(modelsResp.Data),
+		"models_count", len(models),
 		"expires_in", m.cacheExpiration.Seconds(),
 	)
 
-	return modelsResp.Data, nil
+	return models, nil
+}
+
+func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+	var health httputil.ProxyHealthResponse
+	if err := httputil.FetchJSONFromProxy(ctx, cred, "/health", m.logger, &health); err != nil {
+		return nil, err
+	}
+
+	if len(health.Credentials) == 0 || len(health.Models) == 0 {
+		return nil, errProxyHealthModelMetadataUnavailable
+	}
+
+	modelsByID := make(map[string]Model)
+	for _, modelStats := range health.Models {
+		credStats, ok := health.Credentials[modelStats.Credential]
+		if !ok {
+			continue
+		}
+		if credStats.IsFallback != cred.IsFallback {
+			continue
+		}
+		if modelStats.Model == "" {
+			continue
+		}
+		if _, exists := modelsByID[modelStats.Model]; exists {
+			continue
+		}
+		modelsByID[modelStats.Model] = Model{
+			ID:      modelStats.Model,
+			Object:  "model",
+			OwnedBy: credStats.Type,
+		}
+	}
+
+	models := make([]Model, 0, len(modelsByID))
+	for _, model := range modelsByID {
+		models = append(models, model)
+	}
+	slices.SortFunc(models, func(a, b Model) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	return models, nil
 }

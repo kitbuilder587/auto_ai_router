@@ -129,6 +129,9 @@ func updateCredentialLimits(
 	aggregation := newSumLimitAggregation()
 
 	for _, credStats := range health.Credentials {
+		if credStats.IsFallback != cred.IsFallback {
+			continue
+		}
 		aggregation.applySum(
 			credStats.LimitRPM,
 			credStats.LimitTPM,
@@ -179,6 +182,13 @@ func updateModelLimits(
 	modelStats := make(map[string]*limitAggregation)
 
 	for _, modelStats_data := range health.Models {
+		credStats, ok := health.Credentials[modelStats_data.Credential]
+		if !ok {
+			continue
+		}
+		if credStats.IsFallback != cred.IsFallback {
+			continue
+		}
 		modelID := modelStats_data.Model
 
 		// Aggregate (sum) limits and current usage for this model
