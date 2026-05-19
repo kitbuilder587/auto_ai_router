@@ -166,6 +166,8 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		costBreakdown = map[string]interface{}{
 			"input_cost":          costs.InputCost,
 			"output_cost":         costs.OutputCost,
+			"cached_input_cost":   costs.CachedInputCost,
+			"cache_creation_cost": costs.CacheCreationCost,
 			"total_cost":          costs.TotalCost,
 			"original_cost":       costs.TotalCost,
 			"margin_percent":      0.0,

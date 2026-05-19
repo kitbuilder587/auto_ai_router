@@ -27,11 +27,10 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	costs := &converter.TokenCosts{}
 
-	// Calculate "regular" input tokens by subtracting specialized token types
-	// This handles both Vertex/OpenAI (where they're included) and Anthropic (where they're separate)
-	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens
+	// Calculate "regular" input tokens by subtracting specialized token types.
+	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - usage.CacheCreationTokens
 	if regularInputTokens < 0 {
-		// Safety: shouldn't happen, but use 0 if somehow negative
 		regularInputTokens = 0
 	}
 
@@ -79,12 +78,23 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 	costs.AudioOutputCost = float64(usage.AudioOutputTokens) * audioOutputCost
 
-	// Cached tokens with fallback
+	// Cached read tokens: prefer explicit cached price, fall back to LiteLLM alias,
+	// then fall back to regular rate (no discount known).
 	cachedInputCost := price.InputCostPerCachedToken
+	if cachedInputCost == 0 {
+		cachedInputCost = price.CacheReadInputTokenCost
+	}
 	if cachedInputCost == 0 {
 		cachedInputCost = price.InputCostPerToken
 	}
 	costs.CachedInputCost = float64(usage.CachedInputTokens) * cachedInputCost
+
+	// Cache creation tokens (Anthropic prompt caching write cost).
+	cacheCreationCost := price.CacheCreationInputTokenCost
+	if cacheCreationCost == 0 {
+		cacheCreationCost = price.InputCostPerToken
+	}
+	costs.CacheCreationCost = float64(usage.CacheCreationTokens) * cacheCreationCost
 
 	cachedOutputCost := price.OutputCostPerCachedToken
 	if cachedOutputCost == 0 {
@@ -128,6 +138,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.AudioOutputCost +
 		costs.ReasoningCost +
 		costs.CachedInputCost +
+		costs.CacheCreationCost +
 		costs.CachedOutputCost +
 		costs.PredictionCost +
 		costs.ImageCost

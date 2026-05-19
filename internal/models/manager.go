@@ -37,6 +37,8 @@ type ModelPrice struct {
 	// Cached/Prediction tokens
 	OutputCostPerCachedToken     float64 `json:"output_cost_per_cached_token,omitempty"`
 	InputCostPerCachedToken      float64 `json:"input_cost_per_cached_token,omitempty"`
+	CacheReadInputTokenCost      float64 `json:"cache_read_input_token_cost,omitempty"`     // LiteLLM alias for InputCostPerCachedToken
+	CacheCreationInputTokenCost  float64 `json:"cache_creation_input_token_cost,omitempty"` // Anthropic cache write cost
 	OutputCostPerPredictionToken float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)

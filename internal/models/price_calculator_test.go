@@ -385,3 +385,65 @@ func TestCalculateTokenCosts_Below200k_NoTiering(t *testing.T) {
 	// Total: 250.0
 	assert.InDelta(t, 250.0, costs.TotalCost, 0.0001)
 }
+
+// TestCalculateTokenCosts_CacheReadInputTokenCostAlias verifies that
+// cache_read_input_token_cost (LiteLLM JSON alias) is used when
+// input_cost_per_cached_token is not set. This was the root cause of the
+// gpt-5.1 overbilling bug.
+func TestCalculateTokenCosts_CacheReadInputTokenCostAlias(t *testing.T) {
+	// gpt-5.1 example: 4736 prompt, 4608 cached, 285 completion
+	usage := &converter.TokenUsage{
+		PromptTokens:      4736,
+		CompletionTokens:  285,
+		CachedInputTokens: 4608,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:       0.000001125,  // $1.125/1M
+		OutputCostPerToken:      0.000009,     // $9/1M
+		CacheReadInputTokenCost: 0.0000001125, // $0.1125/1M — LiteLLM alias, no InputCostPerCachedToken set
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	// Regular input: 4736 - 4608 = 128 tokens × $0.000001125 = $0.000144
+	assert.InDelta(t, 0.000144, costs.InputCost, 1e-9)
+	// Cached input via alias: 4608 × $0.0000001125 = $0.0005184
+	assert.InDelta(t, 0.0005184, costs.CachedInputCost, 1e-9)
+	// Output: 285 × $0.000009 = $0.002565
+	assert.InDelta(t, 0.002565, costs.OutputCost, 1e-9)
+	// Total ≈ $0.003227 (not $0.007893 from the bug)
+	assert.InDelta(t, 0.0032274, costs.TotalCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_CacheCreationTokens(t *testing.T) {
+	// Anthropic: cache creation tokens are included in PromptTokens and billed separately
+	usage := &converter.TokenUsage{
+		PromptTokens:        1000, // input(500) + cache_read(300) + cache_creation(200)
+		CompletionTokens:    100,
+		CachedInputTokens:   300, // cache_read
+		CacheCreationTokens: 200, // cache_creation (Anthropic prompt caching write)
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:           0.000003,   // $3/1M
+		OutputCostPerToken:          0.000015,   // $15/1M
+		CacheReadInputTokenCost:     0.0000003,  // $0.3/1M
+		CacheCreationInputTokenCost: 0.00000375, // $3.75/1M (more expensive for write)
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	// Regular: 1000 - 300 - 200 = 500 tokens × $0.000003 = $0.0015
+	assert.InDelta(t, 0.0015, costs.InputCost, 1e-9)
+	// Cache read: 300 × $0.0000003 = $0.00009
+	assert.InDelta(t, 0.00009, costs.CachedInputCost, 1e-9)
+	// Cache creation: 200 × $0.00000375 = $0.00075
+	assert.InDelta(t, 0.00075, costs.CacheCreationCost, 1e-9)
+	// Output: 100 × $0.000015 = $0.0015
+	assert.InDelta(t, 0.0015, costs.OutputCost, 1e-9)
+	// Total: 0.0015 + 0.00009 + 0.00075 + 0.0015 = $0.00384
+	assert.InDelta(t, 0.00384, costs.TotalCost, 1e-9)
+}
