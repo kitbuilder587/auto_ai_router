@@ -11,34 +11,34 @@ services:
         target: /app/config.yaml
 
     depends_on:
-      auto-ai-router-02:
+      ger01:
         condition: service_healthy
-      auto-ai-router-03:
+      fin01:
         condition: service_healthy
 
-  auto-ai-router-02:
+  ger01:
     image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
     configs:
-      - source: auto-ai-router-02-config
+      - source: ger01-config
         target: /app/config.yaml
 
     depends_on:
-      auto-ai-router-04:
+      fra01:
         condition: service_healthy
 
-  auto-ai-router-03:
+  fin01:
     image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
     configs:
-      - source: auto-ai-router-03-config
+      - source: fin01-config
         target: /app/config.yaml
 
-  auto-ai-router-04:
+  fra01:
     image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
     configs:
-      - source: auto-ai-router-04-config
+      - source: fra01-config
         target: /app/config.yaml
 
 configs:
@@ -56,23 +56,31 @@ configs:
         log_errors: false
 
       credentials:
-      - name: "auto-ai-router-02"
+      - name: "ger01"
         type: "proxy"
-        api_key: sk-auto-ai-router-02-key
-        base_url: http://auto-ai-router-02:8080
-      - name: "auto-ai-router-03"
-        type: "proxy"
-        api_key: sk-auto-ai-router-03-key
-        base_url: http://auto-ai-router-03:8080
+        api_key: sk-ger01-key
+        base_url: http://ger01:8080
 
-  auto-ai-router-02-config:
+      - name: "fin01"
+        type: "proxy"
+        is_fallback: true
+        api_key: sk-fin01-key
+        base_url: http://fin01:8080
+
+      - name: "fra01"
+        type: "proxy"
+        is_fallback: true
+        api_key: sk-fra01-key
+        base_url: http://fra01:8080
+
+  ger01-config:
     content: |
       server:
         port: 8080
         max_body_size_mb: 100
         request_timeout: 5m
         logging_level: debug  # Options: info, debug, error
-        master_key: "sk-auto-ai-router-02-key"  # Required: Master key for client authentication
+        master_key: "sk-ger01-key"  # Required: Master key for client authentication
 
       monitoring:
         prometheus_enabled: true
@@ -83,23 +91,19 @@ configs:
         type: "openai"
         api_key: ${OPENAI_API_KEY}
         base_url: ${OPENAI_BASE_URL}
-      - name: "auto-ai-router-04"
-        type: "proxy"
-        api_key: sk-auto-ai-router-04-key
-        base_url: http://auto-ai-router-04:8080
 
       models:
       - name: gpt-4o-mini
         credential: openai_router_2
 
-  auto-ai-router-03-config:
+  fin01-config:
     content: |
       server:
         port: 8080
         max_body_size_mb: 100
         request_timeout: 5m
         logging_level: debug  # Options: info, debug, error
-        master_key: "sk-auto-ai-router-03-key"  # Required: Master key for client authentication
+        master_key: "sk-fin01-key"  # Required: Master key for client authentication
 
       monitoring:
         prometheus_enabled: true
@@ -116,14 +120,14 @@ configs:
         credential: openai_router_3
         passthrough_responses: true
 
-  auto-ai-router-04-config:
+  fra01-config:
     content: |
       server:
         port: 8080
         max_body_size_mb: 100
         request_timeout: 5m
         logging_level: debug  # Options: info, debug, error
-        master_key: "sk-auto-ai-router-04-key"  # Required: Master key for client authentication
+        master_key: "sk-fra01-key"  # Required: Master key for client authentication
 
       monitoring:
         prometheus_enabled: true
