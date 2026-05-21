@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -215,7 +214,6 @@ func (p *Proxy) orchestrateRequest(
 func initializeRetryTrackingContext(r *http.Request) *http.Request {
 	ctx := r.Context()
 	ctx = SetTried(ctx, make(map[string]bool))
-	ctx = context.WithValue(ctx, AttemptCountKey{}, 0)
 	return r.WithContext(ctx)
 }
 

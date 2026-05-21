@@ -179,6 +179,7 @@ func main() {
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
 		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
+		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
 		ResponseStore:              respStore,
 		SessionStickyEnabled:       cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,

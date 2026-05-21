@@ -102,6 +102,7 @@ type TestProxyConfig struct {
 	SessionStickyEnabled bool
 	SessionStoreTTL      time.Duration
 	MaxProviderRetries   int
+	MaxFallbackAttempts  int
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -255,6 +256,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		SessionStickyEnabled: b.config.SessionStickyEnabled,
 		SessionStoreTTL:      b.config.SessionStoreTTL,
 		MaxProviderRetries:   b.config.MaxProviderRetries,
+		MaxFallbackAttempts:  b.config.MaxFallbackAttempts,
 	})
 }
 

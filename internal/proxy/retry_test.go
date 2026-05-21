@@ -70,7 +70,6 @@ func TestShouldRetryWithFallback_NonRetryableStatus(t *testing.T) {
 	}{
 		{"200 OK", http.StatusOK},
 		{"201 Created", http.StatusCreated},
-		{"400 Bad Request", http.StatusBadRequest},
 		{"404 Not Found", http.StatusNotFound},
 	}
 
@@ -84,8 +83,16 @@ func TestShouldRetryWithFallback_NonRetryableStatus(t *testing.T) {
 	}
 }
 
+func TestShouldRetryWithFallback_BadRequest(t *testing.T) {
+	// 400 Bad Request is retried — a different credential may not produce the same error
+	shouldRetry, reason := ShouldRetryWithFallback(http.StatusBadRequest, []byte("bad request"))
+
+	assert.True(t, shouldRetry)
+	assert.Equal(t, RetryReasonServerErr, reason)
+}
+
 func TestShouldRetryWithFallback_ContentPolicyViolation(t *testing.T) {
-	// Even with 500 status, content policy violation should not be retried
+	// Content policy errors are retried (the next credential may not have the same restriction)
 	tests := []struct {
 		name     string
 		respBody string
@@ -104,8 +111,8 @@ func TestShouldRetryWithFallback_ContentPolicyViolation(t *testing.T) {
 				[]byte(tt.respBody),
 			)
 
-			assert.False(t, shouldRetry)
-			assert.Equal(t, RetryReason(""), reason)
+			assert.True(t, shouldRetry)
+			assert.Equal(t, RetryReasonServerErr, reason)
 		})
 	}
 }
@@ -149,14 +156,14 @@ func TestShouldRetryWithFallback_RetryableInfrastructureError(t *testing.T) {
 }
 
 func TestShouldRetryWithFallback_RateLimitWithContentPolicy(t *testing.T) {
-	// If response contains both rate limit AND content policy, content policy wins
+	// Content policy in the body no longer suppresses retry
 	shouldRetry, reason := ShouldRetryWithFallback(
 		http.StatusTooManyRequests,
 		[]byte("content policy violation during rate limit"),
 	)
 
-	assert.False(t, shouldRetry)
-	assert.Equal(t, RetryReason(""), reason)
+	assert.True(t, shouldRetry)
+	assert.Equal(t, RetryReasonRateLimit, reason)
 }
 
 func TestShouldRetryWithFallback_EmptyResponseBody(t *testing.T) {
@@ -171,16 +178,17 @@ func TestShouldRetryWithFallback_EmptyResponseBody(t *testing.T) {
 }
 
 func TestIsRetryableContent_ContentPolicyViolation(t *testing.T) {
+	// Content policy strings are no longer treated as non-retryable
 	tests := []struct {
 		name     string
 		content  string
 		expected bool
 	}{
-		{"content policy lowercase", "content policy violation", false},
-		{"content policy uppercase", "CONTENT POLICY VIOLATION", false},
-		{"content policy mixed", "Content Policy Violation", false},
-		{"content management policy", "content management policy violation", false},
-		{"policy violation", "policy violation detected", false},
+		{"content policy lowercase", "content policy violation", true},
+		{"content policy uppercase", "CONTENT POLICY VIOLATION", true},
+		{"content policy mixed", "Content Policy Violation", true},
+		{"content management policy", "content management policy violation", true},
+		{"policy violation", "policy violation detected", true},
 		{"no violation", "server error", true},
 		{"empty", "", true},
 	}
@@ -218,13 +226,10 @@ func TestIsRetryableContent_ModelErrors(t *testing.T) {
 }
 
 func TestIsRetryableContent_CaseInsensitive(t *testing.T) {
-	// Verify case-insensitive matching works across all patterns
+	// Verify case-insensitive matching works for model-not-found patterns
 	testCases := []string{
 		"Model not Found",
 		"MODEL NOT FOUND",
-		"Content POLICY violation",
-		"CONTENT management POLICY",
-		"POLICY VIOLATION",
 		"Unsupported MODEL",
 		"MODEL DOES NOT EXIST",
 	}
