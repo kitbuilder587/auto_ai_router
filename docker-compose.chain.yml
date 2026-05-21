@@ -93,7 +93,8 @@ configs:
         base_url: ${OPENAI_BASE_URL}
 
       models:
-      - name: gpt-4o-mini
+      - name: gpt-5-mini
+        rpm: 1
         credential: openai_router_2
 
   fin01-config:
@@ -118,7 +119,7 @@ configs:
       models:
       - name: gpt-5-mini
         credential: openai_router_3
-        passthrough_responses: true
+        rpm: 1
 
   fra01-config:
     content: |
@@ -141,5 +142,5 @@ configs:
 
       models:
       - name: gpt-5-mini
+        rpm: 1
         credential: openai_router_4
-        passthrough_responses: true
