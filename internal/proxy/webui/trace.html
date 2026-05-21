@@ -52,7 +52,7 @@
           <span id="diagramArrow">▾</span>
           chain diagram
         </summary>
-        <div class="detail-body" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;"
+        <div class="detail-body" style="padding:var(--sp-3);min-height:300px;overflow-x:auto;text-align:center;"
           id="diagramWrap">
           <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
         </div>
@@ -100,7 +100,7 @@
           background: dark ? '#131517' : '#f4f4f2',
           fontSize: '14px',
         },
-        flowchart: { htmlLabels: true, curve: 'basis', nodeSpacing: 30, rankSpacing: 40 },
+        flowchart: { htmlLabels: true, curve: 'basis', nodeSpacing: 60, rankSpacing: 80 },
       };
     }
 
@@ -271,10 +271,12 @@
         wrap.innerHTML = svg;
         const svgEl = wrap.querySelector('svg');
         if (svgEl && svgEl.getAttribute('viewBox')) {
-          svgEl.removeAttribute('width');
+          // width="100%" as an SVG *attribute* (not CSS) + no height → браузер
+          // вычисляет высоту из viewBox-пропорций; без этого SVG схлопывается в 300×150
+          svgEl.setAttribute('width', '100%');
           svgEl.removeAttribute('height');
-          svgEl.style.width = '100%';
-          svgEl.style.height = 'auto';
+          svgEl.style.display = 'block';
+          svgEl.style.margin = '0 auto';
         }
       } catch (e) {
         wrap.innerHTML = `<pre style="color:var(--status-err);font-size:var(--fs-xs);text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
