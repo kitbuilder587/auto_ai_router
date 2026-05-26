@@ -5,12 +5,16 @@ Tests gemini-*-image-* models for text-to-image and image-to-image editing.
 
 import base64
 import io
+import os
 import struct
 import zlib
 
 import pytest
 
 from test_helpers import TestModels
+
+# Path to the real flower photo used in integration tests
+_FLOWER_JPG = os.path.join(os.path.dirname(__file__), "flower.jpg")
 
 
 # ---------------------------------------------------------------------------
@@ -310,3 +314,126 @@ class TestGeminiImageEditMulti:
 
         assert len(resp.data) >= 1
         _assert_image_item(resp.data[0])
+
+
+# ---------------------------------------------------------------------------
+# Real-photo editing — flower.jpg
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def flower_jpg_bytes():
+    """Load flower.jpg once per module; skip if file is missing."""
+    if not os.path.exists(_FLOWER_JPG):
+        pytest.skip(f"Test photo not found: {_FLOWER_JPG}")
+    with open(_FLOWER_JPG, "rb") as f:
+        return f.read()
+
+
+class TestGeminiImageEditWithFlower:
+    """Integration tests that use the real flower.jpg photo."""
+
+    @pytest.mark.parametrize("model", TestModels.GEMINI_IMAGE_MODELS)
+    def test_edit_flower_basic(self, openai_client, model, flower_jpg_bytes):
+        """images.edit() on a real JPEG returns at least one image."""
+        try:
+            resp = openai_client.images.edit(
+                model=model,
+                image=io.BytesIO(flower_jpg_bytes),
+                prompt="Добавь шмеля на цветок",
+                n=1,
+                size="1024x1024",
+            )
+        except Exception as e:
+            _skip_on_error(e, model)
+
+        assert resp is not None
+        assert len(resp.data) >= 1
+        _assert_image_item(resp.data[0])
+
+    @pytest.mark.parametrize("model", TestModels.GEMINI_IMAGE_MODELS)
+    def test_edit_flower_b64_decodable(self, openai_client, model, flower_jpg_bytes):
+        """Edit of flower.jpg returns valid PNG or JPEG in b64_json."""
+        try:
+            resp = openai_client.images.edit(
+                model=model,
+                image=io.BytesIO(flower_jpg_bytes),
+                prompt="Добавь шмеля на цветок",
+                n=1,
+                size="1024x1024",
+                response_format="b64_json",
+            )
+        except Exception as e:
+            _skip_on_error(e, model)
+
+        assert resp.data, "Response data is empty"
+        b64 = resp.data[0].b64_json
+        if not b64:
+            pytest.skip("Model returned url instead of b64_json")
+        _assert_b64_valid(b64)
+
+    @pytest.mark.parametrize("model", TestModels.GEMINI_IMAGE_MODELS)
+    def test_edit_flower_usage_format(self, openai_client, model, flower_jpg_bytes):
+        """Usage field uses images API format: input_tokens / output_tokens (not prompt_tokens)."""
+        try:
+            resp = openai_client.images.edit(
+                model=model,
+                image=io.BytesIO(flower_jpg_bytes),
+                prompt="Добавь шмеля на цветок",
+                n=1,
+                size="1024x1024",
+            )
+        except Exception as e:
+            _skip_on_error(e, model)
+
+        assert resp is not None
+
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            pytest.skip("Model did not return usage metadata")
+
+        # Must have the images-API fields, not the chat-completions fields
+        assert hasattr(usage, "input_tokens"), (
+            f"usage.input_tokens missing — got fields: {vars(usage)}"
+        )
+        assert hasattr(usage, "output_tokens"), (
+            f"usage.output_tokens missing — got fields: {vars(usage)}"
+        )
+        assert hasattr(usage, "input_tokens_details"), (
+            f"usage.input_tokens_details missing — got fields: {vars(usage)}"
+        )
+
+        assert usage.input_tokens > 0, "input_tokens should be positive"
+        assert usage.output_tokens > 0, "output_tokens should be positive"
+
+        details = usage.input_tokens_details
+        assert details is not None
+        image_toks = getattr(details, "image_tokens", None)
+        assert image_toks is not None and image_toks > 0, (
+            f"input_tokens_details.image_tokens should be > 0 for a real photo input, got {image_toks}"
+        )
+
+    @pytest.mark.parametrize("model", TestModels.GEMINI_IMAGE_MODELS)
+    def test_edit_flower_result_differs_from_input(self, openai_client, model, flower_jpg_bytes):
+        """Edit result is not byte-identical to the input photo."""
+        input_b64 = base64.b64encode(flower_jpg_bytes).decode()
+
+        try:
+            resp = openai_client.images.edit(
+                model=model,
+                image=io.BytesIO(flower_jpg_bytes),
+                prompt="Добавь шмеля на цветок",
+                n=1,
+                size="1024x1024",
+                response_format="b64_json",
+            )
+        except Exception as e:
+            _skip_on_error(e, model)
+
+        assert resp.data, "Response data is empty"
+        result_b64 = resp.data[0].b64_json
+        if not result_b64:
+            pytest.skip("Model returned url instead of b64_json, can't compare bytes")
+
+        assert result_b64 != input_b64, (
+            "Edit result is byte-identical to the input — model may have returned the original unchanged"
+        )

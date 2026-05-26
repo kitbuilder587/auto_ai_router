@@ -398,10 +398,53 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 	}
 
 	if vertexResp.UsageMetadata != nil {
-		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
+		openAIResp.Usage = convertVertexUsageToImageUsage(vertexResp.UsageMetadata)
 	}
 
 	return json.Marshal(openAIResp)
+}
+
+// convertVertexUsageToImageUsage maps Vertex UsageMetadata to the OpenAI images API usage format.
+// The images API uses input_tokens/output_tokens rather than the chat prompt_tokens/completion_tokens.
+func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMetadata) *openai.OpenAIImageUsage {
+	inputTokens := int(meta.PromptTokenCount)
+
+	var textTokens, imageTokens int
+	for _, detail := range meta.PromptTokensDetails {
+		if detail == nil {
+			continue
+		}
+		switch genai.MediaModality(detail.Modality) {
+		case genai.MediaModalityImage, genai.MediaModalityVideo:
+			imageTokens += int(detail.TokenCount)
+		default:
+			textTokens += int(detail.TokenCount)
+		}
+	}
+	if textTokens == 0 && imageTokens == 0 {
+		textTokens = inputTokens
+	}
+
+	outputTokens := int(meta.CandidatesTokenCount)
+	for _, detail := range meta.CandidatesTokensDetails {
+		if detail == nil {
+			continue
+		}
+		switch genai.MediaModality(detail.Modality) {
+		case genai.MediaModalityImage, genai.MediaModalityVideo:
+			// image output tokens counted in CandidatesTokenCount
+		}
+	}
+
+	return &openai.OpenAIImageUsage{
+		InputTokens: inputTokens,
+		InputTokensDetails: openai.OpenAIImageInputTokenDetails{
+			TextTokens:  textTokens,
+			ImageTokens: imageTokens,
+		},
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+	}
 }
 
 func parsePositiveInt(raw string) int {
