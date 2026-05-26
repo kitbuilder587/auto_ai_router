@@ -205,11 +205,26 @@ type OpenAIImageData struct {
 	RevisedPrompt string `json:"revised_prompt,omitempty"`
 }
 
+// OpenAIImageInputTokenDetails breaks down input token counts for image API responses.
+type OpenAIImageInputTokenDetails struct {
+	TextTokens  int `json:"text_tokens"`
+	ImageTokens int `json:"image_tokens"`
+}
+
+// OpenAIImageUsage is the usage format for the images API (gpt-image-1 style),
+// distinct from the chat-completions OpenAIUsage.
+type OpenAIImageUsage struct {
+	InputTokens        int                          `json:"input_tokens"`
+	InputTokensDetails OpenAIImageInputTokenDetails `json:"input_tokens_details"`
+	OutputTokens       int                          `json:"output_tokens"`
+	TotalTokens        int                          `json:"total_tokens"`
+}
+
 // OpenAIImageResponse represents OpenAI image response
 type OpenAIImageResponse struct {
 	Created int64             `json:"created"`
 	Data    []OpenAIImageData `json:"data"`
-	Usage   *OpenAIUsage      `json:"usage,omitempty"`
+	Usage   *OpenAIImageUsage `json:"usage,omitempty"`
 }
 
 // Embedding types

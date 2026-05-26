@@ -10,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
 )
 
 func TestSizeToAspectRatio(t *testing.T) {
@@ -262,5 +263,151 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "unsupported MIME type")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// convertVertexUsageToImageUsage
+// ---------------------------------------------------------------------------
+
+func TestConvertVertexUsageToImageUsage(t *testing.T) {
+	t.Run("basic prompt and candidate counts, no modality details", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     268,
+			CandidatesTokenCount: 1024,
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Equal(t, 268, got.InputTokens)
+		assert.Equal(t, 268, got.InputTokensDetails.TextTokens, "all input counted as text when no modality details")
+		assert.Equal(t, 0, got.InputTokensDetails.ImageTokens)
+		assert.Equal(t, 1024, got.OutputTokens)
+		assert.Equal(t, 268+1024, got.TotalTokens)
+	})
+
+	t.Run("prompt modality details split into text and image tokens", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     300,
+			CandidatesTokenCount: 512,
+			PromptTokensDetails: []*genai.ModalityTokenCount{
+				{Modality: genai.MediaModality(genai.MediaModalityText), TokenCount: 100},
+				{Modality: genai.MediaModality(genai.MediaModalityImage), TokenCount: 200},
+			},
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Equal(t, 300, got.InputTokens)
+		assert.Equal(t, 100, got.InputTokensDetails.TextTokens)
+		assert.Equal(t, 200, got.InputTokensDetails.ImageTokens)
+		assert.Equal(t, 512, got.OutputTokens)
+		assert.Equal(t, 812, got.TotalTokens)
+	})
+
+	t.Run("video prompt tokens counted as image tokens", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     150,
+			CandidatesTokenCount: 256,
+			PromptTokensDetails: []*genai.ModalityTokenCount{
+				{Modality: genai.MediaModality(genai.MediaModalityText), TokenCount: 50},
+				{Modality: genai.MediaModality(genai.MediaModalityVideo), TokenCount: 100},
+			},
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Equal(t, 50, got.InputTokensDetails.TextTokens)
+		assert.Equal(t, 100, got.InputTokensDetails.ImageTokens)
+	})
+
+	t.Run("nil modality detail entries are skipped", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     100,
+			CandidatesTokenCount: 200,
+			PromptTokensDetails: []*genai.ModalityTokenCount{
+				nil,
+				{Modality: genai.MediaModality(genai.MediaModalityText), TokenCount: 100},
+			},
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Equal(t, 100, got.InputTokensDetails.TextTokens)
+		assert.Equal(t, 0, got.InputTokensDetails.ImageTokens)
+	})
+
+	t.Run("zero token counts produce zero usage", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Equal(t, 0, got.InputTokens)
+		assert.Equal(t, 0, got.InputTokensDetails.TextTokens)
+		assert.Equal(t, 0, got.InputTokensDetails.ImageTokens)
+		assert.Equal(t, 0, got.OutputTokens)
+		assert.Equal(t, 0, got.TotalTokens)
+	})
+
+	t.Run("total equals input plus output", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     400,
+			CandidatesTokenCount: 600,
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		assert.Equal(t, got.InputTokens+got.OutputTokens, got.TotalTokens)
+	})
+}
+
+func TestVertexChatResponseToOpenAIImage_UsageFormat(t *testing.T) {
+	t.Run("response without usage metadata omits usage field", func(t *testing.T) {
+		body := `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]}}]}`
+		result, err := VertexChatResponseToOpenAIImage([]byte(body))
+		require.NoError(t, err)
+
+		var resp openai.OpenAIImageResponse
+		require.NoError(t, json.Unmarshal(result, &resp))
+		assert.Nil(t, resp.Usage)
+	})
+
+	t.Run("response with usage metadata returns image usage format", func(t *testing.T) {
+		body := `{
+			"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]}}],
+			"usageMetadata":{"promptTokenCount":268,"candidatesTokenCount":1024,"totalTokenCount":1292}
+		}`
+		result, err := VertexChatResponseToOpenAIImage([]byte(body))
+		require.NoError(t, err)
+
+		var resp openai.OpenAIImageResponse
+		require.NoError(t, json.Unmarshal(result, &resp))
+		require.NotNil(t, resp.Usage)
+		assert.Equal(t, 268, resp.Usage.InputTokens)
+		assert.Equal(t, 1024, resp.Usage.OutputTokens)
+		assert.Equal(t, 1292, resp.Usage.TotalTokens)
+	})
+
+	t.Run("usage JSON has input_tokens not prompt_tokens", func(t *testing.T) {
+		body := `{
+			"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]}}],
+			"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":200}
+		}`
+		result, err := VertexChatResponseToOpenAIImage([]byte(body))
+		require.NoError(t, err)
+
+		// Validate raw JSON field names — LiteLLM validates these directly
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(result, &raw))
+		usageRaw, ok := raw["usage"].(map[string]interface{})
+		require.True(t, ok, "usage field must be present")
+		assert.Contains(t, usageRaw, "input_tokens", "must have input_tokens (not prompt_tokens)")
+		assert.Contains(t, usageRaw, "input_tokens_details", "must have input_tokens_details")
+		assert.Contains(t, usageRaw, "output_tokens", "must have output_tokens (not completion_tokens)")
+		assert.NotContains(t, usageRaw, "prompt_tokens", "must not have prompt_tokens (chat format)")
+		assert.NotContains(t, usageRaw, "completion_tokens", "must not have completion_tokens (chat format)")
+	})
+
+	t.Run("no images in candidates returns empty data", func(t *testing.T) {
+		body := `{"candidates":[{"content":{"parts":[{"text":"no image here"}]}}]}`
+		result, err := VertexChatResponseToOpenAIImage([]byte(body))
+		require.NoError(t, err)
+
+		var resp openai.OpenAIImageResponse
+		require.NoError(t, json.Unmarshal(result, &resp))
+		assert.Empty(t, resp.Data)
 	})
 }
