@@ -90,6 +90,7 @@ type Config struct {
 	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
 	MaxProviderRetries         int                        // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts        int                        // Max fallback proxy hops per request chain (default: 5)
 	ResponseStore              responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled       bool
 	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
@@ -114,6 +115,7 @@ type Proxy struct {
 	healthChecker       HealthChecker              // Cached DB health status (optional)
 	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
+	maxFallbackAttempts int                        // Max fallback proxy hops per request chain
 	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
 	sessionStore        *SessionStore              // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl bool                       // Auto-inject Anthropic cache_control when session is active
@@ -170,6 +172,7 @@ func New(cfg *Config) *Proxy {
 		healthChecker:       cfg.HealthChecker,
 		priceRegistry:       cfg.PriceRegistry,
 		maxProviderRetries:  cfg.MaxProviderRetries,
+		maxFallbackAttempts: cfg.MaxFallbackAttempts,
 		responseStore:       cfg.ResponseStore,
 		sessionStore:        sessionStore,
 		stickyAutoCacheCtrl: cfg.SessionStickyAutoCacheCtrl,

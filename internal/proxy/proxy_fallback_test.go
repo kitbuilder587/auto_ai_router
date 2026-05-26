@@ -120,19 +120,19 @@ func TestProxyFallbackOn429(t *testing.T) {
 	assert.True(t, hasUsage, "Response should contain 'usage' field for token tracking")
 }
 
-// TestProxyFallbackOn429_NonRetryableBody tests that when primary returns 429
-// but with a non-retryable body, fallback is NOT attempted.
-func TestProxyFallbackOn429_NonRetryableBody(t *testing.T) {
+// TestProxyFallbackOn429_ModelNotFoundBody tests that when primary returns 429
+// with a model-not-found body, fallback is NOT attempted (model errors are non-retryable).
+func TestProxyFallbackOn429_ModelNotFoundBody(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
-	// Primary returns 429 with content policy violation (non-retryable)
+	// Primary returns 429 with model not found (non-retryable)
 	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error":   "content_policy_violation",
-			"message": "This request violates our content policy",
+			"error":   "model_not_found",
+			"message": "model not found: gpt-4",
 		})
 	}))
 	defer primaryServer.Close()
@@ -157,11 +157,8 @@ func TestProxyFallbackOn429_NonRetryableBody(t *testing.T) {
 
 	prx.ProxyRequest(w, req)
 
-	// Primary should be called
 	assert.Equal(t, int32(1), atomic.LoadInt32(&primaryCalls), "Primary should be called")
-	// Fallback should NOT be called because body contains "content_policy"
-	assert.Equal(t, int32(0), atomic.LoadInt32(&fallbackCalls), "Fallback should NOT be called for non-retryable content")
-	// Original error (429) should be returned
+	assert.Equal(t, int32(0), atomic.LoadInt32(&fallbackCalls), "Fallback should NOT be called for model-not-found")
 	assert.Equal(t, http.StatusTooManyRequests, w.Code, "Original error code should be returned")
 }
 

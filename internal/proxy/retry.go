@@ -29,9 +29,8 @@ type TriedCredentialsKey struct{}
 // AttemptCountKey is the context key for tracking the number of credential attempts
 type AttemptCountKey struct{}
 
-// MaxRetryAttempts defines the maximum number of credential attempts per request
-// Value: 2 = primary credential + 1 fallback
-const MaxRetryAttempts = 2
+// defaultMaxFallbackAttempts is the fallback value used when Proxy.maxFallbackAttempts is 0.
+const defaultMaxFallbackAttempts = 5
 
 // ShouldRetryWithFallback determines if request should be retried based on status code and response body.
 // Returns (shouldRetry, reason)
@@ -39,6 +38,8 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 	// Determine if status code is retryable
 	var retryReason RetryReason
 	switch {
+	case statusCode == http.StatusBadRequest:
+		retryReason = RetryReasonServerErr
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		retryReason = RetryReasonAuthErr
 	case statusCode == http.StatusTooManyRequests:
@@ -58,7 +59,6 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 }
 
 // isRetryableContent checks if response body contains errors that shouldn't be retried.
-// This is a helper function extracted for DRY compliance.
 func isRetryableContent(respBody []byte) bool {
 	const maxRetryBodyScan = 8 * 1024
 	if len(respBody) > maxRetryBodyScan {
@@ -80,7 +80,6 @@ func isRetryableContent(respBody []byte) bool {
 		return false
 	}
 
-	// Otherwise, it's potentially retryable (infrastructure error, account issue, etc)
 	return true
 }
 
@@ -98,27 +97,16 @@ func SetTried(ctx context.Context, tried map[string]bool) context.Context {
 	return context.WithValue(ctx, TriedCredentialsKey{}, tried)
 }
 
-// incrementAttempts safely increments the attempt counter in context.
-// Returns the updated attempt count.
-func incrementAttempts(ctx context.Context) (int, context.Context) {
-	// Get current count (key: "__attempt_count")
-	currentCount := 0
-	if count, ok := ctx.Value(AttemptCountKey{}).(int); ok {
-		currentCount = count
-	}
-	newCount := currentCount + 1
-	newCtx := context.WithValue(ctx, AttemptCountKey{}, newCount)
-	return newCount, newCtx
-}
-
-// TryFallbackProxy attempts to retry the request on a fallback proxy credential.
-// Returns (success, fallbackReason) where fallbackReason explains why fallback wasn't attempted.
+// TryFallbackProxy attempts to retry the request on fallback proxy credentials.
+// Returns (success, fallbackReason) where fallbackReason explains why all fallbacks failed.
 //
 // Protection against infinite loops:
-// - Tracks attempted credentials in request context
+// - Tracks attempted credentials in request context (triedCreds)
 // - Prevents circular retries (proxy-a -> proxy-b -> proxy-a)
-// - Enforces max retry limit of 2 total attempts (primary + 1 fallback)
-// - Validates that fallback differs from already-tried credentials
+// - Enforces MaxFallbackAttempts as an upper bound
+//
+// When a fallback returns a retryable error (429, 5xx), the next configured fallback
+// is tried automatically, exhausting the full chain before writing the final response.
 func (p *Proxy) TryFallbackProxy(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -131,96 +119,128 @@ func (p *Proxy) TryFallbackProxy(
 	logCtx *RequestLogContext,
 ) (bool, string) {
 	ctx := r.Context()
-
-	// Check attempt count - max 2 total attempts (primary + 1 fallback)
-	attemptCount, ctx := incrementAttempts(ctx)
-	if attemptCount >= MaxRetryAttempts {
-		p.logger.Warn("Max retry attempts reached, not attempting additional fallback",
-			"original_credential", originalCredName,
-			"model", modelID,
-			"attempt_count", attemptCount,
-			"max_attempts", MaxRetryAttempts,
-		)
-		return false, "max_retry_attempts_exceeded"
-	}
-
-	// Get set of already-tried credentials from context
 	triedCreds := GetTried(ctx)
 
-	// Try to find a fallback proxy credential
-	fallbackCred, err := p.balancer.NextFallbackProxyForModel(modelID)
-	if err != nil {
-		p.logger.Debug("No fallback proxy available for retry",
+	maxAttempts := p.maxFallbackAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxFallbackAttempts
+	}
+
+	exitReason := "no_fallback_available"
+	var lastProxyResp *ProxyResponse
+	var lastFallbackCred *config.CredentialConfig
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		fallbackCred, err := p.balancer.NextFallbackProxyForModel(modelID)
+		if err != nil {
+			if attempt == 0 {
+				p.logger.Debug("No fallback proxy available for retry",
+					"original_credential", originalCredName,
+					"model", modelID,
+					"original_status", originalStatus,
+					"reason", originalReason,
+				)
+			}
+			break
+		}
+
+		if fallbackCred == nil {
+			p.logger.Warn("Balancer returned nil credential without error",
+				"model", modelID,
+				"original_credential", originalCredName,
+			)
+			break
+		}
+
+		if fallbackCred.Name == originalCredName {
+			if attempt == 0 {
+				p.logger.Warn("Fallback credential is the same as original, skipping retry",
+					"credential", fallbackCred.Name,
+					"model", modelID,
+				)
+				exitReason = "fallback_is_same_credential"
+			}
+			break
+		}
+
+		if triedCreds[fallbackCred.Name] {
+			p.logger.Debug("All fallback proxies exhausted, stopping retry chain",
+				"tried_credentials", formatTriedCreds(triedCreds),
+				"model", modelID,
+			)
+			break
+		}
+
+		p.logger.Info("Retrying request on fallback proxy",
 			"original_credential", originalCredName,
+			"fallback_credential", fallbackCred.Name,
 			"model", modelID,
 			"original_status", originalStatus,
-			"reason", originalReason,
+			"retry_reason", originalReason,
+			"attempt_number", attempt+2,
+			"max_attempts", maxAttempts+1,
 		)
-		return false, "no_fallback_available"
-	}
 
-	// Guard against nil credential (balancer returned no error but also no credential)
-	if fallbackCred == nil {
-		p.logger.Warn("Balancer returned nil credential without error",
-			"model", modelID,
-			"original_credential", originalCredName,
-		)
-		return false, "no_fallback_available"
-	}
+		triedCreds[fallbackCred.Name] = true
+		ctx = SetTried(ctx, triedCreds)
+		r = r.WithContext(ctx)
 
-	// Safety check: don't retry with the same credential
-	if fallbackCred.Name == originalCredName {
-		p.logger.Warn("Fallback credential is the same as original, skipping retry",
-			"credential", fallbackCred.Name,
-			"model", modelID,
-		)
-		return false, "fallback_is_same_credential"
-	}
+		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
+		jitter := time.Duration(rand.Intn(50)) * time.Millisecond
+		time.Sleep(jitter)
 
-	// Check if fallback credential has already been tried in this request chain
-	if triedCreds[fallbackCred.Name] {
-		p.logger.Warn("Fallback credential already attempted, skipping to prevent circular retry",
+		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
+		lastFallbackCred = fallbackCred
+		if fwdErr != nil {
+			p.logger.Error("Fallback proxy request failed",
+				"fallback_credential", fallbackCred.Name,
+				"error", fwdErr,
+			)
+			continue
+		}
+
+		if logCtx != nil && proxyResp.ActualCredentialName != "" {
+			logCtx.ActualCredentialName = proxyResp.ActualCredentialName
+		}
+		lastProxyResp = proxyResp
+
+		// Streaming responses cannot be retried — write immediately.
+		if proxyResp.IsStreaming {
+			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
+		}
+
+		shouldRetry, _ := ShouldRetryWithFallback(proxyResp.StatusCode, proxyResp.Body)
+		if !shouldRetry {
+			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
+		}
+
+		p.logger.Warn("Fallback credential returned retryable error, trying next fallback",
 			"fallback_credential", fallbackCred.Name,
-			"tried_credentials", formatTriedCreds(triedCreds),
+			"status", proxyResp.StatusCode,
 			"model", modelID,
 		)
-		return false, "credential_already_tried"
 	}
 
-	p.logger.Info("Retrying request on fallback proxy",
-		"original_credential", originalCredName,
-		"fallback_credential", fallbackCred.Name,
-		"model", modelID,
-		"original_status", originalStatus,
-		"retry_reason", originalReason,
-		"attempt_number", attemptCount+1,
-		"max_attempts", MaxRetryAttempts,
-	)
-
-	// Add fallback credential to tried set
-	triedCreds[fallbackCred.Name] = true
-	ctx = SetTried(ctx, triedCreds)
-
-	// Create new request with updated context for fallback attempt
-	r = r.WithContext(ctx)
-
-	// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
-	jitter := time.Duration(rand.Intn(50)) * time.Millisecond
-	time.Sleep(jitter)
-
-	// Forward request to fallback proxy
-	proxyResp, err := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
-	if err != nil {
-		p.logger.Error("Fallback proxy request failed",
-			"fallback_credential", fallbackCred.Name,
-			"error", err,
-		)
-		return false, "fallback_request_failed"
-	}
-	if logCtx != nil && proxyResp.ActualCredentialName != "" {
-		logCtx.ActualCredentialName = proxyResp.ActualCredentialName
+	// All fallbacks exhausted — write last response if we have one.
+	if lastProxyResp != nil && lastFallbackCred != nil {
+		return p.writeFallbackResponse(w, r, lastProxyResp, lastFallbackCred, modelID, originalCredName, logCtx, start)
 	}
 
+	return false, exitReason
+}
+
+// writeFallbackResponse writes the proxy response to the client, records token usage,
+// and updates logCtx. Called once when a fallback succeeds or all fallbacks are exhausted.
+func (p *Proxy) writeFallbackResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	proxyResp *ProxyResponse,
+	fallbackCred *config.CredentialConfig,
+	modelID string,
+	originalCredName string,
+	logCtx *RequestLogContext,
+	start time.Time,
+) (bool, string) {
 	if proxyResp.IsStreaming {
 		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
@@ -233,7 +253,7 @@ func (p *Proxy) TryFallbackProxy(
 			)
 			return false, "fallback_stream_write_failed"
 		}
-		if streamUsage != nil {
+		if streamUsage != nil && logCtx != nil {
 			logCtx.TokenUsage = streamUsage
 			if proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(fallbackCred.Name, modelID,
@@ -273,15 +293,12 @@ func (p *Proxy) TryFallbackProxy(
 		}
 	}
 
-	// Log that retry was completed
 	p.logger.Debug("Fallback proxy retry completed",
 		"fallback_credential", fallbackCred.Name,
 		"duration", time.Since(start),
 	)
 
-	// Log fallback response to LiteLLM DB
 	if logCtx != nil && !logCtx.Logged {
-		// Update logCtx with fallback credential info
 		logCtx.Credential = fallbackCred
 		logCtx.TargetURL = fallbackCred.BaseURL
 		logCtx.Status = "success"
