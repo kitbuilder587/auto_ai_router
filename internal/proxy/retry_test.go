@@ -92,7 +92,7 @@ func TestShouldRetryWithFallback_BadRequest(t *testing.T) {
 }
 
 func TestShouldRetryWithFallback_ContentPolicyViolation(t *testing.T) {
-	// Content policy errors are retried (the next credential may not have the same restriction)
+	// Content policy violations are NOT retried — they are provider-specific business logic errors
 	tests := []struct {
 		name     string
 		respBody string
@@ -111,8 +111,8 @@ func TestShouldRetryWithFallback_ContentPolicyViolation(t *testing.T) {
 				[]byte(tt.respBody),
 			)
 
-			assert.True(t, shouldRetry)
-			assert.Equal(t, RetryReasonServerErr, reason)
+			assert.False(t, shouldRetry)
+			assert.Equal(t, RetryReason(""), reason)
 		})
 	}
 }
@@ -156,14 +156,14 @@ func TestShouldRetryWithFallback_RetryableInfrastructureError(t *testing.T) {
 }
 
 func TestShouldRetryWithFallback_RateLimitWithContentPolicy(t *testing.T) {
-	// Content policy in the body no longer suppresses retry
+	// Content policy in the body suppresses retry regardless of status code
 	shouldRetry, reason := ShouldRetryWithFallback(
 		http.StatusTooManyRequests,
 		[]byte("content policy violation during rate limit"),
 	)
 
-	assert.True(t, shouldRetry)
-	assert.Equal(t, RetryReasonRateLimit, reason)
+	assert.False(t, shouldRetry)
+	assert.Equal(t, RetryReason(""), reason)
 }
 
 func TestShouldRetryWithFallback_EmptyResponseBody(t *testing.T) {
@@ -178,17 +178,17 @@ func TestShouldRetryWithFallback_EmptyResponseBody(t *testing.T) {
 }
 
 func TestIsRetryableContent_ContentPolicyViolation(t *testing.T) {
-	// Content policy strings are no longer treated as non-retryable
+	// Content policy strings are treated as non-retryable (provider-specific business logic)
 	tests := []struct {
 		name     string
 		content  string
 		expected bool
 	}{
-		{"content policy lowercase", "content policy violation", true},
-		{"content policy uppercase", "CONTENT POLICY VIOLATION", true},
-		{"content policy mixed", "Content Policy Violation", true},
-		{"content management policy", "content management policy violation", true},
-		{"policy violation", "policy violation detected", true},
+		{"content policy lowercase", "content policy violation", false},
+		{"content policy uppercase", "CONTENT POLICY VIOLATION", false},
+		{"content policy mixed", "Content Policy Violation", false},
+		{"content management policy", "content management policy violation", false},
+		{"policy violation", "policy violation detected", false},
 		{"no violation", "server error", true},
 		{"empty", "", true},
 	}

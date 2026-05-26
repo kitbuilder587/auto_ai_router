@@ -66,6 +66,13 @@ func isRetryableContent(respBody []byte) bool {
 	}
 	bodyLower := bytes.ToLower(respBody)
 
+	// Don't retry if content policy violation (provider-specific business logic error)
+	if bytes.Contains(bodyLower, []byte("content policy")) ||
+		bytes.Contains(bodyLower, []byte("content management policy")) ||
+		bytes.Contains(bodyLower, []byte("policy violation")) {
+		return false
+	}
+
 	// Don't retry if it's a model-specific error that won't be fixed by retrying
 	if bytes.Contains(bodyLower, []byte("model not found")) ||
 		bytes.Contains(bodyLower, []byte("model does not exist")) ||
