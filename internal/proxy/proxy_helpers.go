@@ -106,7 +106,7 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 }
 
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts) string {
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64) string {
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
 		userID = tokenInfo.UserID
@@ -190,9 +190,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"user_api_key_team_id":          teamID,
 		"user_api_key_user_id":          userID,
 		"guardrail_information":         nil,
+		"model_map_information":         map[string]interface{}{"model_map_key": modelID, "model_map_value": nil},
 		"mcp_tool_call_metadata":        nil,
 		"additional_usage_values":       additionalUsage,
 		"cold_storage_object_key":       nil,
+		"litellm_overhead_time_ms":      overheadMs,
 		"vector_store_request_metadata": nil,
 		"status":                        "success",
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
@@ -165,7 +166,8 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 
 	// Build metadata with usage, cost breakdown, requester IP, and optional error
 	requesterIP := getClientIP(logCtx.Request)
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts)
+	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs)
 
 	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
 	if customLLMProvider == "proxy" {

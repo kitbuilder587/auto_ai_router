@@ -142,43 +142,47 @@ type allModelsCache struct {
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                        sync.RWMutex
-	credentialModels          map[string][]string      // credential name -> list of model IDs
-	allModels                 []Model                  // deduplicated list of all models
-	modelToCredentials        map[string][]string      // model ID -> list of credential names
-	modelLimits               map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits         map[string][]ModelLimits // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames      map[string]string        // immutable snapshot of real names from config.yaml
-	modelPassthroughResponses map[string]*bool         // model name -> explicit passthrough_responses override (nil = auto)
-	dbModelNames              map[string]bool          // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases              map[string]string        // alias -> real model name (from model_alias config)
-	modelRealNames            map[string]string        // alias name -> real model name (from models[].model field)
-	defaultModelsRPM          int                      // default RPM for models
-	logger                    *slog.Logger
-	credentials               []config.CredentialConfig   // credentials for fetching remote models
-	remoteModelsCache         map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration           time.Duration               // how long to cache remote models (default 5 minutes)
-	allModelsCache            allModelsCache              // cached result of GetAllModels (3 second TTL)
+	mu                          sync.RWMutex
+	credentialModels            map[string][]string          // credential name -> list of model IDs
+	allModels                   []Model                      // deduplicated list of all models
+	modelToCredentials          map[string][]string          // model ID -> list of credential names
+	modelLimits                 map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits           map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames        map[string]string            // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
+	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
+	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
+	modelRealNamesPerCred       map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
+	defaultModelsRPM            int                          // default RPM for models
+	logger                      *slog.Logger
+	credentials                 []config.CredentialConfig   // credentials for fetching remote models
+	remoteModelsCache           map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration             time.Duration               // how long to cache remote models (default 5 minutes)
+	allModelsCache              allModelsCache              // cached result of GetAllModels (3 second TTL)
 }
 
 // New creates a new model manager
 func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelRPMConfig) *Manager {
 	m := &Manager{
-		credentialModels:          make(map[string][]string),
-		allModels:                 make([]Model, 0),
-		modelToCredentials:        make(map[string][]string),
-		modelLimits:               make(map[string][]ModelLimits),
-		staticModelLimits:         make(map[string][]ModelLimits),
-		staticModelRealNames:      make(map[string]string),
-		dbModelNames:              make(map[string]bool),
-		modelAliases:              make(map[string]string),
-		modelRealNames:            make(map[string]string),
-		modelPassthroughResponses: make(map[string]*bool),
-		defaultModelsRPM:          defaultModelsRPM,
-		logger:                    logger,
-		credentials:               make([]config.CredentialConfig, 0),
-		remoteModelsCache:         make(map[string]remoteModelCache),
-		cacheExpiration:           5 * time.Minute, // Default cache TTL: 5 minutes
+		credentialModels:            make(map[string][]string),
+		allModels:                   make([]Model, 0),
+		modelToCredentials:          make(map[string][]string),
+		modelLimits:                 make(map[string][]ModelLimits),
+		staticModelLimits:           make(map[string][]ModelLimits),
+		staticModelRealNames:        make(map[string]string),
+		staticModelRealNamesPerCred: make(map[string]map[string]string),
+		dbModelNames:                make(map[string]bool),
+		modelAliases:                make(map[string]string),
+		modelRealNames:              make(map[string]string),
+		modelRealNamesPerCred:       make(map[string]map[string]string),
+		modelPassthroughResponses:   make(map[string]*bool),
+		defaultModelsRPM:            defaultModelsRPM,
+		logger:                      logger,
+		credentials:                 make([]config.CredentialConfig, 0),
+		remoteModelsCache:           make(map[string]remoteModelCache),
+		cacheExpiration:             5 * time.Minute, // Default cache TTL: 5 minutes
 	}
 
 	// Load static models from config.yaml
@@ -190,10 +194,23 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				TPM:        staticModel.TPM,
 				Credential: staticModel.Credential,
 			})
-			// Register real model name mapping if Model field differs from Name
+			// Register real model name mapping if Model field differs from Name.
+			// Credential-specific entries go into the per-credential map so that the
+			// same alias (e.g. "claude-haiku-4.5") can map to a different real name on
+			// each provider (e.g. Bedrock vs OpenRouter) without overwriting each other.
 			if staticModel.Model != "" && staticModel.Model != staticModel.Name {
-				m.modelRealNames[staticModel.Name] = staticModel.Model
-				logger.Debug("Registered model real name", "alias", staticModel.Name, "real", staticModel.Model)
+				if staticModel.Credential != "" {
+					if m.modelRealNamesPerCred[staticModel.Credential] == nil {
+						m.modelRealNamesPerCred[staticModel.Credential] = make(map[string]string)
+					}
+					m.modelRealNamesPerCred[staticModel.Credential][staticModel.Name] = staticModel.Model
+				} else {
+					m.modelRealNames[staticModel.Name] = staticModel.Model
+				}
+				logger.Debug("Registered model real name",
+					"alias", staticModel.Name,
+					"real", staticModel.Model,
+					"credential", staticModel.Credential)
 			}
 			// Register explicit passthrough_responses override if set
 			if staticModel.PassthroughResponses != nil {
@@ -218,15 +235,40 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 	for k, v := range m.modelRealNames {
 		m.staticModelRealNames[k] = v
 	}
+	for cred, names := range m.modelRealNamesPerCred {
+		snapshot := make(map[string]string, len(names))
+		for alias, real := range names {
+			snapshot[alias] = real
+		}
+		m.staticModelRealNamesPerCred[cred] = snapshot
+	}
 
 	return m
 }
 
-// GetRealModelName returns the real model name for a given alias (from models[].model config).
-// Returns (alias, false) if no separate real name is configured.
+// GetRealModelName returns the global real model name for a given alias (from models[].model
+// config entries that have no specific credential). Returns (alias, false) if not found.
 func (m *Manager) GetRealModelName(alias string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if real, ok := m.modelRealNames[alias]; ok {
+		return real, true
+	}
+	return alias, false
+}
+
+// GetRealModelNameForCredential returns the real model name for a given alias and credential.
+// It checks the per-credential map first (for entries with a specific credential in config),
+// then falls back to the global map (entries without a credential).
+// Returns (alias, false) if no real name mapping is configured for this combination.
+func (m *Manager) GetRealModelNameForCredential(alias, credential string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if names, ok := m.modelRealNamesPerCred[credential]; ok {
+		if real, ok := names[alias]; ok {
+			return real, true
+		}
+	}
 	if real, ok := m.modelRealNames[alias]; ok {
 		return real, true
 	}
@@ -492,6 +534,16 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		newRealNames[k] = v
 	}
 
+	// 2b. Rebuild modelRealNamesPerCred = static snapshot + new DB per-credential real names.
+	newRealNamesPerCred := make(map[string]map[string]string, len(m.staticModelRealNamesPerCred))
+	for cred, names := range m.staticModelRealNamesPerCred {
+		snapshot := make(map[string]string, len(names))
+		for alias, real := range names {
+			snapshot[alias] = real
+		}
+		newRealNamesPerCred[cred] = snapshot
+	}
+
 	// 3. Apply DB model data.
 	newDBNames := make(map[string]bool, len(dbModels))
 	for _, dm := range dbModels {
@@ -504,8 +556,18 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		// Static YAML takes priority: model_table sync must not override
 		// explicitly configured models[].model mappings.
 		if dm.Model != "" && dm.Model != dm.Name {
-			if _, isStatic := m.staticModelRealNames[dm.Name]; !isStatic {
-				newRealNames[dm.Name] = dm.Model
+			if dm.Credential != "" {
+				staticCred := m.staticModelRealNamesPerCred[dm.Credential]
+				if _, isStatic := staticCred[dm.Name]; !isStatic {
+					if newRealNamesPerCred[dm.Credential] == nil {
+						newRealNamesPerCred[dm.Credential] = make(map[string]string)
+					}
+					newRealNamesPerCred[dm.Credential][dm.Name] = dm.Model
+				}
+			} else {
+				if _, isStatic := m.staticModelRealNames[dm.Name]; !isStatic {
+					newRealNames[dm.Name] = dm.Model
+				}
 			}
 		}
 		newDBNames[dm.Name] = true
@@ -513,6 +575,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 
 	m.modelLimits = newLimits
 	m.modelRealNames = newRealNames
+	m.modelRealNamesPerCred = newRealNamesPerCred
 	m.dbModelNames = newDBNames
 
 	// 4. Rebuild ALL credential↔model mappings from the merged modelLimits.

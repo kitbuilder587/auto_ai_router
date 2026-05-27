@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
 // RetryReason describes why a request is being retried
@@ -279,6 +280,9 @@ func (p *Proxy) writeFallbackResponse(
 			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 		}
 		p.writeProxyResponse(w, proxyResp, r)
+		if logCtx != nil {
+			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
+		}
 		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)

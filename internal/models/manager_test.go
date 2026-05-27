@@ -795,9 +795,14 @@ func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {
 	assert.ElementsMatch(t, []string{"db-cred-1"}, manager.GetCredentialsForModel("db-specific"))
 	assert.Nil(t, manager.GetCredentialsForModel("db-unknown"))
 
-	real, ok := manager.GetRealModelName("db-specific")
+	// DB model with a specific credential goes into the per-credential map.
+	real, ok := manager.GetRealModelNameForCredential("db-specific", "db-cred-1")
 	assert.True(t, ok)
 	assert.Equal(t, "real-db", real)
+
+	// Global GetRealModelName should NOT find it (it has a credential).
+	_, ok = manager.GetRealModelName("db-specific")
+	assert.False(t, ok)
 
 	real, ok = manager.GetRealModelName("static-real")
 	assert.True(t, ok)
@@ -863,6 +868,69 @@ func TestUpdateDBModels_DBOnlyGlobalMapping(t *testing.T) {
 
 	creds := manager.GetCredentialsForModel("db-global")
 	assert.ElementsMatch(t, []string{"db-cred-1"}, creds)
+}
+
+// TestGetRealModelNameForCredential_SameAliasMultipleProviders verifies that the same model
+// alias (e.g. "claude-haiku-4.5") resolves to the correct real name for each credential,
+// even when Bedrock and OpenRouter both expose it under the same name but with different
+// provider-specific identifiers.
+func TestGetRealModelNameForCredential_SameAliasMultipleProviders(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{
+			Name:       "claude-haiku-4.5",
+			Model:      "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+			Credential: "bedrock_aws",
+			RPM:        100,
+		},
+		{
+			Name:       "claude-haiku-4.5",
+			Model:      "anthropic/claude-haiku-4.5",
+			Credential: "openrouter",
+			RPM:        100,
+		},
+	}
+	m := New(logger, 100, staticModels)
+
+	// Each credential gets its own correct real name.
+	real, ok := m.GetRealModelNameForCredential("claude-haiku-4.5", "bedrock_aws")
+	assert.True(t, ok)
+	assert.Equal(t, "global.anthropic.claude-haiku-4-5-20251001-v1:0", real)
+
+	real, ok = m.GetRealModelNameForCredential("claude-haiku-4.5", "openrouter")
+	assert.True(t, ok)
+	assert.Equal(t, "anthropic/claude-haiku-4.5", real)
+
+	// Global lookup finds nothing (all entries are credential-specific).
+	_, ok = m.GetRealModelName("claude-haiku-4.5")
+	assert.False(t, ok)
+
+	// Credential that has no mapping falls through to global (nothing here).
+	_, ok = m.GetRealModelNameForCredential("claude-haiku-4.5", "unknown-cred")
+	assert.False(t, ok)
+}
+
+// TestGetRealModelNameForCredential_FallbackToGlobal verifies that when a model has a
+// global real name (no credential in config) and is routed to any credential, the global
+// real name is used as fallback.
+func TestGetRealModelNameForCredential_FallbackToGlobal(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "my-model", Model: "real-provider-name", RPM: 100},
+	}
+	m := New(logger, 100, staticModels)
+
+	// Any credential gets the global real name.
+	real, ok := m.GetRealModelNameForCredential("my-model", "any-cred")
+	assert.True(t, ok)
+	assert.Equal(t, "real-provider-name", real)
+
+	// Global lookup also works.
+	real, ok = m.GetRealModelName("my-model")
+	assert.True(t, ok)
+	assert.Equal(t, "real-provider-name", real)
 }
 
 func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
