@@ -97,6 +97,26 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
+	// Re-resolve the real model name for the selected credential.
+	// This handles configs where the same alias (e.g. "claude-haiku-4.5") maps to a
+	// different provider-specific real name on each credential
+	// (e.g. "global.anthropic.claude-haiku-4-5-20251001-v1:0" on Bedrock vs
+	// "anthropic/claude-haiku-4.5" on OpenRouter).
+	// Proxy credentials handle their own model routing using the alias, so body is not
+	// updated for them; proxyBody already holds the alias and is left unchanged.
+	if cred.Type != config.ProviderTypeProxy {
+		if credRealName, hasCredReal := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); hasCredReal && credRealName != realModelID {
+			p.logger.Debug("Re-resolved real model name for credential",
+				"alias", modelID,
+				"old_real", realModelID,
+				"new_real", credRealName,
+				"credential", cred.Name,
+			)
+			body = openai.ReplaceModelInBody(body, realModelID, credRealName)
+			realModelID = credRealName
+		}
+	}
+
 	// Auto-inject Anthropic prompt-caching markers when a session is active.
 	// This maximises cache hit rate when session-sticky routing keeps traffic on one credential.
 	if p.stickyAutoCacheCtrl &&
