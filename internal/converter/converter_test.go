@@ -526,6 +526,25 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
+	// Responses API streaming event format: response.completed SSE event
+	// Usage is nested inside response.usage, not at top level
+	body := []byte(`{"type":"response.completed","response":{"id":"resp_123","object":"response","status":"completed","model":"qwen3","output":[],"usage":{"input_tokens":16,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"input_tokens_details":{"cached_tokens":5},"total_tokens":18}}}`)
+	usage := ExtractTokenUsage(body)
+	if usage == nil {
+		t.Fatalf("expected usage for Responses API streaming event format")
+	}
+	if usage.PromptTokens != 16 {
+		t.Fatalf("expected prompt_tokens=16, got %d", usage.PromptTokens)
+	}
+	if usage.CompletionTokens != 2 {
+		t.Fatalf("expected completion_tokens=2, got %d", usage.CompletionTokens)
+	}
+	if usage.CachedInputTokens != 5 {
+		t.Fatalf("expected cached_tokens=5, got %d", usage.CachedInputTokens)
+	}
+}
+
 func TestProviderConverter_ResponseTo_VertexImage_Gemini_JSONRoundTrip(t *testing.T) {
 	vertexResp := genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{

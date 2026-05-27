@@ -320,6 +320,21 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		return nil
 	}
 
+	type responsesUsageDetails struct {
+		InputTokens        int `json:"input_tokens"`
+		OutputTokens       int `json:"output_tokens"`
+		InputTokensDetails struct {
+			CachedTokens int `json:"cached_tokens,omitempty"`
+			ImageTokens  int `json:"image_tokens,omitempty"`
+			TextTokens   int `json:"text_tokens,omitempty"`
+			AudioTokens  int `json:"audio_tokens,omitempty"`
+		} `json:"input_tokens_details,omitempty"`
+		OutputTokensDetails struct {
+			AudioTokens     int `json:"audio_tokens,omitempty"`
+			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		} `json:"output_tokens_details,omitempty"`
+	}
+
 	var resp struct {
 		Usage struct {
 			// Chat Completions format
@@ -337,19 +352,12 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 			// Responses API / Image generation format (input_tokens/output_tokens)
-			InputTokens        int `json:"input_tokens"`
-			OutputTokens       int `json:"output_tokens"`
-			InputTokensDetails struct {
-				CachedTokens int `json:"cached_tokens,omitempty"`
-				ImageTokens  int `json:"image_tokens,omitempty"`
-				TextTokens   int `json:"text_tokens,omitempty"`
-				AudioTokens  int `json:"audio_tokens,omitempty"`
-			} `json:"input_tokens_details,omitempty"`
-			OutputTokensDetails struct {
-				AudioTokens     int `json:"audio_tokens,omitempty"`
-				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-			} `json:"output_tokens_details,omitempty"`
+			responsesUsageDetails
 		} `json:"usage"`
+		// Responses API streaming event format: {"type":"response.completed","response":{"usage":{...}}}
+		Response struct {
+			Usage *responsesUsageDetails `json:"usage,omitempty"`
+		} `json:"response,omitempty"`
 	}
 
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -364,6 +372,12 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	completionTokens := resp.Usage.CompletionTokens
 	if completionTokens == 0 {
 		completionTokens = resp.Usage.OutputTokens
+	}
+
+	// Fall back to nested Responses API streaming event format (response.completed event)
+	if promptTokens == 0 && completionTokens == 0 && resp.Response.Usage != nil {
+		promptTokens = resp.Response.Usage.InputTokens
+		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
 	if promptTokens == 0 && completionTokens == 0 {
@@ -387,6 +401,23 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
 	if reasoning == 0 {
 		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
+	}
+
+	// If tokens came from the nested response.completed event, use its detail fields
+	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
+		u := resp.Response.Usage
+		if cachedTokens == 0 {
+			cachedTokens = u.InputTokensDetails.CachedTokens
+		}
+		if audioIn == 0 {
+			audioIn = u.InputTokensDetails.AudioTokens
+		}
+		if audioOut == 0 {
+			audioOut = u.OutputTokensDetails.AudioTokens
+		}
+		if reasoning == 0 {
+			reasoning = u.OutputTokensDetails.ReasoningTokens
+		}
 	}
 
 	return &TokenUsage{
