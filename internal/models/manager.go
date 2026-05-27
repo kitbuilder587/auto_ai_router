@@ -142,25 +142,25 @@ type allModelsCache struct {
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                           sync.RWMutex
-	credentialModels             map[string][]string      // credential name -> list of model IDs
-	allModels                    []Model                  // deduplicated list of all models
-	modelToCredentials           map[string][]string      // model ID -> list of credential names
-	modelLimits                  map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits            map[string][]ModelLimits // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames         map[string]string        // immutable snapshot of global real names from config.yaml
-	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
-	modelPassthroughResponses    map[string]*bool         // model name -> explicit passthrough_responses override (nil = auto)
-	dbModelNames                 map[string]bool          // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases                 map[string]string        // alias -> real model name (from model_alias config)
-	modelRealNames               map[string]string        // alias name -> real model name (global, no specific credential)
-	modelRealNamesPerCred        map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
-	defaultModelsRPM             int                      // default RPM for models
-	logger                       *slog.Logger
-	credentials                  []config.CredentialConfig   // credentials for fetching remote models
-	remoteModelsCache            map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration              time.Duration               // how long to cache remote models (default 5 minutes)
-	allModelsCache               allModelsCache              // cached result of GetAllModels (3 second TTL)
+	mu                          sync.RWMutex
+	credentialModels            map[string][]string          // credential name -> list of model IDs
+	allModels                   []Model                      // deduplicated list of all models
+	modelToCredentials          map[string][]string          // model ID -> list of credential names
+	modelLimits                 map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits           map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames        map[string]string            // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
+	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
+	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
+	modelRealNamesPerCred       map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
+	defaultModelsRPM            int                          // default RPM for models
+	logger                      *slog.Logger
+	credentials                 []config.CredentialConfig   // credentials for fetching remote models
+	remoteModelsCache           map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration             time.Duration               // how long to cache remote models (default 5 minutes)
+	allModelsCache              allModelsCache              // cached result of GetAllModels (3 second TTL)
 }
 
 // New creates a new model manager
