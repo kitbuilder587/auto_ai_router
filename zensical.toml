@@ -27,7 +27,10 @@ nav = [
     { "Router Chain Trace" = "monitoring/trace.md" },
     { "Grafana" = "monitoring/grafana.md" },
   ]},
-  { "LiteLLM Integration" = "litellm-integration/litellm_db.md" },
+  { "LiteLLM Integration" = [
+    { "LiteLLM Database" = "litellm-integration/litellm_db.md" },
+    { "Model Pricing" = "litellm-integration/pricing.md" },
+  ]},
   { "CLI Integration" = [
     {"Codex" = "cli-tools/codex.md"},
   ]},

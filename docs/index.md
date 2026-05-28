@@ -58,3 +58,8 @@ graph LR
 - [Security](advanced/security.md) — master key, token auth
 - [Model Aliases](advanced/model_alias.md) — routing by alias
 - [Troubleshooting](advanced/troubleshooting.md)
+
+## LiteLLM Integration
+
+- [LiteLLM Database](litellm-integration/litellm_db.md) — spend logging, daily aggregation, API key auth
+- [Model Pricing](litellm-integration/pricing.md) — price file format, cost calculation formulas
