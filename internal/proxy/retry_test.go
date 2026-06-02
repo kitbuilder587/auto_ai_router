@@ -63,6 +63,13 @@ func TestShouldRetryWithFallback_AuthErrors(t *testing.T) {
 	}
 }
 
+func TestShouldRetryWithFallback_PaymentRequired(t *testing.T) {
+	shouldRetry, reason := ShouldRetryWithFallback(http.StatusPaymentRequired, []byte("quota exceeded"))
+
+	assert.True(t, shouldRetry)
+	assert.Equal(t, RetryReasonPaymentErr, reason)
+}
+
 func TestShouldRetryWithFallback_NonRetryableStatus(t *testing.T) {
 	tests := []struct {
 		name       string

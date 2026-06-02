@@ -43,8 +43,17 @@ type Readiness struct {
 }
 
 func (r *Router) handleReadiness(w http.ResponseWriter, req *http.Request) {
+	ready := r.isReady.Load()
+
+	status := "ready"
+	httpStatus := http.StatusOK
+	if !ready {
+		status = "not_ready"
+		httpStatus = http.StatusServiceUnavailable
+	}
+
 	var body = Readiness{
-		Status:         "healthy",
+		Status:         status,
 		LitellmVersion: r.proxy.GetVersion(),
 		LastUpdated:    utils.NowUTC().Format(time.RFC3339),
 	}
@@ -56,7 +65,7 @@ func (r *Router) handleReadiness(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(httpStatus)
 
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		if r.logger != nil {

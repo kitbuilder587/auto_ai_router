@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -18,6 +19,13 @@ type Router struct {
 	monitoringConfig *config.MonitoringConfig
 	appConfig        *config.Config
 	logger           *slog.Logger
+	isReady          atomic.Bool
+}
+
+// SetReady marks the router as ready (true) or not ready (false).
+// Called by main: true after the TCP listener is bound, false at shutdown start.
+func (r *Router) SetReady(v bool) {
+	r.isReady.Store(v)
 }
 
 func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger, appConfig *config.Config) *Router {

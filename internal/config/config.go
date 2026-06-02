@@ -348,6 +348,7 @@ type ServerConfig struct {
 	SessionStickyTTL           int           `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool          `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
 	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	ShutdownDelay              time.Duration `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -386,6 +387,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		SessionStickyTTL           string `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string `yaml:"session_sticky_auto_cache_control"`
 		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
+		ShutdownDelay              string `yaml:"shutdown_delay"`
 	}
 
 	var temp tempConfig
@@ -445,6 +447,10 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
+		return err
+	}
+
+	if s.ShutdownDelay, err = parseField(temp.ShutdownDelay, 5*time.Second, time.ParseDuration, "shutdown_delay"); err != nil {
 		return err
 	}
 
