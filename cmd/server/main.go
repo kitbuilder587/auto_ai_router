@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -236,10 +237,19 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
-	// Start server in background
+	// Bind port explicitly so readiness is set only after the socket is open.
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.Port))
+	if err != nil {
+		log.Error("Failed to bind server port", "error", err, "port", cfg.Server.Port)
+		os.Exit(1)
+	}
+
+	// Mark ready — TCP listener is bound, pod can accept traffic.
+	rtr.SetReady(true)
+	log.Info("Server ready", "port", cfg.Server.Port)
+
 	go func() {
-		log.Info("Server starting", "port", cfg.Server.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Error("Server failed", "error", err)
 			os.Exit(1)
 		}
@@ -251,6 +261,16 @@ func main() {
 	<-sigChan
 
 	log.Info("Shutting down server...")
+
+	// Mark not ready — stop Kubernetes from sending new traffic before draining.
+	rtr.SetReady(false)
+
+	// Wait for the load balancer / readiness probe to observe the 503 and stop
+	// routing new traffic to this pod before we close the listener.
+	if cfg.Server.ShutdownDelay > 0 {
+		log.Info("Waiting for load balancer drain", "delay", cfg.Server.ShutdownDelay)
+		time.Sleep(cfg.Server.ShutdownDelay)
+	}
 
 	// Shutdown HTTP server
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

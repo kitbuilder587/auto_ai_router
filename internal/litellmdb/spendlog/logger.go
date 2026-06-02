@@ -351,10 +351,24 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 			case <-time.After(backoff):
 				// Backoff elapsed, proceed with retry
 			case <-sl.stopChan:
-				// Shutdown requested during backoff - send to DLQ and return
+				// Shutdown during backoff: attempt one immediate final write before giving up.
+				// This handles schema-detection retries (e.g. missing column detected on attempt 1,
+				// flag already updated — the next write would use the correct query).
+				sl.logger.Debug("[DB] SpendLog shutdown during retry backoff, attempting final flush",
+					"attempt", attempt+1,
+					"batch_size", len(batch),
+				)
+				if finalErr := sl.flushBatchWithSpendUpdate(batch); finalErr == nil {
+					atomic.AddUint64(&sl.written, uint64(len(batch)))
+					atomic.AddUint64(&sl.batchesOK, 1)
+					return
+				} else {
+					lastErr = finalErr
+				}
 				sl.logger.Warn("[DB] SpendLog batch retry interrupted by shutdown",
 					"attempt", attempt+1,
 					"batch_size", len(batch),
+					"error", lastErr,
 				)
 				atomic.AddUint64(&sl.errors, uint64(len(batch)))
 				sl.addToDLQ(batch, lastErr, attempt)

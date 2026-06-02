@@ -16,10 +16,11 @@ import (
 type RetryReason string
 
 const (
-	RetryReasonRateLimit RetryReason = "rate_limit"
-	RetryReasonServerErr RetryReason = "server_error"
-	RetryReasonAuthErr   RetryReason = "auth_error"
-	RetryReasonNetErr    RetryReason = "network_error"
+	RetryReasonRateLimit  RetryReason = "rate_limit"
+	RetryReasonServerErr  RetryReason = "server_error"
+	RetryReasonAuthErr    RetryReason = "auth_error"
+	RetryReasonNetErr     RetryReason = "network_error"
+	RetryReasonPaymentErr RetryReason = "payment_error"
 )
 
 // TriedCredentialsKey is the context key for tracking attempted credentials
@@ -43,6 +44,8 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 		retryReason = RetryReasonServerErr
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		retryReason = RetryReasonAuthErr
+	case statusCode == http.StatusPaymentRequired:
+		retryReason = RetryReasonPaymentErr
 	case statusCode == http.StatusTooManyRequests:
 		retryReason = RetryReasonRateLimit
 	case statusCode >= 500 && statusCode < 600:

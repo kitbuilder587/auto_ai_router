@@ -438,6 +438,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		"type", cred.Type,
 	)
 
+	// Track image generation requests before both proxy and direct provider paths
+	isImageGeneration := strings.Contains(r.URL.Path, "/images/generations")
+	isImageEdit := strings.Contains(r.URL.Path, "/images/edits")
+	logCtx.IsImageGeneration = isImageGeneration || isImageEdit
+	if logCtx.IsImageGeneration {
+		logCtx.ImageCount = extractImageCountFromBody(body, r.Header.Get("Content-Type"))
+		if logCtx.ImageCount <= 0 {
+			logCtx.ImageCount = 1
+		}
+	}
+
 	// Handle proxy credential type with same-type retry + fallback
 	if cred.Type == config.ProviderTypeProxy {
 		logCtx.Credential = cred
@@ -725,17 +736,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Direct provider path with same-type credential retry ===
 
-	// Track embeddings and image generation requests (once, before retry loop)
+	// Track embeddings requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
-	isImageGeneration := strings.Contains(r.URL.Path, "/images/generations")
-	isImageEdit := strings.Contains(r.URL.Path, "/images/edits")
-	logCtx.IsImageGeneration = isImageGeneration || isImageEdit
-	if logCtx.IsImageGeneration {
-		logCtx.ImageCount = extractImageCountFromBody(body, r.Header.Get("Content-Type"))
-		if logCtx.ImageCount <= 0 {
-			logCtx.ImageCount = 1
-		}
-	}
 
 	// Retry loop: try same-type credentials on provider errors (429/5xx/auth)
 	triedCreds := GetTried(r.Context())
