@@ -723,9 +723,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.metrics.RecordTokenUsage(cred.Name, modelID,
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
 					logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
-				if logCtx.IsImageGeneration {
-					logCtx.TokenUsage.ImageCount = logCtx.ImageCount
+			}
+			// Image generation responses have no usage field, so ExtractTokenUsage returns nil.
+			// Ensure ImageCount is always propagated for cost calculation.
+			if logCtx.IsImageGeneration && proxyResp.StatusCode < 400 {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
+				logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 			}
 			if proxyResp.StatusCode >= 400 {
 				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
