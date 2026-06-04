@@ -128,8 +128,8 @@ return total
 //
 // KEYS[1] = cred rpm key
 // KEYS[2] = cred tpm key
-// KEYS[3] = model rpm key (may be "")
-// KEYS[4] = model tpm key (may be "")
+// KEYS[3] = model rpm key (present only when model limits are configured)
+// KEYS[4] = model tpm key (present only when model limits are configured)
 // ARGV[1] = now ms
 // ARGV[2] = window ms
 // ARGV[3] = cred rpm limit
@@ -146,7 +146,6 @@ local window = tonumber(ARGV[2])
 local ttl    = tonumber(ARGV[9])
 
 local function check_rpm(key, limit)
-  if key == '' then return true end
   redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
   local count = redis.call('ZCARD', key)
   if limit ~= -1 and count >= limit then return false end
@@ -154,7 +153,7 @@ local function check_rpm(key, limit)
 end
 
 local function check_tpm(key, limit)
-  if key == '' or limit == -1 then return true end
+  if limit == -1 then return true end
   redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
   local members = redis.call('ZRANGE', key, 0, -1)
   local total = 0
@@ -169,7 +168,6 @@ local function check_tpm(key, limit)
 end
 
 local function record_rpm(key, member)
-  if key == '' then return end
   redis.call('ZADD', key, now, member)
   redis.call('EXPIRE', key, ttl)
 end
@@ -177,14 +175,14 @@ end
 -- Check all limits first.
 if not check_rpm(KEYS[1], tonumber(ARGV[3])) then return 0 end
 if not check_tpm(KEYS[2], tonumber(ARGV[4])) then return 0 end
-if KEYS[3] ~= '' then
+if #KEYS >= 3 then
   if not check_rpm(KEYS[3], tonumber(ARGV[5])) then return 0 end
   if not check_tpm(KEYS[4], tonumber(ARGV[6])) then return 0 end
 end
 
 -- All passed — record RPM.
 record_rpm(KEYS[1], ARGV[7])
-if KEYS[3] ~= '' then
+if #KEYS >= 3 then
   record_rpm(KEYS[3], ARGV[8])
 end
 return 1
@@ -463,24 +461,40 @@ func (b *RedisBackend) tryAllowAll(
 	credMember := uuid.New().String()
 	modelMember := uuid.New().String()
 
-	// Build key list: always 4 keys (empty string = skip in Lua).
-	credRPMKey := b.rpmKey(credKey)
-	credTPMKey := b.tpmKey(credKey)
-	modRPMKey := ""
-	modTPMKey := ""
-	if modelKey != "" {
-		modRPMKey = b.rpmKey(modelKey)
-		modTPMKey = b.tpmKey(modelKey)
-	}
+	// Redis Cluster requires all keys in a multi-key EVAL to be in the same hash slot.
+	// Use hash tags so all keys are routed by credKey's slot.
+	credTag := "{" + credKey + "}"
+	credRPMKey := b.keyPrefix + "rpm:" + credTag
+	credTPMKey := b.keyPrefix + "tpm:" + credTag
 
 	res, err := b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
-		return b.client.Do(ctx, b.client.B().Eval().
-			Script(luaTryAllowAll).
-			Numkeys(4).
+		evalCmd := b.client.B().Eval().
+			Script(luaTryAllowAll)
+
+		if modelKey != "" {
+			modRPMKey := b.keyPrefix + "rpm:" + credTag + ":" + modelKey
+			modTPMKey := b.keyPrefix + "tpm:" + credTag + ":" + modelKey
+			return b.client.Do(ctx, evalCmd.
+				Numkeys(4).
+				Key(credRPMKey).
+				Key(credTPMKey).
+				Key(modRPMKey).
+				Key(modTPMKey).
+				Arg(fmt.Sprintf("%d", now)).
+				Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
+				Arg(fmt.Sprintf("%d", credRPM)).
+				Arg(fmt.Sprintf("%d", credTPM)).
+				Arg(fmt.Sprintf("%d", modelRPM)).
+				Arg(fmt.Sprintf("%d", modelTPM)).
+				Arg(credMember).
+				Arg(modelMember).
+				Arg(fmt.Sprintf("%d", b.keyTTL)).
+				Build()).AsInt64()
+		}
+		return b.client.Do(ctx, evalCmd.
+			Numkeys(2).
 			Key(credRPMKey).
 			Key(credTPMKey).
-			Key(modRPMKey).
-			Key(modTPMKey).
 			Arg(fmt.Sprintf("%d", now)).
 			Arg(fmt.Sprintf("%d", rpmWindow.Milliseconds())).
 			Arg(fmt.Sprintf("%d", credRPM)).
