@@ -9,6 +9,7 @@ server:
   max_idle_conns: 200  # Maximum idle connections (default: 200)
   max_idle_conns_per_host: 20  # Maximum idle connections per host (default: 20)
   logging_level: info  # Options: info, debug, error (default: info)
+  stdout_logs_enabled: true  # Write logs to stdout (default: true); set false to ship logs only via OTEL
   master_key: "sk-your-master-key-here"  # Required: Master key for authentication
   default_models_rpm: -1  # Default RPM limit for models (-1 for unlimited, default: -1)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
@@ -27,6 +28,19 @@ monitoring:
   prometheus_enabled: true
   log_errors: false
   errors_log_path: "logs/logs.jsonl"
+
+# OpenTelemetry export (logs + distributed traces), disabled by default
+otel:
+  enabled: false
+  endpoint: "localhost:4317"  # OTLP collector: host:port for grpc, host:port or URL for http (defaults: 4317 grpc / 4318 http)
+  protocol: "grpc"  # grpc | http (http/protobuf)
+  insecure: true  # Disable TLS for the exporter connection (default: true)
+  service_name: "auto-ai-router"  # Reported as service.name resource attribute
+  logs_enabled: true  # Ship slog records via OTLP in addition to stdout
+  traces_enabled: true  # Server/client spans + traceparent propagation to providers and chained routers
+  trace_sample_ratio: 1.0  # Head sampling ratio [0.0-1.0], parent-based
+  # headers:  # Optional headers for OTLP requests (supports os.environ/VAR_NAME)
+  #   Authorization: "os.environ/OTEL_AUTH_HEADER"
 
 credentials:
   # Direct provider credentials

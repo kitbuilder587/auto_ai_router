@@ -30,6 +30,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DefaultResponseBodyMultiplier is the default multiplier for response body size limit
@@ -244,8 +246,10 @@ func (p *Proxy) executeProxyRequest(
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	// Create proxy request
-	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
+	// Create proxy request. The incoming request context carries the OTEL span,
+	// so the client span parents correctly and traceparent is propagated, and the
+	// upstream call is canceled if the client disconnects.
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.Error("Failed to create proxy request", "error", err, "url", targetURL)
 		return nil, err
@@ -433,6 +437,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.Debug("Saved response to store", "id", resp.ID)
 			}
 		}
+	}
+
+	// Annotate the server span (created by otelhttp in main) with routing details.
+	// No-op when OTEL tracing is disabled.
+	if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("gen_ai.request.model", modelID),
+			attribute.String("aar.real_model", realModelID),
+			attribute.String("aar.credential", cred.Name),
+			attribute.String("aar.provider", string(cred.Type)),
+			attribute.Bool("aar.streaming", streaming),
+			attribute.String("aar.request_id", requestID),
+		)
 	}
 
 	// Log request details at DEBUG level
@@ -917,7 +934,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		proxyReq, reqErr := http.NewRequest(r.Method, targetURL, bytes.NewReader(requestBody))
+		proxyReq, reqErr := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(requestBody))
 		if reqErr != nil {
 			// Fatal: request creation error
 			p.logger.Error("Failed to create proxy request", "error", reqErr, "url", targetURL)
