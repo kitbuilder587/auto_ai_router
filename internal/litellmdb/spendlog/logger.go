@@ -68,10 +68,9 @@ type Logger struct {
 
 	mu                  sync.RWMutex
 	lastAggregationTime time.Time
-	aggregationTicker   *time.Ticker
 
-	// pendingAggregation receives insertedIDs from flushBatchWithSpendUpdate for immediate aggregation.
-	// Buffered: on overflow, safety-net (QuerySelectUnprocessedRequestIDs) will pick up.
+	// pendingAggregation receives insertedIDs from flushBatchWithSpendUpdate for aggregation.
+	// Buffered: on overflow, IDs are dropped (acceptable loss on overload).
 	pendingAggregation chan []string
 }
 
@@ -97,7 +96,6 @@ func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
-		sl.aggregationTicker = time.NewTicker(5 * time.Minute)
 
 		sl.wg.Add(3)
 		go sl.worker()
@@ -180,15 +178,6 @@ func (sl *Logger) Shutdown(ctx context.Context) error {
 		default:
 		}
 	}
-	if sl.aggregationTicker != nil {
-		sl.aggregationTicker.Stop()
-		// Drain ticker channel (Stop doesn't drain per Go docs)
-		select {
-		case <-sl.aggregationTicker.C:
-		default:
-		}
-	}
-
 	// Signal worker to stop
 	close(sl.stopChan)
 
@@ -684,159 +673,18 @@ func (sl *Logger) aggregationWorker() {
 	for {
 		select {
 		case <-sl.stopChan:
-			// Shutdown: drain pending channel and run final safety-net
-			sl.drainPendingAggregation()
-			sl.aggregateSpendLogs()
-			return
-
-		case ids := <-sl.pendingAggregation:
-			// Main path: aggregate only what this router inserted
-			sl.aggregateByIDs(ids)
-
-		case <-sl.aggregationTicker.C:
-			// Priority check: if stopChan is also ready, prefer shutdown
-			select {
-			case <-sl.stopChan:
-				sl.drainPendingAggregation()
-				sl.aggregateSpendLogs()
-				return
-			default:
+			// Shutdown: drain all pending IDs before exiting
+			for {
+				select {
+				case ids := <-sl.pendingAggregation:
+					sl.aggregateByIDs(ids)
+				default:
+					return
+				}
 			}
-			// Safety-net: catch "lost" logs (with advisory lock)
-			sl.aggregateSpendLogs()
-		}
-	}
-}
 
-// drainPendingAggregation processes all accumulated IDs during shutdown
-func (sl *Logger) drainPendingAggregation() {
-	for {
-		select {
 		case ids := <-sl.pendingAggregation:
 			sl.aggregateByIDs(ids)
-		default:
-			return
 		}
-	}
-}
-
-// aggregationLockID is a unique constant for pg_advisory_lock (safety-net only)
-const aggregationLockID = int64(7_463_951_234)
-
-// aggregateSpendLogs is the safety-net aggregator for crash recovery.
-// Runs every 5 minutes with pg_try_advisory_lock to prevent multiple routers
-// from aggregating the same logs simultaneously.
-// Flow:
-// 1. Acquire advisory lock (skip if another router holds it)
-// 2. Fetch unprocessed request_ids (snapshot at aggregation start)
-// 3. Call aggregators for: User, Team, Organization, EndUser, Agent, Tag
-// 4. Mark all request_ids as processed
-func (sl *Logger) aggregateSpendLogs() {
-	// Skip if pool is not initialized (e.g., in tests)
-	if sl.pool == nil {
-		return
-	}
-
-	if !sl.pool.IsHealthy() {
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Warn("[DB] Cannot aggregate: database not healthy")
-		return
-	}
-
-	// Use a generous top-level context for the entire aggregation flow (3 minutes).
-	// Each individual aggregator will get its own 30-second timeout below.
-	aggCtx, aggCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer aggCancel()
-
-	conn, err := sl.pool.Acquire(aggCtx)
-	if err != nil {
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("[DB] Aggregation: failed to acquire connection", "error", err)
-		return
-	}
-
-	// Try to acquire distributed lock (one router aggregates at a time)
-	var lockAcquired bool
-	if err := conn.QueryRow(aggCtx, "SELECT pg_try_advisory_lock($1)", aggregationLockID).Scan(&lockAcquired); err != nil || !lockAcquired {
-		conn.Release()
-		sl.logger.Debug("[DB] Safety-net aggregation skipped: another router holds lock")
-		return
-	}
-
-	// Guaranteed order: unlock → release
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", aggregationLockID)
-		conn.Release()
-	}()
-
-	// 1. Fetch unprocessed request_ids (snapshot)
-	fetchCtx, fetchCancel := context.WithTimeout(aggCtx, 30*time.Second)
-
-	rows, err := conn.Query(fetchCtx, queries.QuerySelectUnprocessedRequestIDs)
-	if err != nil {
-		fetchCancel()
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("[DB] Aggregation: failed to fetch request_ids", "error", err)
-		return
-	}
-
-	var requestIDs []string
-	for rows.Next() {
-		var requestID string
-		if err := rows.Scan(&requestID); err != nil {
-			rows.Close()
-			fetchCancel()
-			sl.logger.Error("[DB] Aggregation: failed to scan request_id", "error", err)
-			atomic.AddUint64(&sl.aggregationErrors, 1)
-			return
-		}
-		requestIDs = append(requestIDs, requestID)
-	}
-
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		fetchCancel()
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("[DB] Aggregation: failed to iterate request_ids", "error", err)
-		return
-	}
-
-	rows.Close()
-	fetchCancel()
-
-	// No unprocessed logs
-	if len(requestIDs) == 0 {
-		return
-	}
-
-	sl.logger.Debug("[DB] Aggregation: starting aggregators",
-		"request_ids_count", len(requestIDs),
-	)
-
-	// 2. Load spend log records ONCE and pass to all aggregators
-	loadCtx, loadCancel := context.WithTimeout(aggCtx, 30*time.Second)
-	records, err := loadUnprocessedSpendLogRecords(loadCtx, conn, sl.logger, "Aggregation", requestIDs)
-	loadCancel()
-	if err != nil {
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("[DB] Aggregation: failed to load spend log records", "error", err)
-		return
-	}
-
-	if len(records) == 0 {
-		return
-	}
-
-	// 3. Run all aggregators and mark as processed
-	if ok := sl.runAggregators(aggCtx, conn, "Aggregation", records, requestIDs); ok {
-		sl.logger.Debug("[DB] All aggregations completed",
-			"request_ids_count", len(requestIDs),
-		)
-	} else {
-		sl.logger.Warn("[DB] Aggregation completed with errors, request_ids NOT marked as processed",
-			"request_ids_count", len(requestIDs),
-		)
 	}
 }

@@ -272,7 +272,11 @@ func (p *Proxy) writeFallbackResponse(
 				"fallback_credential", fallbackCred.Name,
 				"model", modelID,
 			)
-			return false, "fallback_stream_write_failed"
+			// WriteHeader was already sent by writeProxyStreamingResponseWithTokens before
+			// the stream body failed — return true so the caller does not attempt another
+			// WriteHeader call (which would produce a "superfluous WriteHeader" warning and
+			// corrupt the response).
+			return true, "fallback_stream_write_failed"
 		}
 		if streamUsage != nil && logCtx != nil {
 			logCtx.TokenUsage = streamUsage

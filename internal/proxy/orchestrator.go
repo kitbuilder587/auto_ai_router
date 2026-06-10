@@ -16,7 +16,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
-	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
@@ -292,19 +291,6 @@ func (p *Proxy) authenticateRequest(
 	if token == p.masterKey {
 		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
 		return true
-	}
-
-	// JWT session token validation (tokens from /v2/login)
-	if strings.HasPrefix(token, "eyJ") {
-		claims, jwtErr := users.ValidateSessionJWT(token, p.masterKey)
-		if jwtErr == nil && claims != nil {
-			p.logger.Debug("Authenticated via session JWT",
-				"user_id", claims.UserID,
-				"user_role", claims.UserRole,
-			)
-			return true
-		}
-		// JWT validation failed — fall through to LiteLLM DB check
 	}
 
 	if isLiteLLMHealthy {

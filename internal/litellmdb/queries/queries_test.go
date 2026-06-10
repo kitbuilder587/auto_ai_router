@@ -265,14 +265,12 @@ func TestSpendLogQueryConstants(t *testing.T) {
 	// These are imported from spend_logs.go
 	// Verify they are defined (we can't import const from another file directly in test)
 	assert.NotEmpty(t, QueryInsertSpendLog)
-	assert.NotEmpty(t, QuerySelectUnprocessedRequestIDs)
 	assert.NotEmpty(t, QuerySelectUnprocessedSpendLogs)
 	assert.NotEmpty(t, QueryUpsertDailyUserSpend)
 	assert.NotEmpty(t, QueryUpsertDailyTeamSpend)
 	assert.NotEmpty(t, QueryUpsertDailyOrganizationSpend)
 	assert.NotEmpty(t, QueryUpsertDailyEndUserSpend)
 	assert.NotEmpty(t, QueryUpsertDailyTagSpend)
-	assert.NotEmpty(t, QueryMarkSpendLogsAsProcessed)
 }
 
 // TestQueryContainsRequiredFields verifies queries contain required fields
