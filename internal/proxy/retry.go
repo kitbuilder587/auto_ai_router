@@ -196,8 +196,11 @@ func (p *Proxy) TryFallbackProxy(
 		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
 		lastFallbackCred = fallbackCred
 		if fwdErr != nil {
-			p.logger.Error("Fallback proxy request failed",
+			// Mid-chain failure — the next fallback is tried; the final outcome
+			// is logged at ERROR when the response is written to the client.
+			p.logger.Warn("Fallback proxy request failed, trying next fallback",
 				"fallback_credential", fallbackCred.Name,
+				"model", modelID,
 				"error", fwdErr,
 			)
 			continue
@@ -245,15 +248,29 @@ func (p *Proxy) writeFallbackResponse(
 	logCtx *RequestLogContext,
 	start time.Time,
 ) (bool, string) {
+	if proxyResp.StatusCode >= 400 {
+		// Final error returned to the client after the fallback chain —
+		// single unified ERROR record (response_body is nil for streaming).
+		requestID := ""
+		if logCtx != nil {
+			requestID = logCtx.RequestID
+		}
+		p.logUpstreamError("Fallback proxy completed with error status", proxyResp.StatusCode, fallbackCred, modelID, proxyResp.Body,
+			"url", fallbackCred.BaseURL,
+			"streaming", proxyResp.IsStreaming,
+			"original_credential", originalCredName,
+			"request_id", requestID)
+	}
+
 	if proxyResp.IsStreaming {
 		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 		}
 		streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred.Name)
 		if err != nil {
-			p.logger.Error("Failed to write fallback streaming proxy response",
+			p.logStreamHandlerError("Failed to write fallback streaming proxy response", err,
 				"fallback_credential", fallbackCred.Name,
-				"error", err,
+				"model", modelID,
 			)
 			return false, "fallback_stream_write_failed"
 		}

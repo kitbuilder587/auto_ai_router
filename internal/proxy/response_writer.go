@@ -95,7 +95,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 	defer func() {
 		if closeErr := resp.StreamBody.Close(); closeErr != nil {
-			p.logger.Error("Failed to close proxy streaming response body", "error", closeErr)
+			p.logger.Warn("Failed to close proxy streaming response body", "error", closeErr)
 		}
 	}()
 

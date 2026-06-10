@@ -61,7 +61,9 @@ const (
 
 // PrettyHandler is a custom slog handler that formats logs nicely with colors
 type PrettyHandler struct {
-	opts *slog.HandlerOptions
+	opts   *slog.HandlerOptions
+	attrs  []slog.Attr // pre-attached attributes from Logger.With(...)
+	groups []string    // open groups from Logger.WithGroup(...)
 }
 
 // Handle implements the slog.Handler interface
@@ -81,9 +83,15 @@ func (h *PrettyHandler) Handle(ctx context.Context, record slog.Record) error {
 		record.Message,
 	)
 
-	// Add attributes
-	record.Attrs(func(attr slog.Attr) bool {
+	// Add pre-attached attributes (from Logger.With), already group-prefixed
+	for _, attr := range h.attrs {
 		fmt.Fprintf(&sb, " %s=%v", attr.Key, attr.Value.Any())
+	}
+
+	// Add record attributes, prefixed with any open groups
+	prefix := h.groupPrefix()
+	record.Attrs(func(attr slog.Attr) bool {
+		fmt.Fprintf(&sb, " %s%s=%v", prefix, attr.Key, attr.Value.Any())
 		return true
 	})
 
@@ -92,14 +100,40 @@ func (h *PrettyHandler) Handle(ctx context.Context, record slog.Record) error {
 	return err
 }
 
+// groupPrefix returns the dotted prefix for attribute keys ("g1.g2." or "")
+func (h *PrettyHandler) groupPrefix() string {
+	if len(h.groups) == 0 {
+		return ""
+	}
+	return strings.Join(h.groups, ".") + "."
+}
+
 // WithAttrs returns a new handler with the given attributes attached
 func (h *PrettyHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return h
+	if len(attrs) == 0 {
+		return h
+	}
+	h2 := *h
+	prefix := h.groupPrefix()
+	h2.attrs = make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	h2.attrs = append(h2.attrs, h.attrs...)
+	for _, a := range attrs {
+		a.Key = prefix + a.Key
+		h2.attrs = append(h2.attrs, a)
+	}
+	return &h2
 }
 
 // WithGroup returns a new handler with the given group name
 func (h *PrettyHandler) WithGroup(name string) slog.Handler {
-	return h
+	if name == "" {
+		return h
+	}
+	h2 := *h
+	h2.groups = make([]string, 0, len(h.groups)+1)
+	h2.groups = append(h2.groups, h.groups...)
+	h2.groups = append(h2.groups, name)
+	return &h2
 }
 
 // Enabled reports whether the handler handles records at the given level

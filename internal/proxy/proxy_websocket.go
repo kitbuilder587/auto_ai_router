@@ -246,12 +246,14 @@ outerLoop:
 
 		var reqMap map[string]interface{}
 		if err := json.Unmarshal(msg, &reqMap); err != nil {
+			p.logger.Warn("ws: invalid JSON in client message", "error", err)
 			sendWSError(conn, "invalid_request", "Invalid JSON")
 			continue
 		}
 
 		msgType, _ := reqMap["type"].(string)
 		if msgType != "response.create" {
+			p.logger.Warn("ws: unexpected message type from client", "type", msgType)
 			sendWSError(conn, "invalid_request", "Expected type: response.create")
 			continue
 		}
@@ -333,6 +335,8 @@ outerLoop:
 
 		bodyBytes, err := json.Marshal(reqMap)
 		if err != nil {
+			p.logger.Error("ws: failed to marshal request",
+				"error_code", http.StatusInternalServerError, "error", err)
 			sendWSError(conn, "internal_error", "Failed to marshal request")
 			continue
 		}
@@ -343,6 +347,8 @@ outerLoop:
 			bytes.NewReader(bodyBytes),
 		)
 		if err != nil {
+			p.logger.Error("ws: failed to create internal request",
+				"error_code", http.StatusInternalServerError, "error", err)
 			sendWSError(conn, "internal_error", "Failed to create request")
 			continue
 		}

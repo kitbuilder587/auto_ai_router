@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 
@@ -39,6 +40,25 @@ func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// Recover from handler panics so they land in our logging system at ERROR
+	// (net/http's built-in recovery only prints to stderr) and the client gets
+	// a proper JSON 500 instead of a dropped connection.
+	defer func() {
+		if rec := recover(); rec != nil {
+			if r.logger != nil {
+				r.logger.Error("Panic in HTTP handler",
+					"error_code", http.StatusInternalServerError,
+					"panic", rec,
+					"method", req.Method,
+					"path", req.URL.Path,
+					"stack", string(debug.Stack()),
+				)
+			}
+			// If the handler already sent headers this write is a no-op.
+			proxy.WriteErrorInternal(w, "Internal Server Error")
+		}
+	}()
+
 	if req.URL.Path == r.monitoringConfig.HealthCheckPath {
 		r.handleHealth(w, req)
 		return
@@ -137,9 +157,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Log error responses if enabled and status is error (4xx or 5xx).
 		// Skip logging for streaming requests to avoid memory overhead with large responses.
 		if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) && !isStreaming {
-			_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
-			// Log error internally but don't fail the response
-			// (error logging shouldn't break the API response)
+			// Don't fail the response on a logging error, but surface it —
+			// a silently broken errors-log file hides every subsequent error.
+			if err := logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody); err != nil && r.logger != nil {
+				r.logger.Warn("Failed to write error log file",
+					"path", r.monitoringConfig.ErrorsLogPath, "error", err)
+			}
 		}
 	} else {
 		r.proxy.ProxyRequest(w, req)

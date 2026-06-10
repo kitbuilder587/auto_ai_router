@@ -393,8 +393,8 @@ func (p *Proxy) handleTransformedStreaming(
 	}()
 
 	if err := p.streamToClient(w, pr, credName, nil, func() { _ = pr.Close() }); err != nil {
-		p.logger.Error("streamToClient error in handleTransformedStreaming",
-			"provider", providerName, "error", err)
+		p.logStreamHandlerError("streamToClient error in handleTransformedStreaming", err,
+			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
 		return err
 	}
@@ -443,8 +443,8 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	}
 
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
-		p.logger.Error("streamToClient error in handleStreamingWithTokens",
-			"credential", credName, "error", err, "chunks_received", chunkCount)
+		p.logStreamHandlerError("streamToClient error in handleStreamingWithTokens", err,
+			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		return err
 	}
 
@@ -516,6 +516,18 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	logCtx.HTTPStatus = statusCode
 	if statusCode >= 400 {
 		logCtx.Status = "failure"
+		if logCtx.ErrorMsg == "" {
+			logCtx.ErrorMsg = extractErrorMessage(lastChunk)
+		}
+	} else if streamErr := extractStreamErrorEvent(lastChunk); streamErr != "" {
+		// Provider returned HTTP 2xx but sent an error event inside the stream
+		// (e.g. `data: {"error":...}`, `event: error`, response.failed). Without
+		// this check such requests are logged as success and never hit ERROR.
+		logCtx.Status = "failure"
+		logCtx.ErrorMsg = streamErr
+		p.logUpstreamError("Provider sent error event in stream", statusCode,
+			logCtx.Credential, logCtx.ModelID, []byte(streamErr),
+			"request_id", logCtx.RequestID)
 	} else {
 		logCtx.Status = "success"
 		if logCtx.Credential != nil {
@@ -531,6 +543,63 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			"request_id", logCtx.RequestID,
 		)
 	}
+}
+
+// extractStreamErrorEvent scans an SSE chunk (or plain JSON payload) for an
+// error event sent by the provider inside an HTTP 2xx stream. It returns the
+// error payload as a string, or "" when the chunk carries no error.
+// Recognized shapes:
+//   - data: {"error": {...}}              (OpenAI-style mid-stream error)
+//   - data: {"type":"error", ...}         (Anthropic `event: error`)
+//   - data: {"type":"response.failed"...} (Responses API failed event)
+//   - bare JSON object with the same shapes (non-SSE final chunk)
+func extractStreamErrorEvent(chunk []byte) string {
+	if len(chunk) == 0 {
+		return ""
+	}
+
+	checkPayload := func(payload string) string {
+		var evt struct {
+			Type  string          `json:"type"`
+			Error json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+			return ""
+		}
+		if evt.Type == "error" || evt.Type == "response.error" || evt.Type == "response.failed" {
+			return payload
+		}
+		if len(evt.Error) > 0 && string(evt.Error) != "null" {
+			return payload
+		}
+		return ""
+	}
+
+	found := ""
+	sawDataLine := false
+	for _, line := range strings.Split(string(chunk), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		sawDataLine = true
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if errPayload := checkPayload(payload); errPayload != "" {
+			found = errPayload
+		}
+	}
+	if found != "" {
+		return found
+	}
+
+	// Non-SSE chunk: try the whole payload as a single JSON object.
+	if !sawDataLine {
+		return checkPayload(strings.TrimSpace(string(chunk)))
+	}
+	return ""
 }
 
 func (p *Proxy) streamToClient(
@@ -561,7 +630,7 @@ func (p *Proxy) streamToClient(
 			_ = controller.SetWriteDeadline(time.Now().Add(streamChunkWriteTimeout))
 			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
 				if isClientDisconnectError(writeErr) {
-					p.logger.Warn("Client disconnected during streaming", "error", writeErr, "credential", credName)
+					p.logger.Debug("Client disconnected during streaming", "error", writeErr, "credential", credName)
 				} else {
 					p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
 				}
@@ -574,7 +643,7 @@ func (p *Proxy) streamToClient(
 		}
 		if err != nil {
 			if err != io.EOF {
-				p.logger.Error("Streaming read error", "error", err, "credential", credName)
+				p.logStreamHandlerError("Streaming read error", err, "credential", credName)
 			}
 			break
 		}
@@ -787,8 +856,8 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 	}
 
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
-		p.logger.Error("streamToClient error in handlePassthroughResponsesStreaming",
-			"credential", credName, "error", err, "chunks_received", chunkCount)
+		p.logStreamHandlerError("streamToClient error in handlePassthroughResponsesStreaming", err,
+			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		return err
 	}
 
