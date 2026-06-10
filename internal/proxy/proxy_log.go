@@ -17,6 +17,38 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
+// ==================== Unified error logging ====================
+
+// logUpstreamError emits the unified ERROR record for a failed upstream request.
+// Every final provider failure must go through this helper so that a single ERROR
+// line contains everything needed for debugging:
+// error_code, credential (+provider), model, response_body.
+// extra accepts additional context pairs (request_id, url, error, ...).
+func (p *Proxy) logUpstreamError(msg string, errorCode int, cred *config.CredentialConfig, modelID string, responseBody []byte, extra ...any) {
+	args := make([]any, 0, 10+len(extra))
+	args = append(args, "error_code", errorCode)
+	if cred != nil {
+		args = append(args, "credential", cred.Name, "provider", string(cred.Type))
+	}
+	args = append(args, "model", modelID)
+	if len(responseBody) > 0 {
+		args = append(args, "response_body", logger.TruncateLongFields(string(responseBody), 500))
+	}
+	args = append(args, extra...)
+	p.logger.Error(msg, args...)
+}
+
+// logStreamHandlerError logs a streaming handler failure. Client disconnects are
+// expected during normal operation and go to DEBUG; real failures go to ERROR.
+func (p *Proxy) logStreamHandlerError(msg string, err error, extra ...any) {
+	args := append([]any{"error", err}, extra...)
+	if isClientDisconnectError(err) {
+		p.logger.Debug(msg+" (client disconnected)", args...)
+		return
+	}
+	p.logger.Error(msg, args...)
+}
+
 // logTransformedResponse logs a transformed response at debug level
 func (p *Proxy) logTransformedResponse(credName, providerName string, body []byte) {
 	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
@@ -49,10 +81,13 @@ func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token s
 		return false
 	}
 
-	// Check for known auth errors
+	// Check for known auth errors — client-side issues (bad/blocked/expired token,
+	// budget), not service failures, so they are logged at WARN.
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
-			p.logger.Error(info.logMsg, "token_prefix", security.MaskAPIKey(token))
+			p.logger.Warn(info.logMsg,
+				"error_code", info.status,
+				"token_prefix", security.MaskAPIKey(token))
 			switch info.status {
 			case http.StatusForbidden:
 				WriteErrorForbidden(w, info.message)
@@ -65,8 +100,11 @@ func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token s
 		}
 	}
 
-	// Unknown error
-	p.logger.Error("Auth error", "error", err, "token_prefix", security.MaskAPIKey(token))
+	// Unknown error — unexpected server-side failure, keep at ERROR
+	p.logger.Error("Auth error",
+		"error_code", http.StatusInternalServerError,
+		"error", err,
+		"token_prefix", security.MaskAPIKey(token))
 	WriteErrorInternal(w, "Internal Server Error")
 	return true
 }

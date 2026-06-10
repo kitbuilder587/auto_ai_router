@@ -260,17 +260,22 @@ func (p *Proxy) executeProxyRequest(
 	// Send request
 	resp, err := p.client.Do(proxyReq)
 	if err != nil {
+		// Transport failure on one credential — the caller retries with another
+		// credential or fallback, so this is WARN; the final outcome (success or
+		// exhausted attempts) is logged at the appropriate level by the caller.
 		statusCode := http.StatusBadGateway
 		if isTimeoutError(err) {
 			statusCode = http.StatusRequestTimeout
-			p.logger.Error("Proxy request timeout",
+			p.logger.Warn("Proxy request timeout",
 				"credential", cred.Name,
+				"model", modelID,
 				"error", err,
 				"url", targetURL,
 			)
 		} else {
-			p.logger.Error("Failed to proxy request",
+			p.logger.Warn("Failed to proxy request",
 				"credential", cred.Name,
+				"model", modelID,
 				"error", err,
 				"url", targetURL,
 			)
@@ -311,14 +316,15 @@ func (p *Proxy) executeProxyRequest(
 
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			p.logger.Error("Failed to close proxy response body", "error", closeErr)
+			p.logger.Warn("Failed to close proxy response body", "error", closeErr)
 		}
 	}()
 
 	// Read response body with size limit protection
 	respBody, err := p.readLimitedResponseBody(resp.Body)
 	if err != nil {
-		p.logger.Error("Failed to read proxy response body", "error", err)
+		p.logger.Warn("Failed to read proxy response body, caller may retry",
+			"credential", cred.Name, "model", modelID, "error", err)
 		return nil, err
 	}
 
@@ -502,8 +508,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 
-			p.logger.Error("Proxy credential returned retryable error",
-				"credential", cred.Name, "status", proxyResp.StatusCode,
+			// Mid-retry failure — the request will be retried with another credential.
+			// The final failure (if all attempts fail) is logged at ERROR when the
+			// response is written to the client.
+			p.logger.Warn("Proxy credential returned retryable error, will retry",
+				"error_code", proxyResp.StatusCode, "credential", cred.Name,
 				"reason", retryReason, "model", modelID,
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 				"response_body", logger.TruncateLongFields(string(proxyResp.Body), 500))
@@ -549,6 +558,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				statusMessage = "Bad Gateway: upstream response too large"
 				errorMsg = "Response body too large"
 			}
+			p.logUpstreamError("Proxy request failed: no upstream response", statusCode, cred, modelID, nil,
+				"error", lastProxyErr,
+				"url", cred.BaseURL,
+				"request_id", logCtx.RequestID)
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
@@ -572,7 +585,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// to Responses API SSE. Wrap StreamBody in http.Response for handleResponsesAPIStreaming.
 				defer func() {
 					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
-						p.logger.Error("Failed to close proxy streaming response body", "error", closeErr)
+						p.logger.Warn("Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
 				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
@@ -588,7 +601,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
-					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
+					p.logStreamHandlerError("Failed to handle proxy Responses API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					streamCompleted = true
 				}
@@ -596,7 +610,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Codex passthrough: provider returns native Responses API SSE — stream as-is.
 				defer func() {
 					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
-						p.logger.Error("Failed to close proxy streaming response body", "error", closeErr)
+						p.logger.Warn("Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
 				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
@@ -611,7 +625,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					Body:       proxyResp.StreamBody,
 				}
 				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
-					p.logger.Error("Failed to handle proxy passthrough Responses API streaming", "error", err)
+					p.logStreamHandlerError("Failed to handle proxy passthrough Responses API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					streamCompleted = true
 				}
@@ -621,8 +636,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
 				if err != nil {
-					p.logger.Error("Failed to write streaming proxy response",
-						"credential", cred.Name, "error", err)
+					p.logStreamHandlerError("Failed to write streaming proxy response", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					streamCompleted = true
 				}
@@ -667,7 +682,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				responsesBody, convErr := responses.ChatToResponse(proxyResp.Body)
 				if convErr != nil {
-					p.logger.Error("Failed to convert proxy response to Responses API format", "error", convErr)
+					p.logger.Error("Failed to convert proxy response to Responses API format",
+						"credential", cred.Name, "model", modelID, "error", convErr,
+						"request_id", logCtx.RequestID)
 				} else {
 					// Enrich the response with request-echoed fields (store, previous_response_id,
 					// metadata) for both the client payload and the store record.
@@ -714,6 +731,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.Status = "success"
 		if proxyResp.StatusCode >= 400 {
 			logCtx.Status = "failure"
+			// Final error returned to the client — single unified ERROR record.
+			// For streaming responses the body was forwarded to the client and is
+			// not available here (response_body is omitted).
+			p.logUpstreamError("Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyResp.Body,
+				"url", cred.BaseURL,
+				"streaming", proxyResp.IsStreaming,
+				"actual_credential", logCtx.ActualCredentialName,
+				"request_id", logCtx.RequestID)
 		}
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
@@ -812,7 +837,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			requestBody, _, convErr = provResponses.RequestFrom(body)
 			if convErr != nil {
 				p.logger.Error("Failed to convert Responses API request to provider format",
-					"credential", cred.Name, "type", cred.Type, "error", convErr)
+					"error_code", http.StatusInternalServerError,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusInternalServerError
 				logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
@@ -838,7 +866,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if convErr != nil {
 				// Fatal: conversion error won't be fixed by another credential
 				p.logger.Error("Failed to convert request to provider format",
-					"credential", cred.Name, "type", cred.Type, "error", convErr)
+					"error_code", http.StatusInternalServerError,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusInternalServerError
 				logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
@@ -874,7 +905,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			vertexToken, tokenErr = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON)
 			if tokenErr != nil {
 				p.logger.Error("Failed to get Vertex AI token",
-					"credential", cred.Name, "error", tokenErr)
+					"error_code", http.StatusInternalServerError,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", tokenErr)
 				// Token error is retryable (different credential may have valid token)
 				shouldRetry = true
 				retryReason = RetryReasonAuthErr
@@ -946,14 +979,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		var doErr error
 		resp, doErr = p.client.Do(proxyReq)
 		if doErr != nil {
+			// Transport failure on one credential — retried with the next one;
+			// the final failure is logged at ERROR after the retry loop.
 			statusCode := http.StatusBadGateway
 			if isTimeoutError(doErr) {
 				statusCode = http.StatusRequestTimeout
-				p.logger.Error("Upstream request timeout",
-					"credential", cred.Name, "error", doErr, "url", targetURL)
+				p.logger.Warn("Upstream request timeout, will retry",
+					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			} else {
-				p.logger.Error("Upstream request failed",
-					"credential", cred.Name, "error", doErr, "url", targetURL)
+				p.logger.Warn("Upstream request failed, will retry",
+					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			}
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
@@ -968,7 +1003,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		closeBody = func() {
 			closeOnce.Do(func() {
 				if closeErr := resp.Body.Close(); closeErr != nil {
-					p.logger.Error("Failed to close response body", "error", closeErr)
+					p.logger.Warn("Failed to close response body", "error", closeErr)
 				}
 			})
 		}
@@ -1003,7 +1038,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			closeBody()
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
 				// Response too large — fatal, another credential won't help
-				p.logger.Error("Failed to read response body", "error", readErr)
+				p.logUpstreamError("Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
+					"error", readErr,
+					"url", targetURL,
+					"request_id", logCtx.RequestID)
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
@@ -1026,8 +1064,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		p.logger.Error("Provider returned retryable error",
-			"credential", cred.Name, "status", resp.StatusCode,
+		// Mid-retry failure — the request will be retried with another credential.
+		// The final failure (if all attempts fail) is logged at ERROR when the
+		// response is written to the client.
+		p.logger.Warn("Provider returned retryable error, will retry",
+			"error_code", resp.StatusCode, "credential", cred.Name,
 			"reason", retryReason, "model", modelID,
 			"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 			"response_body", logger.TruncateLongFields(string(responseBody), 500))
@@ -1070,6 +1111,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusCode = http.StatusRequestTimeout
 			statusMessage = "Request Timeout"
 		}
+		p.logUpstreamError("All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
+			"error", transportErr,
+			"url", targetURL,
+			"request_id", logCtx.RequestID)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
@@ -1105,7 +1150,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
 			if convErr != nil {
 				p.logger.Error("Failed to transform provider response to OpenAI format",
-					"credential", cred.Name, "type", cred.Type, "error", convErr)
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID,
+					"response_body", logger.TruncateLongFields(decodedBody, 500))
 				finalResponseBody = []byte(decodedBody)
 			} else {
 				finalResponseBody = convertedBody
@@ -1129,7 +1177,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			nativeResp, convErr := provResponses.ResponseTo([]byte(decodedBody), modelID)
 			if convErr != nil {
 				p.logger.Error("Failed to convert native Responses API response",
-					"credential", cred.Name, "type", cred.Type, "error", convErr)
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID,
+					"response_body", logger.TruncateLongFields(decodedBody, 500))
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
 				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
@@ -1160,7 +1211,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Non-codex: convert Chat Completions response back to Responses API format.
 			responsesBody, convErr := responses.ChatToResponse(finalResponseBody)
 			if convErr != nil {
-				p.logger.Error("Failed to convert to Responses API format", "error", convErr)
+				p.logger.Error("Failed to convert to Responses API format",
+					"credential", cred.Name, "model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
 				// fallback: use Chat Completions body
 			} else {
 				// Enrich the response with request-echoed fields (store, previous_response_id,
@@ -1211,6 +1264,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
 			logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
+			// Final error returned to the client — single unified ERROR record
+			// with everything needed for debugging.
+			p.logUpstreamError("Upstream request completed with error status", resp.StatusCode, cred, modelID, finalResponseBody,
+				"url", targetURL,
+				"request_id", logCtx.RequestID)
 		} else if logCtx.TokenUsage != nil {
 			p.metrics.RecordTokenUsage(cred.Name, modelID,
 				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
@@ -1239,6 +1297,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 
 	if isStreamingResp {
+		if resp.StatusCode >= 400 {
+			// Error status on a streaming response — the body is forwarded to the
+			// client as a stream and is not available here for logging.
+			p.logUpstreamError("Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
+				"url", targetURL,
+				"request_id", logCtx.RequestID)
+		}
 		w.WriteHeader(resp.StatusCode)
 
 		if logCtx != nil {
@@ -1263,7 +1328,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				err := p.handleNativeResponsesStreaming(w, resp, provResponses, modelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
-					p.logger.Error("Failed to handle native Responses API streaming", "error", err)
+					p.logStreamHandlerError("Failed to handle native Responses API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else {
 					streamCompleted = true
 				}
@@ -1271,7 +1337,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Error response: stream as-is
 				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
 				if err != nil {
-					p.logger.Error("Failed to handle streaming response", "error", err)
+					p.logStreamHandlerError("Failed to handle streaming response", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				}
 			}
 		} else if prepared.convertedResp {
@@ -1281,7 +1348,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Transform to Responses API SSE format
 				err := p.handleResponsesAPIStreaming(w, resp, cred, modelID, logCtx, saveResponseFn, prepared.responsesMetadata)
 				if err != nil {
-					p.logger.Error("Failed to handle Responses API streaming", "error", err)
+					p.logStreamHandlerError("Failed to handle Responses API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 					// Note: finalizeStreamingLog inside handleTransformedStreaming already
 					// logged the spend. We only update error metadata here for the defer
 					// safety net, but don't reset Logged to avoid double logging.
@@ -1292,7 +1360,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Error response: stream using provider's native format instead
 				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
 				if err != nil {
-					p.logger.Error("Failed to handle provider streaming response", "provider", cred.Type, "error", err)
+					p.logStreamHandlerError("Failed to handle provider streaming response", err,
+						"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
 				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					streamCompleted = true
 				}
@@ -1301,7 +1370,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Codex passthrough: provider returns native Responses API SSE — forward as-is.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				if err := p.handlePassthroughResponsesStreaming(w, resp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
-					p.logger.Error("Failed to handle passthrough Responses API streaming", "error", err)
+					p.logStreamHandlerError("Failed to handle passthrough Responses API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else {
 					streamCompleted = true
 				}
@@ -1309,7 +1379,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Error response: stream as-is
 				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
 				if err != nil {
-					p.logger.Error("Failed to handle streaming response", "error", err)
+					p.logStreamHandlerError("Failed to handle streaming response", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					streamCompleted = true
 				}
@@ -1317,7 +1388,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
 			if err != nil {
-				p.logger.Error("Failed to handle provider streaming response", "provider", cred.Type, "error", err)
+				p.logStreamHandlerError("Failed to handle provider streaming response", err,
+					"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
 			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				streamCompleted = true
 			}

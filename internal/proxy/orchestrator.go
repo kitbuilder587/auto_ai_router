@@ -185,7 +185,11 @@ func (p *Proxy) orchestrateRequest(
 			// Fallback: convert to Chat Completions format so all providers work uniformly.
 			chatBody, convErr := responses.RequestToChat(body)
 			if convErr != nil {
-				p.logger.Error("Failed to convert Responses API request", "error", convErr)
+				p.logger.Error("Failed to convert Responses API request",
+					"error_code", http.StatusBadRequest,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusBadRequest
 				logCtx.ErrorMsg = "Failed to convert Responses API request: " + convErr.Error()
@@ -263,7 +267,9 @@ func (p *Proxy) authenticateRequest(
 ) bool {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		p.logger.Error("Missing Authorization header")
+		// Client-side error (bad request from the caller), not a service failure
+		p.logger.Warn("Missing Authorization header",
+			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Missing Authorization header"
@@ -274,7 +280,8 @@ func (p *Proxy) authenticateRequest(
 	token := strings.TrimPrefix(authHeader, "Bearer ")
 	logCtx.Token = token
 	if token == authHeader {
-		p.logger.Error("Invalid Authorization header format")
+		p.logger.Warn("Invalid Authorization header format",
+			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Invalid Authorization header format"
@@ -321,7 +328,9 @@ func (p *Proxy) authenticateRequest(
 		}
 		return true
 	} else {
-		p.logger.Error("Invalid master key", "provided_key_prefix", security.MaskAPIKey(token))
+		p.logger.Warn("Invalid master key",
+			"error_code", http.StatusUnauthorized,
+			"provided_key_prefix", security.MaskAPIKey(token))
 		WriteErrorUnauthorized(w, "Invalid master key")
 	}
 
@@ -336,7 +345,9 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	maxBodyBytes := int64(p.maxBodySizeMB) * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
-		p.logger.Error("Failed to read request body", "error", err)
+		// Client-side transport problem while sending the body
+		p.logger.Warn("Failed to read request body",
+			"error_code", http.StatusBadRequest, "error", err)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Failed to read request body: " + err.Error()
@@ -344,10 +355,11 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	if closeErr := r.Body.Close(); closeErr != nil {
-		p.logger.Error("Failed to close request body", "error", closeErr)
+		p.logger.Warn("Failed to close request body", "error", closeErr)
 	}
 	if int64(len(body)) > maxBodyBytes {
-		p.logger.Error("Request body exceeds max size",
+		p.logger.Warn("Request body exceeds max size",
+			"error_code", http.StatusRequestEntityTooLarge,
 			"max_body_size_mb", p.maxBodySizeMB,
 			"actual_size_bytes", len(body),
 		)
@@ -363,7 +375,8 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	logCtx.SessionID = sessionID
 
 	if modelID == "" {
-		p.logger.Error("Model not specified in request body")
+		p.logger.Warn("Model not specified in request body",
+			"error_code", http.StatusBadRequest, "path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Model not specified in request body"
@@ -458,9 +471,11 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	p.logger.Error("No credentials available (regular and fallback)",
+		"error_code", errCode,
 		"model", modelID,
 		"primary_error", err,
 		"fallback_error", fallbackErr,
+		"request_id", logCtx.RequestID,
 	)
 
 	logCtx.Status = "failure"

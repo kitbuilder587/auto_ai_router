@@ -393,8 +393,8 @@ func (p *Proxy) handleTransformedStreaming(
 	}()
 
 	if err := p.streamToClient(w, pr, credName, nil, func() { _ = pr.Close() }); err != nil {
-		p.logger.Error("streamToClient error in handleTransformedStreaming",
-			"provider", providerName, "error", err)
+		p.logStreamHandlerError("streamToClient error in handleTransformedStreaming", err,
+			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
 		return err
 	}
@@ -443,8 +443,8 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	}
 
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
-		p.logger.Error("streamToClient error in handleStreamingWithTokens",
-			"credential", credName, "error", err, "chunks_received", chunkCount)
+		p.logStreamHandlerError("streamToClient error in handleStreamingWithTokens", err,
+			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		return err
 	}
 
@@ -561,7 +561,7 @@ func (p *Proxy) streamToClient(
 			_ = controller.SetWriteDeadline(time.Now().Add(streamChunkWriteTimeout))
 			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
 				if isClientDisconnectError(writeErr) {
-					p.logger.Warn("Client disconnected during streaming", "error", writeErr, "credential", credName)
+					p.logger.Debug("Client disconnected during streaming", "error", writeErr, "credential", credName)
 				} else {
 					p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
 				}
@@ -574,7 +574,7 @@ func (p *Proxy) streamToClient(
 		}
 		if err != nil {
 			if err != io.EOF {
-				p.logger.Error("Streaming read error", "error", err, "credential", credName)
+				p.logStreamHandlerError("Streaming read error", err, "credential", credName)
 			}
 			break
 		}
@@ -787,8 +787,8 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 	}
 
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
-		p.logger.Error("streamToClient error in handlePassthroughResponsesStreaming",
-			"credential", credName, "error", err, "chunks_received", chunkCount)
+		p.logStreamHandlerError("streamToClient error in handlePassthroughResponsesStreaming", err,
+			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		return err
 	}
 
