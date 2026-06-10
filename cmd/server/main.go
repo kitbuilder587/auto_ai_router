@@ -339,6 +339,7 @@ func initializeBalancer(
 	rules := convertFailBanRules(cfg.Fail2Ban.ErrorCodeRules, cfg.Fail2Ban.BanDuration, log)
 	f2b := fail2ban.NewWithRules(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration,
 		cfg.Fail2Ban.ErrorCodes, rules)
+	f2b.SetLogger(log)
 
 	var rateLimiter *ratelimit.RPMLimiter
 	if redisBackend != nil {

@@ -1,6 +1,8 @@
 package fail2ban
 
 import (
+	"io"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +45,15 @@ type Fail2Ban struct {
 	failures       map[string]map[int]int // banKey -> code -> count
 	banned         map[string]*banInfo    // banKey -> banInfo
 	lastError      map[string]time.Time   // banKey -> last error time
+	logger         *slog.Logger
+}
+
+// SetLogger sets the logger used for ban/unban events.
+// Without it ban events are only visible as Prometheus metrics.
+func (f *Fail2Ban) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		f.logger = logger
+	}
 }
 
 // banKey creates a composite key from credential name and model ID.
@@ -74,6 +85,7 @@ func New(maxAttempts int, banDuration time.Duration, errorCodes []int) *Fail2Ban
 		failures:       make(map[string]map[int]int),
 		banned:         make(map[string]*banInfo),
 		lastError:      make(map[string]time.Time),
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -119,6 +131,10 @@ func (f *Fail2Ban) RecordResponse(credentialName, modelID string, statusCode int
 			delete(f.failures, key)
 			// Record unban event
 			monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
+			f.logger.Info("Credential unbanned (ban expired)",
+				"credential", credentialName,
+				"model", modelID,
+				"ban_duration", ban.banDuration)
 		} else {
 			// Still banned
 			return
@@ -157,6 +173,16 @@ func (f *Fail2Ban) RecordResponse(credentialName, modelID string, statusCode int
 		}
 		// Record ban event
 		monitoring.CredentialBanEvents.WithLabelValues(credentialName, modelID, strconv.Itoa(statusCode)).Inc()
+		// Losing a credential directly affects routing capacity and is the first
+		// thing to check when debugging "No credentials available" — log at ERROR.
+		f.logger.Error("Credential banned by fail2ban",
+			"error_code", statusCode,
+			"credential", credentialName,
+			"model", modelID,
+			"failures", f.failures[key][statusCode],
+			"max_attempts", rule.MaxAttempts,
+			"ban_duration", rule.BanDuration,
+			"permanent", rule.BanDuration == 0)
 	}
 }
 
@@ -236,6 +262,8 @@ func (f *Fail2Ban) Unban(credentialName, modelID string) {
 		delete(f.failures, key)
 		// Record unban event only if pair was actually banned
 		monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
+		f.logger.Info("Credential unbanned manually",
+			"credential", credentialName, "model", modelID)
 	}
 }
 
@@ -251,6 +279,8 @@ func (f *Fail2Ban) UnbanCredential(credentialName string) {
 			delete(f.banned, key)
 			delete(f.failures, key)
 			monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, model).Inc()
+			f.logger.Info("Credential unbanned manually",
+				"credential", credentialName, "model", model)
 		}
 	}
 }
