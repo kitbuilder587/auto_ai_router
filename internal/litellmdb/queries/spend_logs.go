@@ -45,16 +45,7 @@ const (
 		ON CONFLICT (request_id) DO NOTHING
 	`
 
-	// QuerySelectUnprocessedRequestIDs retrieves request_ids of unprocessed spend logs
-	QuerySelectUnprocessedRequestIDs = `
-		SELECT request_id
-		FROM "LiteLLM_SpendLogs"
-		WHERE cache_hit IS NULL OR cache_hit = ''
-		ORDER BY "startTime" DESC
-		LIMIT 10000
-	`
-
-	// QuerySelectUnprocessedSpendLogs retrieves spend logs not yet aggregated (filtered by request_ids)
+	// QuerySelectUnprocessedSpendLogs retrieves spend logs by request_ids for aggregation
 	QuerySelectUnprocessedSpendLogs = `
 		SELECT
 			"user",
@@ -243,13 +234,6 @@ const (
 			successful_requests = "LiteLLM_DailyTagSpend".successful_requests + EXCLUDED.successful_requests,
 			failed_requests = "LiteLLM_DailyTagSpend".failed_requests + EXCLUDED.failed_requests,
 			updated_at = now()
-	`
-
-	// QueryMarkSpendLogsAsProcessed marks spend logs as aggregated
-	QueryMarkSpendLogsAsProcessed = `
-		UPDATE "LiteLLM_SpendLogs"
-		SET cache_hit = 'true'
-		WHERE request_id = ANY($1)
 	`
 )
 

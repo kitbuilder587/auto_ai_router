@@ -107,10 +107,9 @@ func derefString(value *string) string {
 	return *value
 }
 
-// runAggregators runs all 6 daily aggregators on the given records and marks request_ids as processed.
-// Returns true if all aggregators succeeded and logs were marked as processed.
-// Shared by aggregateByIDs (push path) and aggregateSpendLogs (safety-net).
-func (sl *Logger) runAggregators(aggCtx context.Context, conn *pgxpool.Conn, scope string, records []spendLogRecord, requestIDs []string) bool {
+// runAggregators runs all 6 daily aggregators on the given records.
+// Returns true if all aggregators succeeded.
+func (sl *Logger) runAggregators(aggCtx context.Context, conn *pgxpool.Conn, scope string, records []spendLogRecord) bool {
 	hasErrors := false
 	aggregators := []struct {
 		name string
@@ -152,14 +151,6 @@ func (sl *Logger) runAggregators(aggCtx context.Context, conn *pgxpool.Conn, sco
 	}
 
 	if !hasErrors {
-		markCtx, markCancel := context.WithTimeout(aggCtx, 30*time.Second)
-		_, err := conn.Exec(markCtx, queries.QueryMarkSpendLogsAsProcessed, requestIDs)
-		markCancel()
-		if err != nil {
-			atomic.AddUint64(&sl.aggregationErrors, 1)
-			sl.logger.Error("[DB] "+scope+": failed to mark as processed", "error", err)
-			return false
-		}
 		atomic.AddUint64(&sl.aggregationCount, 1)
 		sl.mu.Lock()
 		sl.lastAggregationTime = utils.NowUTC()
@@ -199,5 +190,5 @@ func (sl *Logger) aggregateByIDs(ids []string) {
 		return
 	}
 
-	sl.runAggregators(aggCtx, conn, "aggregateByIDs", records, ids)
+	sl.runAggregators(aggCtx, conn, "aggregateByIDs", records)
 }

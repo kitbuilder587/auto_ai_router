@@ -76,15 +76,13 @@ func TestLogger_StartInitializesTickers(t *testing.T) {
 
 	logger := NewLogger(nil, cfg)
 
-	// Before start, tickers should be nil
+	// Before start, ticker should be nil
 	assert.Nil(t, logger.dlqRecoveryTicker)
-	assert.Nil(t, logger.aggregationTicker)
 
 	logger.Start()
 
-	// After start, tickers should be initialized
+	// After start, ticker should be initialized
 	assert.NotNil(t, logger.dlqRecoveryTicker)
-	assert.NotNil(t, logger.aggregationTicker)
 
 	// Cleanup
 	_ = logger.Shutdown(context.Background())
@@ -223,9 +221,8 @@ func TestLogger_DLQCleanup(t *testing.T) {
 	dlqStats := logger.GetDLQStats()
 	assert.Equal(t, 1, dlqStats["dlq_size"])
 
-	// Cleanup (tickers are nil since Start() was never called)
+	// Cleanup (ticker is nil since Start() was never called)
 	logger.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
-	logger.aggregationTicker = time.NewTicker(10 * time.Second)
 
 	_ = logger.Shutdown(context.Background())
 }
@@ -450,7 +447,6 @@ func TestLogger_TickerStoppedAfterShutdown(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	assert.NotNil(t, logger.dlqRecoveryTicker)
-	assert.NotNil(t, logger.aggregationTicker)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -473,27 +469,6 @@ func TestLogger_TickerStoppedAfterShutdown(t *testing.T) {
 	timerStopped := <-doneChan
 	// Should be true that timer is stopped, or might panic (which means it was stopped)
 	_ = timerStopped
-}
-
-func TestLogger_AggregationTickerInitializedInStart(t *testing.T) {
-	cfg := &models.Config{
-		LogQueueSize:     10,
-		LogBatchSize:     5,
-		LogFlushInterval: 1 * time.Second,
-		Logger:           testhelpers.NewTestLogger(),
-	}
-
-	logger := NewLogger(nil, cfg)
-
-	// Verify ticker is nil before Start()
-	assert.Nil(t, logger.aggregationTicker)
-
-	logger.Start()
-
-	// Verify ticker is non-nil immediately after Start()
-	assert.NotNil(t, logger.aggregationTicker)
-
-	_ = logger.Shutdown(context.Background())
 }
 
 func TestLogger_DLQRecoveryTickerInitializedInStart(t *testing.T) {
