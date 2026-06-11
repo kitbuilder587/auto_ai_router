@@ -330,32 +330,29 @@ func estimatePromptTokens(body []byte) int {
 		return 0
 	}
 
-	// Parse JSON body
+	// Parse JSON body — supports both Chat Completions (messages) and Responses API (input/instructions)
 	var reqBody struct {
 		Messages []struct {
 			Content interface{} `json:"content"` // string or []object (multimodal)
 		} `json:"messages"`
+		Input        interface{} `json:"input"`        // Responses API: string | []InputMessage
+		Instructions interface{} `json:"instructions"` // Responses API: string system prompt
 	}
 
 	if err := json.Unmarshal(body, &reqBody); err != nil {
-		// If we can't parse, return 0 estimate
 		return 0
 	}
 
 	totalChars := 0
 
-	// Process each message
-	for _, msg := range reqBody.Messages {
-		switch v := msg.Content.(type) {
+	// extractContentChars counts text characters from a content value (string or content-part array).
+	extractContentChars := func(content interface{}) {
+		switch v := content.(type) {
 		case string:
-			// Simple text message
 			totalChars += len(v)
-
 		case []interface{}:
-			// Multimodal message (array of content blocks)
 			for _, part := range v {
 				if partMap, ok := part.(map[string]interface{}); ok {
-					// Extract text from text blocks
 					if textVal, ok := partMap["text"].(string); ok {
 						totalChars += len(textVal)
 					}
@@ -364,11 +361,30 @@ func estimatePromptTokens(body []byte) int {
 		}
 	}
 
-	// Estimate tokens using 4 characters per token heuristic
-	// This is consistent with OpenAI's tokenizer for English text
-	estimatedTokens := (totalChars + 3) / 4 // Round up: (chars + 3) / 4
+	// Chat Completions format: messages[]
+	for _, msg := range reqBody.Messages {
+		extractContentChars(msg.Content)
+	}
 
-	// Minimum 1 token for API call overhead
+	// Responses API format: input (string or []InputMessage)
+	switch v := reqBody.Input.(type) {
+	case string:
+		totalChars += len(v)
+	case []interface{}:
+		for _, item := range v {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				extractContentChars(itemMap["content"])
+			}
+		}
+	}
+
+	// Responses API: instructions (system prompt)
+	if instr, ok := reqBody.Instructions.(string); ok {
+		totalChars += len(instr)
+	}
+
+	estimatedTokens := (totalChars + 3) / 4
+
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
