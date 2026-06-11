@@ -75,6 +75,7 @@ func TestHandleStreamingWithTokens_AbortLogsTokens(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "key1").
 		WithRequestTimeout(5 * time.Second).
+		WithDrainUpstreamOnAbort(true). // drain enabled: expect real usage chunk
 		Build()
 
 	resp, err := http.Get(upstreamServer.URL)
@@ -97,13 +98,72 @@ func TestHandleStreamingWithTokens_AbortLogsTokens(t *testing.T) {
 	// Key assertion: logged even though stream was aborted
 	assert.True(t, logCtx.Logged, "finalizeStreamingLog must be called even on abort")
 
-	// After drain the real usage chunk is captured: completion_tokens=10, prompt_tokens=20
+	// Drain captured real usage chunk: completion_tokens=10, prompt_tokens=20
 	assert.Equal(t, 10, logCtx.TokenUsage.CompletionTokens,
 		"completion tokens must match real usage chunk captured during drain")
 	assert.Equal(t, 20, logCtx.TokenUsage.PromptTokens,
 		"prompt tokens must come from real usage chunk captured during drain")
 
 	t.Logf("Abort logging result: prompt=%d completion=%d",
+		logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens)
+}
+
+// TestHandleStreamingWithTokens_AbortEstimatesWithoutDrain verifies the default
+// (drain_upstream_on_abort=false) path: when client disconnects, token counts are
+// estimated from delta text received before the abort — no upstream drain.
+func TestHandleStreamingWithTokens_AbortEstimatesWithoutDrain(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok)
+
+		chunks := []string{
+			`data: {"choices":[{"delta":{"content":"Hello "}}]}` + "\n\n",
+			`data: {"choices":[{"delta":{"content":"world"}}]}` + "\n\n",
+			`data: {"choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(2 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	// drainUpstreamOnAbort = false (default)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "key1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	logCtx := &RequestLogContext{
+		RequestID:            "abort-no-drain-test",
+		PromptTokensEstimate: 15,
+		Credential:           &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
+		TokenUsage:           &converter.TokenUsage{},
+	}
+
+	w := newFailAfterNBytesWriter(10)
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	assert.Error(t, err)
+	assert.True(t, logCtx.Logged, "must log even without drain")
+
+	// Without drain no usage chunk arrives — tokens come from delta-text estimation
+	assert.Greater(t, logCtx.TokenUsage.CompletionTokens, 0,
+		"completion tokens must be estimated from delta chars (no drain)")
+	// Real usage chunk NOT captured — prompt comes from PromptTokensEstimate
+	assert.Equal(t, 15, logCtx.TokenUsage.PromptTokens,
+		"prompt tokens must come from PromptTokensEstimate when drain is disabled")
+
+	t.Logf("No-drain abort: prompt=%d completion=%d (estimated)",
 		logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens)
 }
 
@@ -433,6 +493,7 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 	prx := NewTestProxyBuilder().
 		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "key1").
 		WithRequestTimeout(5 * time.Second).
+		WithDrainUpstreamOnAbort(true). // drain enabled: expect real usage chunk
 		Build()
 
 	resp, err := http.Get(upstreamServer.URL)

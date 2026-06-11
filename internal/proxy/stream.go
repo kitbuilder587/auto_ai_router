@@ -482,11 +482,13 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
 		p.logStreamHandlerError("streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
-		// Client disconnected — drain the upstream so we receive the real usage chunk.
-		// The provider charges for the full generation regardless of client disconnect.
-		drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
-		defer cancel()
-		p.drainUpstream(drainCtx, resp.Body, onChunk, credName)
+		if p.drainUpstreamOnAbort {
+			// Keep reading upstream to capture the real usage chunk.
+			// The provider charges for the full generation regardless of client disconnect.
+			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			defer cancel()
+			p.drainUpstream(drainCtx, resp.Body, onChunk, credName)
+		}
 		estimated := totalTokens
 		if estimated == 0 && completionChars > 0 {
 			estimated = (completionChars + 3) / 4
@@ -949,10 +951,11 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
 		p.logStreamHandlerError("streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
-		// Drain upstream to capture the response.completed event if not yet received.
-		drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
-		defer cancel()
-		p.drainUpstream(drainCtx, resp.Body, onChunk, credName)
+		if p.drainUpstreamOnAbort {
+			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			defer cancel()
+			p.drainUpstream(drainCtx, resp.Body, onChunk, credName)
+		}
 		finalChunk := lastRawChunk
 		if len(completedData) > 0 {
 			finalChunk = completedData

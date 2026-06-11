@@ -139,7 +139,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	if _, ok := w.(http.Flusher); ok {
 		err := p.streamToClient(w, resp.StreamBody, credName, onChunk, nil)
-		if err != nil {
+		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
 			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
 			defer cancel()

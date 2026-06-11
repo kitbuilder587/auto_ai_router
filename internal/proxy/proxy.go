@@ -96,31 +96,33 @@ type Config struct {
 	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
+	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
 }
 
 type Proxy struct {
-	balancer            *balancer.RoundRobin
-	client              *http.Client
-	logger              *slog.Logger
-	maxBodySizeMB       int
-	maxResponseBodySize int64 // Pre-computed max response body size in bytes
-	requestTimeout      time.Duration
-	metrics             *monitoring.Metrics
-	masterKey           string
-	rateLimiter         *ratelimit.RPMLimiter
-	tokenManager        *auth.VertexTokenManager
-	routerID            string                     // Identifier for this router used in /trace responses
-	modelManager        *models.Manager            // Model manager for getting configured models
-	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration
-	healthChecker       HealthChecker              // Cached DB health status (optional)
-	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
-	maxProviderRetries  int                        // Max same-type credential retries on provider errors
-	maxFallbackAttempts int                        // Max fallback proxy hops per request chain
-	responseStore       responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	sessionStore        *SessionStore              // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl bool                       // Auto-inject Anthropic cache_control when session is active
-	version             string
-	commit              string
+	balancer             *balancer.RoundRobin
+	client               *http.Client
+	logger               *slog.Logger
+	maxBodySizeMB        int
+	maxResponseBodySize  int64 // Pre-computed max response body size in bytes
+	requestTimeout       time.Duration
+	metrics              *monitoring.Metrics
+	masterKey            string
+	rateLimiter          *ratelimit.RPMLimiter
+	tokenManager         *auth.VertexTokenManager
+	routerID             string                     // Identifier for this router used in /trace responses
+	modelManager         *models.Manager            // Model manager for getting configured models
+	LiteLLMDB            litellmdb.Manager          // LiteLLM database integration
+	healthChecker        HealthChecker              // Cached DB health status (optional)
+	priceRegistry        *models.ModelPriceRegistry // Model pricing information (optional)
+	maxProviderRetries   int                        // Max same-type credential retries on provider errors
+	maxFallbackAttempts  int                        // Max fallback proxy hops per request chain
+	responseStore        responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	sessionStore         *SessionStore              // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl  bool                       // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	version              string
+	commit               string
 }
 
 func New(cfg *Config) *Proxy {
@@ -157,28 +159,29 @@ func New(cfg *Config) *Proxy {
 	}
 
 	return &Proxy{
-		routerID:            routerID,
-		balancer:            cfg.Balancer,
-		logger:              cfg.Logger,
-		maxBodySizeMB:       cfg.MaxBodySizeMB,
-		maxResponseBodySize: maxResponseBodySize,
-		requestTimeout:      cfg.RequestTimeout,
-		metrics:             cfg.Metrics,
-		masterKey:           cfg.MasterKey,
-		rateLimiter:         cfg.RateLimiter,
-		tokenManager:        cfg.TokenManager,
-		modelManager:        cfg.ModelManager,
-		LiteLLMDB:           cfg.LiteLLMDB,
-		healthChecker:       cfg.HealthChecker,
-		priceRegistry:       cfg.PriceRegistry,
-		maxProviderRetries:  cfg.MaxProviderRetries,
-		maxFallbackAttempts: cfg.MaxFallbackAttempts,
-		responseStore:       cfg.ResponseStore,
-		sessionStore:        sessionStore,
-		stickyAutoCacheCtrl: cfg.SessionStickyAutoCacheCtrl,
-		client:              httputil.NewHTTPClient(httpClientCfg),
-		version:             cfg.Version,
-		commit:              cfg.Commit,
+		routerID:             routerID,
+		balancer:             cfg.Balancer,
+		logger:               cfg.Logger,
+		maxBodySizeMB:        cfg.MaxBodySizeMB,
+		maxResponseBodySize:  maxResponseBodySize,
+		requestTimeout:       cfg.RequestTimeout,
+		metrics:              cfg.Metrics,
+		masterKey:            cfg.MasterKey,
+		rateLimiter:          cfg.RateLimiter,
+		tokenManager:         cfg.TokenManager,
+		modelManager:         cfg.ModelManager,
+		LiteLLMDB:            cfg.LiteLLMDB,
+		healthChecker:        cfg.HealthChecker,
+		priceRegistry:        cfg.PriceRegistry,
+		maxProviderRetries:   cfg.MaxProviderRetries,
+		maxFallbackAttempts:  cfg.MaxFallbackAttempts,
+		responseStore:        cfg.ResponseStore,
+		sessionStore:         sessionStore,
+		stickyAutoCacheCtrl:  cfg.SessionStickyAutoCacheCtrl,
+		drainUpstreamOnAbort: cfg.DrainUpstreamOnAbort,
+		client:               httputil.NewHTTPClient(httpClientCfg),
+		version:              cfg.Version,
+		commit:               cfg.Commit,
 	}
 }
 
