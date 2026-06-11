@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -118,24 +119,40 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
+	var completionChars int
 	onChunk := func(chunk []byte) {
 		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
 			lastUsage = usage
 		}
+		completionChars += extractCompletionDeltaChars(chunk)
+	}
+
+	buildFallbackUsage := func() *converter.TokenUsage {
+		if lastUsage != nil {
+			return lastUsage
+		}
+		if completionChars > 0 {
+			return &converter.TokenUsage{CompletionTokens: (completionChars + 3) / 4}
+		}
+		return nil
 	}
 
 	if _, ok := w.(http.Flusher); ok {
-		if err := p.streamToClient(w, resp.StreamBody, credName, onChunk, nil); err != nil {
-			return lastUsage, err
+		err := p.streamToClient(w, resp.StreamBody, credName, onChunk, nil)
+		if err != nil {
+			// Drain upstream so the usage chunk arrives even though the client left.
+			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			defer cancel()
+			p.drainUpstream(drainCtx, resp.StreamBody, onChunk, credName)
 		}
-		return lastUsage, nil
+		return buildFallbackUsage(), err
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
 	if _, err := io.Copy(w, resp.StreamBody); err != nil {
-		return lastUsage, err
+		return buildFallbackUsage(), err
 	}
-	return lastUsage, nil
+	return buildFallbackUsage(), nil
 }
 
 // itoa avoids fmt.Sprintf for a hot path.

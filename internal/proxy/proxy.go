@@ -634,6 +634,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
+				logCtx.PromptTokensEstimate = estimatePromptTokens(proxyBody)
 				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
 				if err != nil {
 					p.logStreamHandlerError("Failed to write streaming proxy response", err,
@@ -642,6 +643,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					streamCompleted = true
 				}
 				if streamUsage != nil {
+					// Backfill PromptTokens from estimate when provider didn't include it
+					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
+					if streamUsage.PromptTokens == 0 {
+						streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+					}
 					logCtx.TokenUsage = streamUsage
 					if proxyResp.StatusCode < 400 {
 						p.metrics.RecordTokenUsage(cred.Name, modelID,

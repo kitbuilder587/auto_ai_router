@@ -392,6 +392,29 @@ func estimatePromptTokens(body []byte) int {
 	return estimatedTokens
 }
 
+// extractCompletionDeltaChars counts total text characters in completion delta content
+// from an OpenAI-format SSE chunk. Used to estimate completion tokens when the stream
+// is aborted before the final usage chunk arrives (fallback: (chars+3)/4).
+func extractCompletionDeltaChars(chunk []byte) int {
+	payloads := extractJSONPayloadsFromStreamChunk(chunk)
+	total := 0
+	for _, payload := range payloads {
+		var data struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(payload, &data); err == nil {
+			for _, choice := range data.Choices {
+				total += len(choice.Delta.Content)
+			}
+		}
+	}
+	return total
+}
+
 // injectStreamOptions ensures stream_options.include_usage is set in a Chat Completions request body.
 // Used after Responses API conversion where extractMetadataFromBody skipped injection.
 func injectStreamOptions(body []byte) []byte {
