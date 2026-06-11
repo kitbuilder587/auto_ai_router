@@ -217,12 +217,12 @@ func sendWSHTTPError(conn *websocket.Conn, raw []byte, fallbackStatus int) {
 func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request) {
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		p.logger.Debug("ws: upgrade failed", "error", err)
+		p.logger.DebugContext(r.Context(), "ws: upgrade failed", "error", err)
 		return
 	}
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil && p.logger != nil {
-			p.logger.Debug("ws: close failed", "error", closeErr)
+			p.logger.DebugContext(r.Context(), "ws: close failed", "error", closeErr)
 		}
 	}()
 
@@ -239,21 +239,21 @@ outerLoop:
 				websocket.CloseGoingAway,
 				websocket.CloseNoStatusReceived,
 			) {
-				p.logger.Debug("ws: read error", "error", err)
+				p.logger.DebugContext(r.Context(), "ws: read error", "error", err)
 			}
 			return
 		}
 
 		var reqMap map[string]interface{}
 		if err := json.Unmarshal(msg, &reqMap); err != nil {
-			p.logger.Warn("ws: invalid JSON in client message", "error", err)
+			p.logger.WarnContext(r.Context(), "ws: invalid JSON in client message", "error", err)
 			sendWSError(conn, "invalid_request", "Invalid JSON")
 			continue
 		}
 
 		msgType, _ := reqMap["type"].(string)
 		if msgType != "response.create" {
-			p.logger.Warn("ws: unexpected message type from client", "type", msgType)
+			p.logger.WarnContext(r.Context(), "ws: unexpected message type from client", "type", msgType)
 			sendWSError(conn, "invalid_request", "Expected type: response.create")
 			continue
 		}
@@ -335,7 +335,7 @@ outerLoop:
 
 		bodyBytes, err := json.Marshal(reqMap)
 		if err != nil {
-			p.logger.Error("ws: failed to marshal request",
+			p.logger.ErrorContext(r.Context(), "ws: failed to marshal request",
 				"error_code", http.StatusInternalServerError, "error", err)
 			sendWSError(conn, "internal_error", "Failed to marshal request")
 			continue
@@ -347,7 +347,7 @@ outerLoop:
 			bytes.NewReader(bodyBytes),
 		)
 		if err != nil {
-			p.logger.Error("ws: failed to create internal request",
+			p.logger.ErrorContext(r.Context(), "ws: failed to create internal request",
 				"error_code", http.StatusInternalServerError, "error", err)
 			sendWSError(conn, "internal_error", "Failed to create request")
 			continue

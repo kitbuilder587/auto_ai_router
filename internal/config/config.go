@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +27,13 @@ const (
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
+
+// LogValue implements slog.LogValuer so structured log backends (e.g. the
+// OTEL bridge) serialize ProviderType as a plain string instead of an
+// unhandled custom type.
+func (p ProviderType) LogValue() slog.Value {
+	return slog.StringValue(string(p))
+}
 
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {

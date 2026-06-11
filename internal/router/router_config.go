@@ -21,6 +21,6 @@ func (r *Router) handleVisualConfig(w http.ResponseWriter, req *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := webui.ConfigTemplate.Execute(w, view); err != nil {
-		r.logger.Error("Failed to render config template", "error", err)
+		r.logger.ErrorContext(req.Context(), "Failed to render config template", "error", err)
 	}
 }
