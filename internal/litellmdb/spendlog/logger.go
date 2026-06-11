@@ -14,6 +14,16 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
+// pendingAggregationCap returns the buffer size for the pendingAggregation channel.
+// Minimum 500; if the calculated cap exceeds 500, adds another 500 as headroom.
+func pendingAggregationCap(cfg *models.Config) int {
+	cap := cfg.LogQueueSize/cfg.LogBatchSize + 10
+	if cap < 500 {
+		return 500
+	}
+	return cap + 500
+}
+
 // deadLetterBatch represents a batch that failed to insert after all retries
 type deadLetterBatch struct {
 	batch     []*models.SpendLogEntry
@@ -42,10 +52,11 @@ type Logger struct {
 	queue chan *models.SpendLogEntry
 
 	// Lifecycle
-	stopChan  chan struct{}
-	wg        sync.WaitGroup
-	shutdown  atomic.Bool // Track if shutdown has been called
-	startOnce sync.Once   // Ensure Start() is called only once
+	stopChan   chan struct{}
+	wg         sync.WaitGroup
+	producerWg sync.WaitGroup // tracks worker + dlqRecoveryWorker (producers of pendingAggregation)
+	shutdown   atomic.Bool    // Track if shutdown has been called
+	startOnce  sync.Once      // Ensure Start() is called only once
 
 	// Metrics
 	queued            uint64 // Total queued
@@ -70,7 +81,8 @@ type Logger struct {
 	lastAggregationTime time.Time
 
 	// pendingAggregation receives insertedIDs from flushBatchWithSpendUpdate for aggregation.
-	// Buffered: on overflow, IDs are dropped (acceptable loss on overload).
+	// Sized to hold all batches from a full queue; on overflow IDs are dropped.
+	// Closed by a background goroutine after all producers (worker + dlqRecoveryWorker) finish.
 	pendingAggregation chan []string
 }
 
@@ -84,7 +96,7 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 		logger:             cfg.Logger,
 		queue:              make(chan *models.SpendLogEntry, cfg.LogQueueSize),
 		stopChan:           make(chan struct{}),
-		pendingAggregation: make(chan []string, 500),
+		pendingAggregation: make(chan []string, pendingAggregationCap(cfg)),
 	}
 
 	return sl
@@ -96,6 +108,13 @@ func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
+
+		sl.producerWg.Add(2) // worker + dlqRecoveryWorker
+		// Close pendingAggregation once all producers finish so aggregationWorker exits cleanly.
+		go func() {
+			sl.producerWg.Wait()
+			close(sl.pendingAggregation)
+		}()
 
 		sl.wg.Add(3)
 		go sl.worker()
@@ -265,6 +284,7 @@ func (sl *Logger) GetDLQStats() map[string]interface{} {
 // worker is the background goroutine that processes the queue
 func (sl *Logger) worker() {
 	defer sl.wg.Done()
+	defer sl.producerWg.Done()
 
 	batch := make([]*models.SpendLogEntry, 0, sl.config.LogBatchSize)
 	ticker := time.NewTicker(sl.config.LogFlushInterval)
@@ -529,6 +549,7 @@ func (sl *Logger) getDLQSize() int {
 // Runs every 5 minutes, uses same retry logic as normal batches
 func (sl *Logger) dlqRecoveryWorker() {
 	defer sl.wg.Done()
+	defer sl.producerWg.Done()
 
 	for {
 		select {
@@ -664,27 +685,12 @@ func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []strin
 	return result
 }
 
-// aggregationWorker processes push-path aggregation and periodic safety-net
-// Push path: aggregates only IDs inserted by this router (no distributed lock needed)
-// Safety-net: periodic catch-all with pg_try_advisory_lock for crash recovery
+// aggregationWorker processes push-path aggregation.
+// Exits when pendingAggregation is closed (after all producers finish on shutdown).
 func (sl *Logger) aggregationWorker() {
 	defer sl.wg.Done()
 
-	for {
-		select {
-		case <-sl.stopChan:
-			// Shutdown: drain all pending IDs before exiting
-			for {
-				select {
-				case ids := <-sl.pendingAggregation:
-					sl.aggregateByIDs(ids)
-				default:
-					return
-				}
-			}
-
-		case ids := <-sl.pendingAggregation:
-			sl.aggregateByIDs(ids)
-		}
+	for ids := range sl.pendingAggregation {
+		sl.aggregateByIDs(ids)
 	}
 }
