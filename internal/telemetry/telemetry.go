@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -49,10 +50,26 @@ type Telemetry struct {
 
 // Setup initializes OTEL exporters according to cfg.
 // Returns nil (and no error) when OTEL is disabled in the config.
-func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string) (*Telemetry, error) {
+//
+// diag is a logger for export diagnostics (batch sizes at DEBUG, export
+// failures at WARN). It MUST NOT itself ship records via OTEL: logging about
+// log export through the OTEL pipeline would generate a new record per export
+// batch and feed the pipeline forever. Pass a stdout-only logger; nil disables
+// diagnostics.
+func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string, diag *slog.Logger) (*Telemetry, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, nil
 	}
+
+	if diag == nil {
+		diag = slog.New(slog.DiscardHandler)
+	}
+
+	// Surface internal SDK errors (queue overflows, async export problems)
+	// instead of the default stderr printing.
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		diag.Warn("OpenTelemetry SDK error", "error", err)
+	}))
 
 	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
 		semconv.SchemaURL,
@@ -72,7 +89,7 @@ func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string) 
 		}
 		t.tracerProvider = sdktrace.NewTracerProvider(
 			sdktrace.WithResource(res),
-			sdktrace.WithBatcher(traceExporter),
+			sdktrace.WithBatcher(&debugSpanExporter{inner: traceExporter, log: diag}),
 			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.TraceSampleRatio))),
 		)
 		otel.SetTracerProvider(t.tracerProvider)
@@ -96,7 +113,7 @@ func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string) 
 		}
 		t.loggerProvider = sdklog.NewLoggerProvider(
 			sdklog.WithResource(res),
-			sdklog.WithProcessor(sdklog.NewBatchProcessor(logExporter)),
+			sdklog.WithProcessor(sdklog.NewBatchProcessor(&debugLogExporter{inner: logExporter, log: diag})),
 		)
 		t.logHandler = otelslog.NewHandler(ScopeName,
 			otelslog.WithLoggerProvider(t.loggerProvider),
@@ -144,17 +161,82 @@ func (t *Telemetry) Shutdown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// debugSpanExporter wraps a span exporter to log every export batch:
+// successes at DEBUG (visible with logging_level: debug), failures at WARN.
+type debugSpanExporter struct {
+	inner sdktrace.SpanExporter
+	log   *slog.Logger
+}
+
+func (e *debugSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
+	start := time.Now()
+	err := e.inner.ExportSpans(ctx, spans)
+	if err != nil {
+		e.log.Warn("OTLP trace export failed", "spans", len(spans), "error", err)
+		return err
+	}
+	e.log.Debug("OTLP trace export succeeded", "spans", len(spans), "duration", time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+func (e *debugSpanExporter) Shutdown(ctx context.Context) error {
+	return e.inner.Shutdown(ctx)
+}
+
+// debugLogExporter wraps a log exporter to log every export batch.
+// Diagnostics go to the stdout-only diag logger (see Setup) — never through
+// the OTEL pipeline itself, which would loop.
+type debugLogExporter struct {
+	inner sdklog.Exporter
+	log   *slog.Logger
+}
+
+func (e *debugLogExporter) Export(ctx context.Context, records []sdklog.Record) error {
+	start := time.Now()
+	err := e.inner.Export(ctx, records)
+	if err != nil {
+		e.log.Warn("OTLP log export failed", "records", len(records), "error", err)
+		return err
+	}
+	e.log.Debug("OTLP log export succeeded", "records", len(records), "duration", time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+func (e *debugLogExporter) ForceFlush(ctx context.Context) error {
+	return e.inner.ForceFlush(ctx)
+}
+
+func (e *debugLogExporter) Shutdown(ctx context.Context) error {
+	return e.inner.Shutdown(ctx)
+}
+
 // hasURLScheme reports whether the endpoint includes an explicit scheme
 // (e.g. "http://collector:4318") as opposed to a bare "host:port".
 func hasURLScheme(endpoint string) bool {
 	return strings.Contains(endpoint, "://")
 }
 
+// withSignalPath appends the standard OTLP/HTTP signal path (e.g. "/v1/logs")
+// to an endpoint URL that has no explicit path. WithEndpointURL uses the URL
+// path as-is, so "http://collector:4318" would otherwise post to "/" and get
+// a 404 from a standard collector.
+func withSignalPath(endpointURL, signalPath string) string {
+	u, err := url.Parse(endpointURL)
+	if err != nil {
+		return endpointURL // let the exporter surface the parse error
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = signalPath
+		return u.String()
+	}
+	return endpointURL
+}
+
 func newTraceExporter(ctx context.Context, cfg *config.OTELConfig) (*otlptrace.Exporter, error) {
 	if cfg.Protocol == "http" {
 		opts := []otlptracehttp.Option{}
 		if hasURLScheme(cfg.Endpoint) {
-			opts = append(opts, otlptracehttp.WithEndpointURL(cfg.Endpoint))
+			opts = append(opts, otlptracehttp.WithEndpointURL(withSignalPath(cfg.Endpoint, "/v1/traces")))
 		} else {
 			opts = append(opts, otlptracehttp.WithEndpoint(cfg.Endpoint))
 		}
@@ -186,7 +268,7 @@ func newLogExporter(ctx context.Context, cfg *config.OTELConfig) (sdklog.Exporte
 	if cfg.Protocol == "http" {
 		opts := []otlploghttp.Option{}
 		if hasURLScheme(cfg.Endpoint) {
-			opts = append(opts, otlploghttp.WithEndpointURL(cfg.Endpoint))
+			opts = append(opts, otlploghttp.WithEndpointURL(withSignalPath(cfg.Endpoint, "/v1/logs")))
 		} else {
 			opts = append(opts, otlploghttp.WithEndpoint(cfg.Endpoint))
 		}

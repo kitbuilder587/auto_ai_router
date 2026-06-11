@@ -10,13 +10,13 @@ import (
 )
 
 func TestSetupDisabled(t *testing.T) {
-	tel, err := Setup(context.Background(), &config.OTELConfig{Enabled: false}, "test", "abc")
+	tel, err := Setup(context.Background(), &config.OTELConfig{Enabled: false}, "test", "abc", nil)
 	require.NoError(t, err)
 	assert.Nil(t, tel)
 }
 
 func TestSetupNilConfig(t *testing.T) {
-	tel, err := Setup(context.Background(), nil, "test", "abc")
+	tel, err := Setup(context.Background(), nil, "test", "abc", nil)
 	require.NoError(t, err)
 	assert.Nil(t, tel)
 }
@@ -42,7 +42,7 @@ func TestSetupEnabled(t *testing.T) {
 		TraceSampleRatio: 1.0,
 	}
 
-	tel, err := Setup(context.Background(), cfg, "test", "abc")
+	tel, err := Setup(context.Background(), cfg, "test", "abc", nil)
 	require.NoError(t, err)
 	require.NotNil(t, tel)
 	assert.True(t, tel.TracesEnabled())
@@ -62,7 +62,7 @@ func TestSetupHTTPProtocol(t *testing.T) {
 		TraceSampleRatio: 0.5,
 	}
 
-	tel, err := Setup(context.Background(), cfg, "test", "abc")
+	tel, err := Setup(context.Background(), cfg, "test", "abc", nil)
 	require.NoError(t, err)
 	require.NotNil(t, tel)
 	assert.True(t, tel.TracesEnabled())
@@ -75,4 +75,12 @@ func TestHasURLScheme(t *testing.T) {
 	assert.True(t, hasURLScheme("https://collector.example.com"))
 	assert.False(t, hasURLScheme("localhost:4317"))
 	assert.False(t, hasURLScheme("collector:4317"))
+}
+
+func TestWithSignalPath(t *testing.T) {
+	// No path: the standard signal path must be appended.
+	assert.Equal(t, "http://collector:4318/v1/logs", withSignalPath("http://collector:4318", "/v1/logs"))
+	assert.Equal(t, "http://collector:4318/v1/traces", withSignalPath("http://collector:4318/", "/v1/traces"))
+	// Explicit path: kept as-is.
+	assert.Equal(t, "http://collector:4318/custom/logs", withSignalPath("http://collector:4318/custom/logs", "/v1/logs"))
 }

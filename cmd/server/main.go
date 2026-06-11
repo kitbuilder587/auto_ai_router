@@ -57,7 +57,10 @@ func main() {
 
 	// ==================== Initialize OpenTelemetry ====================
 	// Must happen before logger creation so OTLP log export covers all startup logs.
-	otelSDK, otelErr := telemetry.Setup(context.Background(), &cfg.OTEL, Version, Commit)
+	// Export diagnostics go to a stdout-only logger: routing them through the
+	// OTEL pipeline would generate a record per export batch and loop forever.
+	otelDiagLog := logger.New(cfg.Server.LoggingLevel)
+	otelSDK, otelErr := telemetry.Setup(context.Background(), &cfg.OTEL, Version, Commit, otelDiagLog)
 
 	stdoutLogs := cfg.Server.StdoutLogsEnabled
 	if !stdoutLogs && otelSDK.LogHandler() == nil {
