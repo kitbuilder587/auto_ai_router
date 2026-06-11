@@ -419,6 +419,40 @@ func TestEstimatePromptTokens(t *testing.T) {
 			maxExpected:      20,
 			shouldBeAtLeast1: true,
 		},
+		{
+			name:             "responses api: string input",
+			body:             []byte(`{"model":"gpt-4o","input":"Hello, this is a test prompt for the Responses API."}`),
+			minExpected:      8,
+			maxExpected:      20,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "responses api: array input with messages",
+			body:             []byte(`{"model":"gpt-4o","input":[{"role":"user","content":"Analyze this text please"},{"role":"assistant","content":"Sure, I can help."}]}`),
+			minExpected:      8,
+			maxExpected:      20,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "responses api: instructions field",
+			body:             []byte(`{"model":"gpt-4o","input":"Short question","instructions":"You are a helpful assistant that answers concisely."}`),
+			minExpected:      12,
+			maxExpected:      25,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name: "responses api: large string input (~70k tokens)",
+			body: []byte(`{"model":"gpt-4o","input":"` + func() string {
+				s := make([]byte, 280000)
+				for i := range s {
+					s[i] = 'a'
+				}
+				return string(s)
+			}() + `"}`),
+			minExpected:      69990,
+			maxExpected:      70010,
+			shouldBeAtLeast1: true,
+		},
 	}
 
 	for _, tt := range tests {
