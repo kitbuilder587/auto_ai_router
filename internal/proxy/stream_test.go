@@ -862,6 +862,130 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 		"CompletionTokens should be > 0 from streaming count or extracted usage")
 }
 
+// TestHandleStreamingWithTokens_WithDoneAndUsage verifies that the presence of data: [DONE]
+// as the last chunk does not prevent extracting the correct usage from the previous chunk,
+// and that CompletionTokens is not overwritten with TotalTokens.
+func TestHandleStreamingWithTokens_WithDoneAndUsage(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105}}\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{
+		RequestID:            "test-request-done-123",
+		PromptTokensEstimate: 95,
+		TokenUsage:           &converter.TokenUsage{},
+		Credential: &config.CredentialConfig{
+			Name: "test",
+			Type: config.ProviderTypeOpenAI,
+		},
+		Request: httptest.NewRequest("POST", "/v1/chat/completions", nil),
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// Verify that the actual prompt tokens and completion tokens were extracted and NOT overwritten
+	assert.Equal(t, 100, logCtx.TokenUsage.PromptTokens, "PromptTokens should be 100 (extracted from usage)")
+	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens, "CompletionTokens should be 5 (extracted from usage, not total_tokens = 105)")
+
+	// Verify that tokens were consumed in the rate limiter (total_tokens = 105)
+	assert.Equal(t, 105, prx.rateLimiter.GetCurrentTPM("test"), "Rate limiter should have recorded 105 tokens")
+}
+
+// TestHandleStreamingWithTokens_CombinedUsageAndDone verifies that when the usage data
+// and the data: [DONE] sentinel arrive in the same TCP/buffer read chunk, the usage is still
+// extracted correctly and lastChunk is updated.
+func TestHandleStreamingWithTokens_CombinedUsageAndDone(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105}}\n\ndata: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{
+		RequestID:            "test-request-combined-123",
+		PromptTokensEstimate: 95,
+		TokenUsage:           &converter.TokenUsage{},
+		Credential: &config.CredentialConfig{
+			Name: "test",
+			Type: config.ProviderTypeOpenAI,
+		},
+		Request: httptest.NewRequest("POST", "/v1/chat/completions", nil),
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// Verify that the actual prompt tokens and completion tokens were extracted and NOT overwritten
+	assert.Equal(t, 100, logCtx.TokenUsage.PromptTokens, "PromptTokens should be 100 (extracted from usage)")
+	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens, "CompletionTokens should be 5 (extracted from usage, not total_tokens = 105)")
+}
+
 // TestTokenCapturingWriter_CumulativeTokens verifies that tokenCapturingWriter does NOT
 // accumulate total_tokens across chunks. Vertex/Gemini include a cumulative total_tokens in
 // every streaming chunk; naively adding them up multiplies the real count by N (the number of

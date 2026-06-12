@@ -388,10 +388,22 @@ func (p *Proxy) handleTransformedStreaming(
 			logger:          p.logger,
 			onChunk: func(chunk []byte) {
 				chunkCount++
-				// Store each chunk, keeping only the last one
-				// This allows us to extract usage info that typically appears in final chunks
-				lastChunk = make([]byte, len(chunk))
-				copy(lastChunk, chunk)
+
+				if logCtx != nil {
+					if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
+						if logCtx.TokenUsage == nil {
+							logCtx.TokenUsage = &converter.TokenUsage{}
+						}
+						*logCtx.TokenUsage = *usage
+					}
+				}
+
+				// Store each chunk, keeping only the last one that contains actual data and isn't [DONE]
+				trimmed := strings.TrimSpace(string(chunk))
+				if trimmed != "" && trimmed != "data: [DONE]" && trimmed != "[DONE]" {
+					lastChunk = make([]byte, len(chunk))
+					copy(lastChunk, chunk)
+				}
 			},
 		})
 		if err != nil {
@@ -462,18 +474,25 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	onChunk := func(chunk []byte) {
 		chunkCount++
+
+		if logCtx != nil {
+			if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
+				}
+				*logCtx.TokenUsage = *usage
+			}
+		}
+
 		tokens := extractTokensFromStreamingChunk(string(chunk))
 		if tokens > 0 {
 			totalTokens += tokens
 		}
 		completionChars += extractCompletionDeltaChars(chunk)
 
-		// Don't let a bare [DONE] sentinel overwrite a lastChunk that carries usage
-		// data — when drain reads usage and [DONE] as separate buffer reads, the
-		// [DONE] chunk would otherwise obscure the usage, and ExtractUsage would
-		// return nil, falling back to the less-precise total_tokens value.
-		chunkStr := strings.TrimSpace(string(chunk))
-		if chunkStr != "data: [DONE]" {
+		// Don't let a bare [DONE] sentinel or empty chunks overwrite a lastChunk that carries usage data.
+		trimmed := strings.TrimSpace(string(chunk))
+		if trimmed != "" && trimmed != "data: [DONE]" && trimmed != "[DONE]" {
 			lastChunk = make([]byte, len(chunk))
 			copy(lastChunk, chunk)
 		}
@@ -536,8 +555,8 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
 
-	logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate
-	logCtx.TokenUsage.CompletionTokens = totalTokens
+	fallbackPrompt := logCtx.PromptTokensEstimate
+	fallbackCompletion := totalTokens
 
 	if len(lastChunk) > 0 {
 		extractor := getStreamUsageExtractor(providerName)
@@ -549,11 +568,21 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
 			}
 
-			logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
-			logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
-			logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
-			logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
-			logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
+			if usageInfo.CachedTokens > 0 {
+				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+			}
+			if usageInfo.AudioInputTokens > 0 {
+				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
+			}
+			if usageInfo.AudioOutputTokens > 0 {
+				logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+			}
+			if usageInfo.ImageTokens > 0 {
+				logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
+			}
+			if usageInfo.ReasoningTokens > 0 {
+				logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
+			}
 
 			if usageInfo.CacheCreationTokens > 0 {
 				logCtx.TokenUsage.CacheCreationTokens = usageInfo.CacheCreationTokens
@@ -570,6 +599,13 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"reasoning_tokens", usageInfo.ReasoningTokens,
 			)
 		}
+	}
+
+	if logCtx.TokenUsage.PromptTokens == 0 {
+		logCtx.TokenUsage.PromptTokens = fallbackPrompt
+	}
+	if logCtx.TokenUsage.CompletionTokens == 0 {
+		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 
 	logCtx.HTTPStatus = statusCode
@@ -939,6 +975,17 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 			if json.Unmarshal([]byte(jsonData), &event) == nil && event.Type == "response.completed" {
 				if event.Response.Usage != nil {
 					totalTokens = event.Response.Usage.TotalTokens
+					if logCtx != nil {
+						if logCtx.TokenUsage == nil {
+							logCtx.TokenUsage = &converter.TokenUsage{}
+						}
+						logCtx.TokenUsage.PromptTokens = event.Response.Usage.InputTokens
+						logCtx.TokenUsage.CompletionTokens = event.Response.Usage.OutputTokens
+						logCtx.TokenUsage.CachedInputTokens = event.Response.Usage.InputTokensDetails.CachedTokens
+						logCtx.TokenUsage.AudioInputTokens = event.Response.Usage.InputTokensDetails.AudioTokens
+						logCtx.TokenUsage.AudioOutputTokens = event.Response.Usage.OutputTokensDetails.AudioTokens
+						logCtx.TokenUsage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
+					}
 				}
 				completedData = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it
 				if onComplete != nil {
