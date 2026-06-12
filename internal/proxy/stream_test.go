@@ -116,14 +116,15 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	)
 }
 
-// TestHandleStreamingWithTokens_NoTokens проверяет что handleStreamingWithTokens работает
-// с потоком без usage информации (не падает, просто не конумирует токены)
-func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
+// TestHandleStreamingWithTokens_NoUsageChunk проверяет что handleStreamingWithTokens
+// оценивает токены из delta-текста, когда usage-чанк не пришёл (обрыв стрима или
+// провайдер не отправил usage). "hello" + " world" = 11 символов → 3 токена.
+func TestHandleStreamingWithTokens_NoUsageChunk(t *testing.T) {
 	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
-		// Пишем SSE чанки БЕЗ usage информации
+		// Пишем SSE чанки БЕЗ usage информации — провайдер закрывает соединение без usage
 		chunks := []string{
 			"data: {\"choices\": [{\"delta\": {\"content\": \"hello\"}}]}\n\n",
 			"data: {\"choices\": [{\"delta\": {\"content\": \" world\"}}]}\n\n",
@@ -167,15 +168,17 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
-	// Проверяем что токены НЕ были добавлены
+	// "hello" (5) + " world" (6) = 11 символов → (11+3)/4 = 3 токена
+	expectedEstimated := (11 + 3) / 4
+
 	credentialTPM := rl.GetCurrentTPM(credName)
-	assert.Equal(t, 0, credentialTPM,
-		"GetCurrentTPM должен быть 0 если нет usage информации в потоке",
+	assert.Equal(t, expectedEstimated, credentialTPM,
+		"GetCurrentTPM должен содержать оценку из delta-текста когда usage-чанк не пришёл",
 	)
 
 	modelTPM := rl.GetCurrentModelTPM(credName, modelID)
-	assert.Equal(t, 0, modelTPM,
-		"GetCurrentModelTPM должен быть 0 если нет usage информации в потоке",
+	assert.Equal(t, expectedEstimated, modelTPM,
+		"GetCurrentModelTPM должен содержать оценку из delta-текста когда usage-чанк не пришёл",
 	)
 }
 

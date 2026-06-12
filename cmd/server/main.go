@@ -185,6 +185,7 @@ func main() {
 		SessionStickyEnabled:       cfg.Server.SessionStickyEnabled,
 		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
 		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
+		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
 	})
 
 	// ==================== Background Goroutines ====================

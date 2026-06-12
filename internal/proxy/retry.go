@@ -276,9 +276,20 @@ func (p *Proxy) writeFallbackResponse(
 			// the stream body failed — return true so the caller does not attempt another
 			// WriteHeader call (which would produce a "superfluous WriteHeader" warning and
 			// corrupt the response).
+			// Still propagate partial token usage so the defer-logged spend entry isn't empty.
+			if streamUsage != nil && logCtx != nil {
+				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 {
+					streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+				}
+				logCtx.TokenUsage = streamUsage
+			}
 			return true, "fallback_stream_write_failed"
 		}
 		if streamUsage != nil && logCtx != nil {
+			// Backfill PromptTokens from estimate when provider didn't include it.
+			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 {
+				streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+			}
 			logCtx.TokenUsage = streamUsage
 			if proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(fallbackCred.Name, modelID,
