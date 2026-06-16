@@ -596,7 +596,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
-				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
 					Header:     proxyResp.Headers,
@@ -621,7 +621,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
-				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
 					Header:     proxyResp.Headers,
@@ -637,8 +637,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
-				logCtx.PromptTokensEstimate = estimatePromptTokens(proxyBody)
-				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
+				tokenizerModelID := realModelID
+				if tokenizerModelID == "" {
+					tokenizerModelID = modelID
+				}
+				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, tokenizerModelID)
 				if err != nil {
 					p.logStreamHandlerError("Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
@@ -1316,7 +1320,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 
 		if logCtx != nil {
-			logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+			logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 			p.logger.Debug("Estimated prompt tokens for streaming response",
 				"estimate", logCtx.PromptTokensEstimate,
 				"request_id", logCtx.RequestID)

@@ -266,7 +266,7 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 		}
-		streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred.Name)
+		streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred.Name, modelID)
 		if err != nil {
 			p.logStreamHandlerError("Failed to write fallback streaming proxy response", err,
 				"fallback_credential", fallbackCred.Name,
