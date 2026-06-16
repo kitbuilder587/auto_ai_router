@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 
@@ -125,10 +126,29 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	if _, ok := w.(http.Flusher); ok {
-		if err := p.streamToClient(clientReq.Context(), w, resp.StreamBody, credName, onChunk, nil); err != nil {
-			return lastUsage, err
+		err := p.streamToClient(
+			clientReq.Context(),
+			w,
+			resp.StreamBody,
+			credName,
+			onChunk,
+			nil,
+		)
+
+		if err != nil && p.drainUpstreamOnAbort {
+			// Drain upstream so the usage chunk arrives even though the client left.
+			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
+			defer cancel()
+
+			p.drainUpstream(
+				drainCtx,
+				resp.StreamBody,
+				onChunk,
+				credName,
+			)
 		}
-		return lastUsage, nil
+
+		return buildFallbackUsage(), err
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).

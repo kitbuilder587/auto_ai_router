@@ -1344,10 +1344,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 
 		if logCtx != nil {
-			logCtx.PromptTokensEstimate = estimatePromptTokens(body)
-			p.logger.DebugContext(r.Context(), "Estimated prompt tokens for streaming response",
+			logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
+
+			p.logger.DebugContext(
+				r.Context(),
+				"Estimated prompt tokens for streaming response",
 				"estimate", logCtx.PromptTokensEstimate,
-				"request_id", logCtx.RequestID)
+				"request_id", logCtx.RequestID,
+			)
 		}
 
 		p.logger.DebugContext(r.Context(), "Streaming handler selection",
