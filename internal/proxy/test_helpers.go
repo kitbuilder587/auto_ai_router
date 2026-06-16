@@ -103,6 +103,7 @@ type TestProxyConfig struct {
 	SessionStoreTTL      time.Duration
 	MaxProviderRetries   int
 	MaxFallbackAttempts  int
+	DrainUpstreamOnAbort bool
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -229,6 +230,12 @@ func (b *TestProxyBuilder) WithMaxProviderRetries(n int) *TestProxyBuilder {
 	return b
 }
 
+// WithDrainUpstreamOnAbort enables or disables upstream draining after client disconnect.
+func (b *TestProxyBuilder) WithDrainUpstreamOnAbort(v bool) *TestProxyBuilder {
+	b.config.DrainUpstreamOnAbort = v
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -257,6 +264,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		SessionStoreTTL:      b.config.SessionStoreTTL,
 		MaxProviderRetries:   b.config.MaxProviderRetries,
 		MaxFallbackAttempts:  b.config.MaxFallbackAttempts,
+		DrainUpstreamOnAbort: b.config.DrainUpstreamOnAbort,
 	})
 }
 

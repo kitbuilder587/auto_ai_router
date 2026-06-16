@@ -90,6 +90,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	resp *ProxyResponse,
 	clientReq *http.Request,
 	credName string,
+	modelID string,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
@@ -119,10 +120,22 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
+	completion := newCompletionTokenAccumulator(modelID)
 	onChunk := func(chunk []byte) {
 		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
 			lastUsage = usage
 		}
+		completion.AddChunk(chunk)
+	}
+
+	buildFallbackUsage := func() *converter.TokenUsage {
+		if lastUsage != nil {
+			return lastUsage
+		}
+		if tokens := completion.TokenCount(); tokens > 0 {
+			return &converter.TokenUsage{CompletionTokens: tokens}
+		}
+		return nil
 	}
 
 	if _, ok := w.(http.Flusher); ok {
@@ -153,9 +166,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
 	if _, err := io.Copy(w, resp.StreamBody); err != nil {
-		return lastUsage, err
+		return buildFallbackUsage(), err
 	}
-	return lastUsage, nil
+	return buildFallbackUsage(), nil
 }
 
 // itoa avoids fmt.Sprintf for a hot path.

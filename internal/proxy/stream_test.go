@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,14 +117,15 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	)
 }
 
-// TestHandleStreamingWithTokens_NoTokens проверяет что handleStreamingWithTokens работает
-// с потоком без usage информации (не падает, просто не конумирует токены)
-func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
+// TestHandleStreamingWithTokens_NoUsageChunk проверяет что handleStreamingWithTokens
+// считает токены из delta-текста, когда usage-чанк не пришёл (обрыв стрима или
+// провайдер не отправил usage). При отсутствии usage используется tokenizer.
+func TestHandleStreamingWithTokens_NoUsageChunk(t *testing.T) {
 	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
-		// Пишем SSE чанки БЕЗ usage информации
+		// Пишем SSE чанки БЕЗ usage информации — провайдер закрывает соединение без usage
 		chunks := []string{
 			"data: {\"choices\": [{\"delta\": {\"content\": \"hello\"}}]}\n\n",
 			"data: {\"choices\": [{\"delta\": {\"content\": \" world\"}}]}\n\n",
@@ -167,15 +169,17 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
-	// Проверяем что токены НЕ были добавлены
+	// "hello" + " world" считаются через tokenizer модели.
+	expectedEstimated := countTextTokensForModel(modelID, "hello world")
+
 	credentialTPM := rl.GetCurrentTPM(credName)
-	assert.Equal(t, 0, credentialTPM,
-		"GetCurrentTPM должен быть 0 если нет usage информации в потоке",
+	assert.Equal(t, expectedEstimated, credentialTPM,
+		"GetCurrentTPM должен содержать оценку из delta-текста когда usage-чанк не пришёл",
 	)
 
 	modelTPM := rl.GetCurrentModelTPM(credName, modelID)
-	assert.Equal(t, 0, modelTPM,
-		"GetCurrentModelTPM должен быть 0 если нет usage информации в потоке",
+	assert.Equal(t, expectedEstimated, modelTPM,
+		"GetCurrentModelTPM должен содержать оценку из delta-текста когда usage-чанк не пришёл",
 	)
 }
 
@@ -370,6 +374,9 @@ func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
 
 // TestEstimatePromptTokens tests the prompt token estimation from request body
 func TestEstimatePromptTokens(t *testing.T) {
+	largeInput := strings.Repeat("a", 280000)
+	largeInputTokens := countTextTokensForModel("gpt-4o", largeInput)
+
 	tests := []struct {
 		name             string
 		body             []byte
@@ -388,7 +395,7 @@ func TestEstimatePromptTokens(t *testing.T) {
 			name:             "simple text message",
 			body:             []byte(`{"messages":[{"content":"Hello, world! This is a test message."}]}`),
 			minExpected:      5,
-			maxExpected:      15,
+			maxExpected:      20,
 			shouldBeAtLeast1: true,
 		},
 		{
@@ -417,6 +424,34 @@ func TestEstimatePromptTokens(t *testing.T) {
 			body:             []byte(`{"messages":[{"content":"First message"},{"content":"Second message with more text"}]}`),
 			minExpected:      8,
 			maxExpected:      20,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "responses api: string input",
+			body:             []byte(`{"model":"gpt-4o","input":"Hello, this is a test prompt for the Responses API."}`),
+			minExpected:      8,
+			maxExpected:      20,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "responses api: array input with messages",
+			body:             []byte(`{"model":"gpt-4o","input":[{"role":"user","content":"Analyze this text please"},{"role":"assistant","content":"Sure, I can help."}]}`),
+			minExpected:      8,
+			maxExpected:      20,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "responses api: instructions field",
+			body:             []byte(`{"model":"gpt-4o","input":"Short question","instructions":"You are a helpful assistant that answers concisely."}`),
+			minExpected:      12,
+			maxExpected:      25,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "responses api: large string input",
+			body:             []byte(`{"model":"gpt-4o","input":"` + largeInput + `"}`),
+			minExpected:      largeInputTokens,
+			maxExpected:      largeInputTokens,
 			shouldBeAtLeast1: true,
 		},
 	}
@@ -823,6 +858,130 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 	// Completion tokens should be at least from the token count
 	assert.Greater(t, logCtx.TokenUsage.CompletionTokens, 0,
 		"CompletionTokens should be > 0 from streaming count or extracted usage")
+}
+
+// TestHandleStreamingWithTokens_WithDoneAndUsage verifies that the presence of data: [DONE]
+// as the last chunk does not prevent extracting the correct usage from the previous chunk,
+// and that CompletionTokens is not overwritten with TotalTokens.
+func TestHandleStreamingWithTokens_WithDoneAndUsage(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105}}\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{
+		RequestID:            "test-request-done-123",
+		PromptTokensEstimate: 95,
+		TokenUsage:           &converter.TokenUsage{},
+		Credential: &config.CredentialConfig{
+			Name: "test",
+			Type: config.ProviderTypeOpenAI,
+		},
+		Request: httptest.NewRequest("POST", "/v1/chat/completions", nil),
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// Verify that the actual prompt tokens and completion tokens were extracted and NOT overwritten
+	assert.Equal(t, 100, logCtx.TokenUsage.PromptTokens, "PromptTokens should be 100 (extracted from usage)")
+	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens, "CompletionTokens should be 5 (extracted from usage, not total_tokens = 105)")
+
+	// Verify that tokens were consumed in the rate limiter (total_tokens = 105)
+	assert.Equal(t, 105, prx.rateLimiter.GetCurrentTPM("test"), "Rate limiter should have recorded 105 tokens")
+}
+
+// TestHandleStreamingWithTokens_CombinedUsageAndDone verifies that when the usage data
+// and the data: [DONE] sentinel arrive in the same TCP/buffer read chunk, the usage is still
+// extracted correctly and lastChunk is updated.
+func TestHandleStreamingWithTokens_CombinedUsageAndDone(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"total_tokens\":105}}\n\ndata: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{
+		RequestID:            "test-request-combined-123",
+		PromptTokensEstimate: 95,
+		TokenUsage:           &converter.TokenUsage{},
+		Credential: &config.CredentialConfig{
+			Name: "test",
+			Type: config.ProviderTypeOpenAI,
+		},
+		Request: httptest.NewRequest("POST", "/v1/chat/completions", nil),
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// Verify that the actual prompt tokens and completion tokens were extracted and NOT overwritten
+	assert.Equal(t, 100, logCtx.TokenUsage.PromptTokens, "PromptTokens should be 100 (extracted from usage)")
+	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens, "CompletionTokens should be 5 (extracted from usage, not total_tokens = 105)")
 }
 
 // TestTokenCapturingWriter_CumulativeTokens verifies that tokenCapturingWriter does NOT
