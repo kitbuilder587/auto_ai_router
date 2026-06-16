@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,8 +118,8 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 }
 
 // TestHandleStreamingWithTokens_NoUsageChunk проверяет что handleStreamingWithTokens
-// оценивает токены из delta-текста, когда usage-чанк не пришёл (обрыв стрима или
-// провайдер не отправил usage). "hello" + " world" = 11 символов → 3 токена.
+// считает токены из delta-текста, когда usage-чанк не пришёл (обрыв стрима или
+// провайдер не отправил usage). При отсутствии usage используется tokenizer.
 func TestHandleStreamingWithTokens_NoUsageChunk(t *testing.T) {
 	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -168,8 +169,8 @@ func TestHandleStreamingWithTokens_NoUsageChunk(t *testing.T) {
 	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
-	// "hello" (5) + " world" (6) = 11 символов → (11+3)/4 = 3 токена
-	expectedEstimated := (11 + 3) / 4
+	// "hello" + " world" считаются через tokenizer модели.
+	expectedEstimated := countTextTokensForModel(modelID, "hello world")
 
 	credentialTPM := rl.GetCurrentTPM(credName)
 	assert.Equal(t, expectedEstimated, credentialTPM,
@@ -373,6 +374,9 @@ func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
 
 // TestEstimatePromptTokens tests the prompt token estimation from request body
 func TestEstimatePromptTokens(t *testing.T) {
+	largeInput := strings.Repeat("a", 280000)
+	largeInputTokens := countTextTokensForModel("gpt-4o", largeInput)
+
 	tests := []struct {
 		name             string
 		body             []byte
@@ -391,7 +395,7 @@ func TestEstimatePromptTokens(t *testing.T) {
 			name:             "simple text message",
 			body:             []byte(`{"messages":[{"content":"Hello, world! This is a test message."}]}`),
 			minExpected:      5,
-			maxExpected:      15,
+			maxExpected:      20,
 			shouldBeAtLeast1: true,
 		},
 		{
@@ -444,16 +448,10 @@ func TestEstimatePromptTokens(t *testing.T) {
 			shouldBeAtLeast1: true,
 		},
 		{
-			name: "responses api: large string input (~70k tokens)",
-			body: []byte(`{"model":"gpt-4o","input":"` + func() string {
-				s := make([]byte, 280000)
-				for i := range s {
-					s[i] = 'a'
-				}
-				return string(s)
-			}() + `"}`),
-			minExpected:      69990,
-			maxExpected:      70010,
+			name:             "responses api: large string input",
+			body:             []byte(`{"model":"gpt-4o","input":"` + largeInput + `"}`),
+			minExpected:      largeInputTokens,
+			maxExpected:      largeInputTokens,
 			shouldBeAtLeast1: true,
 		},
 	}

@@ -158,7 +158,7 @@ func TestHandleStreamingWithTokens_AbortEstimatesWithoutDrain(t *testing.T) {
 
 	// Without drain no usage chunk arrives — tokens come from delta-text estimation
 	assert.Greater(t, logCtx.TokenUsage.CompletionTokens, 0,
-		"completion tokens must be estimated from delta chars (no drain)")
+		"completion tokens must be counted from delta text (no drain)")
 	// Real usage chunk NOT captured — prompt comes from PromptTokensEstimate
 	assert.Equal(t, 15, logCtx.TokenUsage.PromptTokens,
 		"prompt tokens must come from PromptTokensEstimate when drain is disabled")
@@ -214,9 +214,8 @@ func TestHandleStreamingWithTokens_ProviderEOFWithoutUsage(t *testing.T) {
 
 	assert.True(t, logCtx.Logged, "must be logged even without usage chunk")
 
-	// "Hello world" = 11 chars → estimate = (11+3)/4 = 3 tokens
 	assert.Greater(t, logCtx.TokenUsage.CompletionTokens, 0,
-		"completion tokens must be estimated from delta text when no usage chunk")
+		"completion tokens must be counted from delta text when no usage chunk")
 
 	// Prompt tokens from estimate
 	assert.Equal(t, 10, logCtx.TokenUsage.PromptTokens,
@@ -228,7 +227,7 @@ func TestHandleStreamingWithTokens_ProviderEOFWithoutUsage(t *testing.T) {
 
 // TestHandleStreamingWithTokens_NormalCompletion verifies that when the stream
 // completes normally (usage chunk arrives), the real token counts win over
-// the character-based estimate. The usage and [DONE] lines are flushed together
+// the local tokenizer estimate. The usage and [DONE] lines are flushed together
 // so they arrive in the same buffer read, ensuring lastChunk contains usage data.
 func TestHandleStreamingWithTokens_NormalCompletion(t *testing.T) {
 	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,17 +351,17 @@ func TestHandleTransformedStreaming_AbortLogsTokens(t *testing.T) {
 		logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens)
 }
 
-// TestExtractCompletionDeltaChars verifies the delta text character extractor.
-func TestExtractCompletionDeltaChars(t *testing.T) {
+// TestExtractCompletionDeltaText_ChatCompletions verifies the delta text extractor.
+func TestExtractCompletionDeltaText_ChatCompletions(t *testing.T) {
 	tests := []struct {
-		name      string
-		chunk     []byte
-		wantChars int
+		name     string
+		chunk    []byte
+		wantText string
 	}{
 		{
-			name:      "single delta",
-			chunk:     []byte(`data: {"choices":[{"delta":{"content":"Hello"}}]}` + "\n\n"),
-			wantChars: 5,
+			name:     "single delta",
+			chunk:    []byte(`data: {"choices":[{"delta":{"content":"Hello"}}]}` + "\n\n"),
+			wantText: "Hello",
 		},
 		{
 			name: "multiple SSE lines in chunk",
@@ -370,39 +369,39 @@ func TestExtractCompletionDeltaChars(t *testing.T) {
 				`data: {"choices":[{"delta":{"content":"Hi "}}]}` + "\n\n" +
 					`data: {"choices":[{"delta":{"content":"there"}}]}` + "\n\n",
 			),
-			wantChars: 8, // "Hi " + "there"
+			wantText: "Hi there",
 		},
 		{
-			name:      "no content field",
-			chunk:     []byte(`data: {"choices":[{"finish_reason":"stop","delta":{}}]}` + "\n\n"),
-			wantChars: 0,
+			name:     "no content field",
+			chunk:    []byte(`data: {"choices":[{"finish_reason":"stop","delta":{}}]}` + "\n\n"),
+			wantText: "",
 		},
 		{
-			name:      "DONE marker",
-			chunk:     []byte("data: [DONE]\n\n"),
-			wantChars: 0,
+			name:     "DONE marker",
+			chunk:    []byte("data: [DONE]\n\n"),
+			wantText: "",
 		},
 		{
-			name:      "usage-only chunk",
-			chunk:     []byte(`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}` + "\n\n"),
-			wantChars: 0,
+			name:     "usage-only chunk",
+			chunk:    []byte(`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}` + "\n\n"),
+			wantText: "",
 		},
 		{
-			name:      "empty chunk",
-			chunk:     []byte(""),
-			wantChars: 0,
+			name:     "empty chunk",
+			chunk:    []byte(""),
+			wantText: "",
 		},
 		{
-			name:      "multi-word content",
-			chunk:     []byte(`data: {"choices":[{"delta":{"content":"Hello world!"}}]}` + "\n\n"),
-			wantChars: 12,
+			name:     "multi-word content",
+			chunk:    []byte(`data: {"choices":[{"delta":{"content":"Hello world!"}}]}` + "\n\n"),
+			wantText: "Hello world!",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractCompletionDeltaChars(tt.chunk)
-			assert.Equal(t, tt.wantChars, got)
+			got := extractCompletionDeltaText(tt.chunk)
+			assert.Equal(t, tt.wantText, got)
 		})
 	}
 }
@@ -450,13 +449,13 @@ func TestWriteProxyStreamingResponseWithTokens_Abort(t *testing.T) {
 	// Client disconnects after 10 bytes
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "gpt-4o-mini")
 	assert.Error(t, err, "should return write error")
 
 	// Even on abort, estimated usage must be returned
 	require.NotNil(t, streamUsage, "writeProxyStreamingResponseWithTokens must return partial usage on abort")
 	assert.Greater(t, streamUsage.CompletionTokens, 0,
-		"completion tokens must be estimated from 'OpenRouter reply text' delta chars")
+		"completion tokens must be counted from 'OpenRouter reply text' delta text")
 
 	t.Logf("Proxy abort estimated completion tokens: %d", streamUsage.CompletionTokens)
 }
@@ -510,7 +509,7 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 	// Client disconnects after 10 bytes (before usage chunk)
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "gpt-4o-mini")
 	assert.Error(t, err, "should return write error")
 
 	// Drain must have captured the real usage chunk
@@ -562,10 +561,10 @@ func TestWriteProxyStreamingResponseWithTokens_NoUsageChunk(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "gpt-4o-mini")
 	require.NoError(t, err)
 
-	// Should return estimated usage based on "Response without usage" = 22 chars → (22+3)/4 = 6
+	// Should return estimated usage from streamed text when no usage chunk is present.
 	require.NotNil(t, streamUsage, "must return estimated usage when no usage chunk")
 	assert.Greater(t, streamUsage.CompletionTokens, 0,
 		"completion tokens estimated from delta text")

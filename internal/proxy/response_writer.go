@@ -90,6 +90,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	resp *ProxyResponse,
 	clientReq *http.Request,
 	credName string,
+	modelID string,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
@@ -119,20 +120,20 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	var completionChars int
+	completion := newCompletionTokenAccumulator(modelID)
 	onChunk := func(chunk []byte) {
 		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
 			lastUsage = usage
 		}
-		completionChars += extractCompletionDeltaChars(chunk)
+		completion.AddChunk(chunk)
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {
 		if lastUsage != nil {
 			return lastUsage
 		}
-		if completionChars > 0 {
-			return &converter.TokenUsage{CompletionTokens: (completionChars + 3) / 4}
+		if tokens := completion.TokenCount(); tokens > 0 {
+			return &converter.TokenUsage{CompletionTokens: tokens}
 		}
 		return nil
 	}
