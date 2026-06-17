@@ -52,6 +52,7 @@ func TestOpenAIToVertex_ToolRoleMessage_UsesNameField(t *testing.T) {
 	fr := toolContent.Parts[0].FunctionResponse
 	if fr == nil {
 		t.Fatalf("expected FunctionResponse, got nil")
+		return
 	}
 
 	// The critical check: Name must be "get_weather" (from msg.Name), not "call_abc123" (from msg.ToolCallID)
@@ -107,6 +108,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_FallbackToToolResult(t *testin
 	fr := toolContent.Parts[0].FunctionResponse
 	if fr == nil {
 		t.Fatalf("expected FunctionResponse, got nil")
+		return
 	}
 
 	if fr.Name != "tool_result" {
@@ -175,6 +177,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_ResolvesFromToolCalls(t *testi
 	fr := toolContent.Parts[0].FunctionResponse
 	if fr == nil {
 		t.Fatalf("expected FunctionResponse, got nil")
+		return
 	}
 
 	// Must be "multisearch" (resolved from tool_calls), NOT "tool_result"
@@ -380,6 +383,7 @@ func TestOpenAIToVertex_BasicMessageConversion(t *testing.T) {
 	// System message should go to SystemInstruction, not Contents
 	if vertexReq.SystemInstruction == nil {
 		t.Fatalf("expected SystemInstruction, got nil")
+		return
 	}
 	if len(vertexReq.SystemInstruction.Parts) != 1 || vertexReq.SystemInstruction.Parts[0].Text != "You are helpful." {
 		t.Fatalf("unexpected SystemInstruction: %+v", vertexReq.SystemInstruction)
@@ -443,6 +447,7 @@ func TestOpenAIToVertex_DeveloperRole(t *testing.T) {
 
 	if vertexReq.SystemInstruction == nil {
 		t.Fatalf("expected SystemInstruction for developer role, got nil")
+		return
 	}
 	if vertexReq.SystemInstruction.Parts[0].Text != "Be concise." {
 		t.Fatalf("unexpected SystemInstruction text: %q", vertexReq.SystemInstruction.Parts[0].Text)
@@ -482,6 +487,7 @@ func TestOpenAIToVertex_ToolRoleMessage_JSONContent(t *testing.T) {
 	fr := vertexReq.Contents[1].Parts[0].FunctionResponse
 	if fr == nil {
 		t.Fatalf("expected FunctionResponse, got nil")
+		return
 	}
 
 	// JSON content should be parsed directly, not wrapped
@@ -526,6 +532,7 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyContent(t *testing.T) {
 	fr := vertexReq.Contents[1].Parts[0].FunctionResponse
 	if fr == nil {
 		t.Fatalf("expected FunctionResponse, got nil")
+		return
 	}
 
 	if output, ok := fr.Response["output"]; !ok || output != "" {
@@ -657,6 +664,7 @@ func TestOpenAIToVertex_SystemOnlyFallback(t *testing.T) {
 
 	if vertexReq.SystemInstruction == nil {
 		t.Fatal("expected SystemInstruction to be set")
+		return
 	}
 	if len(vertexReq.Contents) == 0 {
 		t.Fatal("expected a fallback user content when only system messages present")

@@ -43,6 +43,7 @@ func TestNewVertexTokenManager(t *testing.T) {
 	tm := NewVertexTokenManager(logger)
 	if tm == nil {
 		t.Fatal("NewVertexTokenManager returned nil")
+		return
 	}
 	defer tm.Stop()
 
