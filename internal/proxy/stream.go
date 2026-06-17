@@ -767,9 +767,11 @@ func (p *Proxy) streamToClient(
 				}
 				return writeErr
 			}
-			if flushErr := p.flushStreaming(ctx, controller, credName); isClientDisconnectError(flushErr) {
-				p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
-				p.recordAbortedRequest(credName, endpoint, modelID)
+			if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
+				if isClientDisconnectError(flushErr) {
+					p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
+					p.recordAbortedRequest(credName, endpoint, modelID)
+				}
 				if onWriteErr != nil {
 					onWriteErr()
 				}
@@ -786,16 +788,20 @@ func (p *Proxy) streamToClient(
 	return nil
 }
 
-func (p *Proxy) flushStreaming(ctx context.Context, controller *http.ResponseController, credName string) error {
+func (p *Proxy) flushStreaming(ctx context.Context, controller *http.ResponseController, credName string) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			p.logger.ErrorContext(ctx, "Flusher panic", "panic", r, "credential", credName)
+			retErr = fmt.Errorf("flusher panic: %v", r)
 		}
 	}()
 	if err := controller.Flush(); err != nil {
-		if errors.Is(err, http.ErrNotSupported) {
+		switch {
+		case isClientDisconnectError(err):
+			// Disconnects are logged once by the caller; don't double-log here.
+		case errors.Is(err, http.ErrNotSupported):
 			p.logger.ErrorContext(ctx, "Streaming not supported", "credential", credName)
-		} else {
+		default:
 			p.logger.ErrorContext(ctx, "Flusher error", "error", err, "credential", credName)
 		}
 		return err

@@ -73,10 +73,10 @@ func metricModelID(fallback string, logCtx *RequestLogContext) string {
 }
 
 func endpointFromLogContext(logCtx *RequestLogContext) string {
-	if logCtx != nil && logCtx.Request != nil && logCtx.Request.URL != nil {
-		return logCtx.Request.URL.Path
+	if logCtx == nil {
+		return ""
 	}
-	return ""
+	return endpointFromRequest(logCtx.Request)
 }
 
 func endpointFromRequest(r *http.Request) string {
