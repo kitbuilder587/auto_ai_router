@@ -467,6 +467,7 @@ func TestExtractTokenUsage(t *testing.T) {
 	usage := ExtractTokenUsage(chatBody)
 	if usage == nil {
 		t.Fatalf("expected usage for chat format")
+		return
 	}
 	if usage.PromptTokens != 5 || usage.CompletionTokens != 7 {
 		t.Fatalf("unexpected chat token counts: %+v", usage)
@@ -482,6 +483,7 @@ func TestExtractTokenUsage(t *testing.T) {
 	usage = ExtractTokenUsage(imageBody)
 	if usage == nil {
 		t.Fatalf("expected usage for image format")
+		return
 	}
 	if usage.PromptTokens != 9 || usage.CompletionTokens != 10 || usage.ImageTokens != 8 {
 		t.Fatalf("unexpected image token counts: %+v", usage)

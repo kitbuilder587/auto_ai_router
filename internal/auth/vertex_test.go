@@ -41,11 +41,11 @@ func createValidServiceAccountJSON() string {
 func TestNewVertexTokenManager(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
-	defer tm.Stop()
-
 	if tm == nil {
 		t.Fatal("NewVertexTokenManager returned nil")
 	}
+	defer tm.Stop()
+
 	if tm.tokens == nil {
 		t.Error("tokens map is nil")
 	}
