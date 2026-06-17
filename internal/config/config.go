@@ -655,13 +655,13 @@ type OTELConfig struct {
 // UnmarshalYAML implements custom unmarshaling for OTELConfig with env variable support
 func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled          string            `yaml:"enabled"`
-		Endpoint         string            `yaml:"endpoint"`
-		Protocol         string            `yaml:"protocol"`
-		Insecure         string            `yaml:"insecure"`
-		ServiceName      string            `yaml:"service_name"`
-		Headers          map[string]string `yaml:"headers,omitempty"`
-		LogsEnabled      string            `yaml:"logs_enabled"`
+		Enabled                  string            `yaml:"enabled"`
+		Endpoint                 string            `yaml:"endpoint"`
+		Protocol                 string            `yaml:"protocol"`
+		Insecure                 string            `yaml:"insecure"`
+		ServiceName              string            `yaml:"service_name"`
+		Headers                  map[string]string `yaml:"headers,omitempty"`
+		LogsEnabled              string            `yaml:"logs_enabled"`
 		TracesEnabled            string            `yaml:"traces_enabled"`
 		TraceSampleRatio         string            `yaml:"trace_sample_ratio"`
 		TrustIncomingTraceparent string            `yaml:"trust_incoming_traceparent"`
