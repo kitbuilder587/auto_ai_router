@@ -640,6 +640,16 @@ type OTELConfig struct {
 	// TraceSampleRatio is the head sampling ratio in [0.0, 1.0] (default: 1.0).
 	// The sampler is parent-based, so sampled upstream decisions are respected.
 	TraceSampleRatio float64 `yaml:"trace_sample_ratio"`
+
+	// TrustIncomingTraceparent controls whether the server adopts an incoming
+	// W3C traceparent header and parents its span under it (default: true).
+	// Enable when a trusted hop (e.g. a LiteLLM proxy with
+	// forward_traceparent_to_llm_provider) sits in front, so the router's spans
+	// nest inside that caller's trace. Disable for standalone or public-facing
+	// deployments to ignore client-supplied trace context and start a fresh root
+	// span per request. Outgoing traceparent propagation to upstreams is
+	// unaffected either way.
+	TrustIncomingTraceparent bool `yaml:"trust_incoming_traceparent"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for OTELConfig with env variable support
@@ -652,8 +662,9 @@ func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
 		ServiceName      string            `yaml:"service_name"`
 		Headers          map[string]string `yaml:"headers,omitempty"`
 		LogsEnabled      string            `yaml:"logs_enabled"`
-		TracesEnabled    string            `yaml:"traces_enabled"`
-		TraceSampleRatio string            `yaml:"trace_sample_ratio"`
+		TracesEnabled            string            `yaml:"traces_enabled"`
+		TraceSampleRatio         string            `yaml:"trace_sample_ratio"`
+		TrustIncomingTraceparent string            `yaml:"trust_incoming_traceparent"`
 	}
 
 	var temp tempConfig
@@ -676,6 +687,9 @@ func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	parseFloat := func(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
 	if o.TraceSampleRatio, err = parseField(temp.TraceSampleRatio, 1.0, parseFloat, "otel.trace_sample_ratio"); err != nil {
+		return err
+	}
+	if o.TrustIncomingTraceparent, err = parseField(temp.TrustIncomingTraceparent, true, strconv.ParseBool, "otel.trust_incoming_traceparent"); err != nil {
 		return err
 	}
 
@@ -1004,11 +1018,12 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 
 func defaultOTELConfig() OTELConfig {
 	cfg := OTELConfig{
-		Enabled:          false,
-		Insecure:         true,
-		LogsEnabled:      true,
-		TracesEnabled:    true,
-		TraceSampleRatio: 1.0,
+		Enabled:                  false,
+		Insecure:                 true,
+		LogsEnabled:              true,
+		TracesEnabled:            true,
+		TraceSampleRatio:         1.0,
+		TrustIncomingTraceparent: true,
 	}
 	cfg.applyDefaults()
 	return cfg

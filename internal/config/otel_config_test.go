@@ -44,6 +44,7 @@ func TestOTELConfig_DefaultsWhenSectionAbsent(t *testing.T) {
 	assert.True(t, cfg.OTEL.LogsEnabled)
 	assert.True(t, cfg.OTEL.TracesEnabled)
 	assert.Equal(t, 1.0, cfg.OTEL.TraceSampleRatio)
+	assert.True(t, cfg.OTEL.TrustIncomingTraceparent)
 }
 
 func TestOTELConfig_FullSection(t *testing.T) {
@@ -57,6 +58,7 @@ otel:
   logs_enabled: true
   traces_enabled: false
   trace_sample_ratio: 0.25
+  trust_incoming_traceparent: false
   headers:
     Authorization: "Bearer token123"
 `)
@@ -70,6 +72,7 @@ otel:
 	assert.True(t, cfg.OTEL.LogsEnabled)
 	assert.False(t, cfg.OTEL.TracesEnabled)
 	assert.Equal(t, 0.25, cfg.OTEL.TraceSampleRatio)
+	assert.False(t, cfg.OTEL.TrustIncomingTraceparent)
 	assert.Equal(t, "Bearer token123", cfg.OTEL.Headers["Authorization"])
 }
 

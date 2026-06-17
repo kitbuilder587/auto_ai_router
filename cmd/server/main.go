@@ -37,6 +37,7 @@ import (
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/vertex/responses"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 var (
@@ -261,7 +262,7 @@ func main() {
 	if otelSDK.TracesEnabled() {
 		// Server spans for every API request; health/readiness probes and
 		// metrics scrapes are excluded to avoid trace noise.
-		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router",
+		otelOpts := []otelhttp.Option{
 			otelhttp.WithFilter(func(r *http.Request) bool {
 				switch r.URL.Path {
 				case cfg.Monitoring.HealthCheckPath, "/health/readiness", "/metrics":
@@ -272,7 +273,16 @@ func main() {
 			otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
 			}),
-		)
+		}
+		// When the incoming traceparent is not trusted (no trusted hop such as a
+		// LiteLLM proxy in front), override the handler's propagator with a no-op
+		// extractor so client-supplied trace context is ignored and every request
+		// starts a fresh root span. Outgoing propagation to upstreams still uses
+		// the global propagator via the HTTP client transport and is unaffected.
+		if !cfg.OTEL.TrustIncomingTraceparent {
+			otelOpts = append(otelOpts, otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()))
+		}
+		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router", otelOpts...)
 	}
 
 	server := &http.Server{
