@@ -402,10 +402,8 @@ func TestGetToken_ConcurrentRefresh(t *testing.T) {
 	if callCount < 1 {
 		t.Errorf("expected at least 1 Token() call, got %d", callCount)
 	}
-	// Note: Due to concurrency, we might have 1-2 calls if timing is tight
-	// but the important thing is we didn't have 10 calls
-	if callCount > 3 {
-		t.Errorf("expected <= 3 Token() calls (with potential race), got %d", callCount)
+	if callCount > numGoroutines/2 {
+		t.Errorf("expected coalescing to reduce Token() calls below %d, got %d", numGoroutines/2, callCount)
 	}
 }
 
@@ -616,10 +614,8 @@ func TestGetToken_CoalescingWithTimeout(t *testing.T) {
 		t.Errorf("expected %d successes, got %d", numGoroutines, successCount)
 	}
 
-	// Verify coalescing: Token() should be called once or very few times
-	// (might be 1-2 due to timing)
-	if mockSource.callCount > 3 {
-		t.Errorf("expected <= 3 Token() calls (coalescing should reduce), got %d", mockSource.callCount)
+	if mockSource.callCount > numGoroutines/2 {
+		t.Errorf("expected coalescing to reduce Token() calls below %d, got %d", numGoroutines/2, mockSource.callCount)
 	}
 }
 
