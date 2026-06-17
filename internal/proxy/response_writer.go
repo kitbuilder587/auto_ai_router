@@ -11,7 +11,7 @@ import (
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string) {
 	if resp == nil {
 		return
 	}
@@ -76,6 +76,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if _, err := w.Write(responseBody); err != nil {
 		if isClientDisconnectError(err) {
 			p.logger.Debug("Client disconnected during proxy response write", "error", err)
+			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		} else {
 			p.logger.Error("Failed to write proxy response body", "error", err)
 		}
@@ -90,6 +91,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	resp *ProxyResponse,
 	clientReq *http.Request,
 	credName string,
+	modelID string,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
@@ -138,7 +140,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	if _, ok := w.(http.Flusher); ok {
-		err := p.streamToClient(w, resp.StreamBody, credName, onChunk, nil)
+		err := p.streamToClient(w, resp.StreamBody, credName, modelID, endpointFromRequest(clientReq), onChunk, nil)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
 			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
@@ -150,6 +152,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
 	if _, err := io.Copy(w, resp.StreamBody); err != nil {
+		if isClientDisconnectError(err) {
+			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
+		}
 		return buildFallbackUsage(), err
 	}
 	return buildFallbackUsage(), nil

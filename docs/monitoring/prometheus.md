@@ -18,6 +18,7 @@ Metrics are available at `/metrics`.
 | `auto_ai_router_credential_banned`         | Gauge     | Ban status per credential (1 = banned) |
 | `auto_ai_router_requests_total`            | Counter   | Total requests processed               |
 | `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution           |
+| `auto_ai_router_aborted_requests_total`    | Counter   | Client-aborted requests by credential, model, and endpoint |
 
 ## Proxy Credential Exclusion
 

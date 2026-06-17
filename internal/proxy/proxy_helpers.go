@@ -58,6 +58,34 @@ func isClientDisconnectError(err error) bool {
 		strings.Contains(msg, "connection reset by peer")
 }
 
+func (p *Proxy) recordAbortedRequest(credential, endpoint, model string) {
+	if p == nil || p.metrics == nil {
+		return
+	}
+	p.metrics.RecordAbortedRequest(credential, endpoint, model)
+}
+
+func metricModelID(fallback string, logCtx *RequestLogContext) string {
+	if logCtx != nil && logCtx.ModelID != "" {
+		return logCtx.ModelID
+	}
+	return fallback
+}
+
+func endpointFromLogContext(logCtx *RequestLogContext) string {
+	if logCtx != nil && logCtx.Request != nil && logCtx.Request.URL != nil {
+		return logCtx.Request.URL.Path
+	}
+	return ""
+}
+
+func endpointFromRequest(r *http.Request) string {
+	if r != nil && r.URL != nil {
+		return r.URL.Path
+	}
+	return ""
+}
+
 // extractErrorMessage returns the raw error response body as a string
 // The HTTP status code is captured separately in error_code
 func extractErrorMessage(body []byte) string {

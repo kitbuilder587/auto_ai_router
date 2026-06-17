@@ -5,11 +5,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,6 +44,19 @@ func (f *failAfterNBytesWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	f.totalWritten += n
 	return n, nil
+}
+
+func TestStreamToClient_RecordAbortedMetric(t *testing.T) {
+	monitoring.AbortedRequestsTotal.Reset()
+
+	prx := NewTestProxyBuilder().Build()
+	prx.metrics = monitoring.New(true)
+
+	w := newFailAfterNBytesWriter(0)
+	err := prx.streamToClient(w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", nil, nil)
+	require.Error(t, err)
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))
 }
 
 // TestHandleStreamingWithTokens_AbortLogsTokens verifies that when the client
@@ -450,7 +466,7 @@ func TestWriteProxyStreamingResponseWithTokens_Abort(t *testing.T) {
 	// Client disconnects after 10 bytes
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model")
 	assert.Error(t, err, "should return write error")
 
 	// Even on abort, estimated usage must be returned
@@ -510,7 +526,7 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 	// Client disconnects after 10 bytes (before usage chunk)
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model")
 	assert.Error(t, err, "should return write error")
 
 	// Drain must have captured the real usage chunk
@@ -562,7 +578,7 @@ func TestWriteProxyStreamingResponseWithTokens_NoUsageChunk(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model")
 	require.NoError(t, err)
 
 	// Should return estimated usage based on "Response without usage" = 22 chars → (22+3)/4 = 6

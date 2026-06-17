@@ -638,7 +638,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
 				logCtx.PromptTokensEstimate = estimatePromptTokens(proxyBody)
-				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, modelID)
 				if err != nil {
 					p.logStreamHandlerError("Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
@@ -720,7 +720,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 			}
-			p.writeProxyResponse(w, proxyResp, r)
+			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1437,6 +1437,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if _, err := p.streamResponseBody(w, bytes.NewReader(outputBody)); err != nil {
 			if isClientDisconnectError(err) {
 				p.logger.Debug("Client disconnected during response body copy", "error", err)
+				p.recordAbortedRequest(cred.Name, r.URL.Path, modelID)
 			} else {
 				p.logger.Error("Failed to copy response body", "error", err)
 			}
