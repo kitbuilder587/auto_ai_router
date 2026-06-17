@@ -138,7 +138,7 @@ func (p *Proxy) TryFallbackProxy(
 		fallbackCred, err := p.balancer.NextFallbackProxyForModel(modelID)
 		if err != nil {
 			if attempt == 0 {
-				p.logger.Debug("No fallback proxy available for retry",
+				p.logger.DebugContext(r.Context(), "No fallback proxy available for retry",
 					"original_credential", originalCredName,
 					"model", modelID,
 					"original_status", originalStatus,
@@ -149,7 +149,7 @@ func (p *Proxy) TryFallbackProxy(
 		}
 
 		if fallbackCred == nil {
-			p.logger.Warn("Balancer returned nil credential without error",
+			p.logger.WarnContext(r.Context(), "Balancer returned nil credential without error",
 				"model", modelID,
 				"original_credential", originalCredName,
 			)
@@ -158,7 +158,7 @@ func (p *Proxy) TryFallbackProxy(
 
 		if fallbackCred.Name == originalCredName {
 			if attempt == 0 {
-				p.logger.Warn("Fallback credential is the same as original, skipping retry",
+				p.logger.WarnContext(r.Context(), "Fallback credential is the same as original, skipping retry",
 					"credential", fallbackCred.Name,
 					"model", modelID,
 				)
@@ -168,14 +168,14 @@ func (p *Proxy) TryFallbackProxy(
 		}
 
 		if triedCreds[fallbackCred.Name] {
-			p.logger.Debug("All fallback proxies exhausted, stopping retry chain",
+			p.logger.DebugContext(r.Context(), "All fallback proxies exhausted, stopping retry chain",
 				"tried_credentials", formatTriedCreds(triedCreds),
 				"model", modelID,
 			)
 			break
 		}
 
-		p.logger.Info("Retrying request on fallback proxy",
+		p.logger.InfoContext(r.Context(), "Retrying request on fallback proxy",
 			"original_credential", originalCredName,
 			"fallback_credential", fallbackCred.Name,
 			"model", modelID,
@@ -198,7 +198,7 @@ func (p *Proxy) TryFallbackProxy(
 		if fwdErr != nil {
 			// Mid-chain failure — the next fallback is tried; the final outcome
 			// is logged at ERROR when the response is written to the client.
-			p.logger.Warn("Fallback proxy request failed, trying next fallback",
+			p.logger.WarnContext(r.Context(), "Fallback proxy request failed, trying next fallback",
 				"fallback_credential", fallbackCred.Name,
 				"model", modelID,
 				"error", fwdErr,
@@ -221,7 +221,7 @@ func (p *Proxy) TryFallbackProxy(
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
 
-		p.logger.Warn("Fallback credential returned retryable error, trying next fallback",
+		p.logger.WarnContext(r.Context(), "Fallback credential returned retryable error, trying next fallback",
 			"fallback_credential", fallbackCred.Name,
 			"status", proxyResp.StatusCode,
 			"model", modelID,
@@ -255,7 +255,7 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx != nil {
 			requestID = logCtx.RequestID
 		}
-		p.logUpstreamError("Fallback proxy completed with error status", proxyResp.StatusCode, fallbackCred, modelID, proxyResp.Body,
+		p.logUpstreamError(r.Context(), "Fallback proxy completed with error status", proxyResp.StatusCode, fallbackCred, modelID, proxyResp.Body,
 			"url", fallbackCred.BaseURL,
 			"streaming", proxyResp.IsStreaming,
 			"original_credential", originalCredName,
@@ -268,7 +268,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred.Name, modelID, modelID)
 		if err != nil {
-			p.logStreamHandlerError("Failed to write fallback streaming proxy response", err,
+			p.logStreamHandlerError(r.Context(), "Failed to write fallback streaming proxy response", err,
 				"fallback_credential", fallbackCred.Name,
 				"model", modelID,
 			)
@@ -302,7 +302,7 @@ func (p *Proxy) writeFallbackResponse(
 						p.rateLimiter.ConsumeModelTokens(fallbackCred.Name, modelID, totalTokens)
 					}
 				}
-				p.logger.Debug("Fallback proxy streaming token usage recorded",
+				p.logger.DebugContext(r.Context(), "Fallback proxy streaming token usage recorded",
 					"fallback_credential", fallbackCred.Name,
 					"model", modelID,
 					"prompt_tokens", streamUsage.PromptTokens,
@@ -324,7 +324,7 @@ func (p *Proxy) writeFallbackResponse(
 			if modelID != "" {
 				p.rateLimiter.ConsumeModelTokens(fallbackCred.Name, modelID, tokens)
 			}
-			p.logger.Debug("Fallback proxy token usage recorded",
+			p.logger.DebugContext(r.Context(), "Fallback proxy token usage recorded",
 				"fallback_credential", fallbackCred.Name,
 				"model", modelID,
 				"tokens", tokens,
@@ -332,7 +332,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	}
 
-	p.logger.Debug("Fallback proxy retry completed",
+	p.logger.DebugContext(r.Context(), "Fallback proxy retry completed",
 		"fallback_credential", fallbackCred.Name,
 		"duration", time.Since(start),
 	)
@@ -348,7 +348,7 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx.Status == "success" {
 			logCtx.RequestCompleted = true
 			p.setSessionBinding(logCtx.SessionID, modelID, fallbackCred.Name)
-			p.logger.Debug("Session-sticky routing: updated session after failover",
+			p.logger.DebugContext(r.Context(), "Session-sticky routing: updated session after failover",
 				"session_id", logCtx.SessionID,
 				"old_credential", originalCredName,
 				"new_credential", fallbackCred.Name,
@@ -358,7 +358,7 @@ func (p *Proxy) writeFallbackResponse(
 		logCtx.Logged = true
 
 		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-			p.logger.Warn("Failed to queue fallback spend log",
+			p.logger.WarnContext(r.Context(), "Failed to queue fallback spend log",
 				"error", err,
 				"request_id", logCtx.RequestID,
 				"fallback_credential", fallbackCred.Name,

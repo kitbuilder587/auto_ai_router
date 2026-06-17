@@ -12,6 +12,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -69,19 +70,24 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		idleConnTimeout = defaultIdleConnTimeout
 	}
 
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+		TLSHandshakeTimeout:   timeout,                   // Timeout for TLS handshake phase
+		ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
+		DisableKeepAlives:     false,
+	}
+
 	return &http.Client{
 		// No global timeout — streaming responses can run for minutes.
 		// ResponseHeaderTimeout on Transport protects the connect + header phase.
 		Timeout: 0,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-			TLSHandshakeTimeout:   timeout,                   // Timeout for TLS handshake phase
-			ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
-			MaxIdleConns:          maxIdleConns,
-			MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-			IdleConnTimeout:       idleConnTimeout,
-			DisableKeepAlives:     false,
-		},
+		// otelhttp creates client spans and injects traceparent into outgoing
+		// requests (providers and chained routers). It uses the global
+		// TracerProvider, which is a no-op unless OTEL is enabled in config.
+		Transport: otelhttp.NewTransport(transport),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

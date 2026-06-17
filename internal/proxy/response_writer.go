@@ -21,7 +21,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	acceptedEncodings := ParseAcceptEncoding(acceptEncoding)
 	targetEncoding := SelectBestEncoding(acceptedEncodings)
 
-	p.logger.Debug("Proxy response encoding decision",
+	p.logger.DebugContext(clientReq.Context(), "Proxy response encoding decision",
 		"accept_encoding_header", acceptEncoding,
 		"target_encoding", targetEncoding,
 		"body_size", len(resp.Body),
@@ -34,13 +34,13 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if targetEncoding != "identity" && len(resp.Body) > 0 {
 		compressedBody, usedEncoding, err := CompressBody(resp.Body, targetEncoding)
 		if err != nil {
-			p.logger.Warn("Failed to compress response body",
+			p.logger.WarnContext(clientReq.Context(), "Failed to compress response body",
 				"encoding", targetEncoding,
 				"error", err,
 			)
 			// Continue with uncompressed body on error
 		} else {
-			p.logger.Debug("Response body compressed",
+			p.logger.DebugContext(clientReq.Context(), "Response body compressed",
 				"encoding", usedEncoding,
 				"original_size", len(resp.Body),
 				"compressed_size", len(compressedBody),
@@ -75,10 +75,10 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(responseBody); err != nil {
 		if isClientDisconnectError(err) {
-			p.logger.Debug("Client disconnected during proxy response write", "error", err)
+			p.logger.DebugContext(clientReq.Context(), "Client disconnected during proxy response write", "error", err)
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		} else {
-			p.logger.Error("Failed to write proxy response body", "error", err)
+			p.logger.ErrorContext(clientReq.Context(), "Failed to write proxy response body", "error", err)
 		}
 	}
 }
@@ -99,7 +99,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 	defer func() {
 		if closeErr := resp.StreamBody.Close(); closeErr != nil {
-			p.logger.Warn("Failed to close proxy streaming response body", "error", closeErr)
+			p.logger.WarnContext(clientReq.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 		}
 	}()
 
@@ -141,13 +141,29 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	if _, ok := w.(http.Flusher); ok {
-		err := p.streamToClient(w, resp.StreamBody, credName, modelID, endpointFromRequest(clientReq), onChunk, nil)
+		err := p.streamToClient(
+			clientReq.Context(),
+			w,
+			resp.StreamBody,
+			credName,
+			modelID,
+			endpointFromRequest(clientReq),
+			onChunk,
+			nil,
+		)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
 			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
 			defer cancel()
-			p.drainUpstream(drainCtx, resp.StreamBody, onChunk, credName)
+
+			p.drainUpstream(
+				drainCtx,
+				resp.StreamBody,
+				onChunk,
+				credName,
+			)
 		}
+
 		return buildFallbackUsage(), err
 	}
 

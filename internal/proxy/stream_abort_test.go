@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,7 +54,7 @@ func TestStreamToClient_RecordAbortedMetric(t *testing.T) {
 	prx.metrics = monitoring.New(true)
 
 	w := newFailAfterNBytesWriter(0)
-	err := prx.streamToClient(w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", nil, nil)
+	err := prx.streamToClient(context.Background(), w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", nil, nil)
 	require.Error(t, err)
 
 	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))

@@ -83,6 +83,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"write_timeout", cfg.Server.WriteTimeout.String(),
 		"idle_timeout", cfg.Server.IdleTimeout.String(),
 		"logging_level", cfg.Server.LoggingLevel,
+		"stdout_logs_enabled", cfg.Server.StdoutLogsEnabled,
 		"master_key", "***REDACTED***",
 		"default_models_rpm", rpmToString(cfg.Server.DefaultModelsRPM),
 		"max_idle_conns", cfg.Server.MaxIdleConns,
@@ -184,6 +185,21 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
+	}
+
+	// OTEL config
+	if cfg.OTEL.Enabled {
+		logger.Info("otel (ENABLED)",
+			"endpoint", cfg.OTEL.Endpoint,
+			"protocol", cfg.OTEL.Protocol,
+			"insecure", cfg.OTEL.Insecure,
+			"service_name", cfg.OTEL.ServiceName,
+			"logs_enabled", cfg.OTEL.LogsEnabled,
+			"traces_enabled", cfg.OTEL.TracesEnabled,
+			"trace_sample_ratio", cfg.OTEL.TraceSampleRatio,
+		)
+	} else {
+		logger.Info("otel", "status", "DISABLED")
 	}
 
 	logger.Info("=== Configuration Ready ===")

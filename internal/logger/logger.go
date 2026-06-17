@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,81 @@ func New(level string) *slog.Logger {
 		},
 	}
 	return slog.New(handler)
+}
+
+// NewMulti creates a slog.Logger that fans out every record to stdout (pretty
+// colored output, when stdout is true) and to the given extra handlers
+// (e.g. an OTLP/OTEL bridge handler). The configured level is applied to all
+// destinations. Nil extra handlers are skipped.
+// With stdout=false and no extra handlers the logger discards everything.
+func NewMulti(level string, stdout bool, extra ...slog.Handler) *slog.Logger {
+	slogLevel := parseLevel(level)
+
+	handlers := make([]slog.Handler, 0, len(extra)+1)
+	if stdout {
+		handlers = append(handlers, &PrettyHandler{
+			opts: &slog.HandlerOptions{
+				Level: slogLevel,
+			},
+		})
+	}
+	for _, h := range extra {
+		if h != nil {
+			handlers = append(handlers, h)
+		}
+	}
+
+	if len(handlers) == 0 {
+		return slog.New(slog.DiscardHandler)
+	}
+	// Always go through MultiHandler so the level filter applies even to
+	// destinations that accept all levels (like the OTEL bridge).
+	return slog.New(&MultiHandler{handlers: handlers, level: slogLevel})
+}
+
+// MultiHandler fans out log records to multiple slog handlers.
+// The level filter is applied centrally so destinations that accept all
+// levels (like the OTEL bridge) still respect the configured logging_level.
+type MultiHandler struct {
+	handlers []slog.Handler
+	level    slog.Level
+}
+
+// Enabled reports whether at least one destination handles the level.
+func (m *MultiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= m.level
+}
+
+// Handle dispatches the record to every destination handler.
+// Errors are joined so one failing destination doesn't hide the others.
+func (m *MultiHandler) Handle(ctx context.Context, record slog.Record) error {
+	var errs []error
+	for _, h := range m.handlers {
+		if h.Enabled(ctx, record.Level) {
+			if err := h.Handle(ctx, record.Clone()); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// WithAttrs returns a new MultiHandler with attributes applied to all destinations.
+func (m *MultiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	handlers := make([]slog.Handler, len(m.handlers))
+	for i, h := range m.handlers {
+		handlers[i] = h.WithAttrs(attrs)
+	}
+	return &MultiHandler{handlers: handlers, level: m.level}
+}
+
+// WithGroup returns a new MultiHandler with the group applied to all destinations.
+func (m *MultiHandler) WithGroup(name string) slog.Handler {
+	handlers := make([]slog.Handler, len(m.handlers))
+	for i, h := range m.handlers {
+		handlers[i] = h.WithGroup(name)
+	}
+	return &MultiHandler{handlers: handlers, level: m.level}
 }
 
 // NewJSON creates a new slog.Logger with JSON output
