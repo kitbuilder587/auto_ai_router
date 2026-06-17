@@ -24,7 +24,7 @@ import (
 // line contains everything needed for debugging:
 // error_code, credential (+provider), model, response_body.
 // extra accepts additional context pairs (request_id, url, error, ...).
-func (p *Proxy) logUpstreamError(msg string, errorCode int, cred *config.CredentialConfig, modelID string, responseBody []byte, extra ...any) {
+func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int, cred *config.CredentialConfig, modelID string, responseBody []byte, extra ...any) {
 	args := make([]any, 0, 10+len(extra))
 	args = append(args, "error_code", errorCode)
 	if cred != nil {
@@ -35,24 +35,24 @@ func (p *Proxy) logUpstreamError(msg string, errorCode int, cred *config.Credent
 		args = append(args, "response_body", logger.TruncateLongFields(string(responseBody), 500))
 	}
 	args = append(args, extra...)
-	p.logger.Error(msg, args...)
+	p.logger.ErrorContext(ctx, msg, args...)
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are
 // expected during normal operation and go to DEBUG; real failures go to ERROR.
-func (p *Proxy) logStreamHandlerError(msg string, err error, extra ...any) {
+func (p *Proxy) logStreamHandlerError(ctx context.Context, msg string, err error, extra ...any) {
 	args := append([]any{"error", err}, extra...)
 	if isClientDisconnectError(err) {
-		p.logger.Debug(msg+" (client disconnected)", args...)
+		p.logger.DebugContext(ctx, msg+" (client disconnected)", args...)
 		return
 	}
-	p.logger.Error(msg, args...)
+	p.logger.ErrorContext(ctx, msg, args...)
 }
 
 // logTransformedResponse logs a transformed response at debug level
-func (p *Proxy) logTransformedResponse(credName, providerName string, body []byte) {
-	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
-		p.logger.Debug("Transformed response to OpenAI format",
+func (p *Proxy) logTransformedResponse(ctx context.Context, credName, providerName string, body []byte) {
+	if p.logger.Enabled(ctx, slog.LevelDebug) {
+		p.logger.DebugContext(ctx, "Transformed response to OpenAI format",
 			"credential", credName,
 			"provider", providerName,
 			"body", logger.TruncateLongFields(string(body), 500),
@@ -63,7 +63,7 @@ func (p *Proxy) logTransformedResponse(credName, providerName string, body []byt
 // ==================== LiteLLM DB Integration ====================
 // handleLiteLLMAuthError handles LiteLLM authentication errors
 // Returns true if error was handled and response was written
-func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token string) bool {
+func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWriter, err error, token string) bool {
 	// Map error types to HTTP status and message
 	errorMap := map[error]struct {
 		status  int
@@ -85,7 +85,7 @@ func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token s
 	// budget), not service failures, so they are logged at WARN.
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
-			p.logger.Warn(info.logMsg,
+			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))
 			switch info.status {
@@ -101,7 +101,7 @@ func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token s
 	}
 
 	// Unknown error — unexpected server-side failure, keep at ERROR
-	p.logger.Error("Auth error",
+	p.logger.ErrorContext(ctx, "Auth error",
 		"error_code", http.StatusInternalServerError,
 		"error", err,
 		"token_prefix", security.MaskAPIKey(token))
@@ -175,8 +175,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	// Try real model name first (from models[].model), then alias name.
 	var cost float64
 	var tokenCosts *converter.TokenCosts
+	logSpendCtx := logCtx.Context()
 	if p.priceRegistry == nil {
-		p.logger.Warn("Price registry not available, using 0 cost for spend log")
+		p.logger.WarnContext(logSpendCtx, "Price registry not available, using 0 cost for spend log")
 	} else {
 		priceModelID := logCtx.ModelID
 		if logCtx.RealModelID != "" && logCtx.RealModelID != logCtx.ModelID {
@@ -187,14 +188,14 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			modelPrice = p.priceRegistry.GetPrice(logCtx.ModelID)
 		}
 		if modelPrice == nil {
-			p.logger.Warn("Model price not found in registry, using 0 cost",
+			p.logger.WarnContext(logSpendCtx, "Model price not found in registry, using 0 cost",
 				"model_name", priceModelID)
 		} else {
 			tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
 			if tokenCosts != nil {
 				cost = tokenCosts.TotalCost
 			}
-			p.logger.Debug("Calculated cost for model",
+			p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 				"model_name", priceModelID,
 				"cost", cost,
 				"prompt_tokens", logCtx.TokenUsage.PromptTokens,

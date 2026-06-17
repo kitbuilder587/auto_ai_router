@@ -60,7 +60,7 @@ func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceR
 func (p *Proxy) fetchUpstreamTrace(ctx context.Context, cred *config.CredentialConfig, depth int) (*httputil.ProxyTraceResponse, error) {
 	var result httputil.ProxyTraceResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, fmt.Sprintf("/trace?depth=%d", depth), p.logger, &result); err != nil {
-		p.logger.Debug("upstream /trace unavailable, falling back to /health", "credential", cred.Name, "error", err)
+		p.logger.DebugContext(ctx, "upstream /trace unavailable, falling back to /health", "credential", cred.Name, "error", err)
 		return p.fetchUpstreamHealth(ctx, cred)
 	}
 	return &result, nil
@@ -97,7 +97,7 @@ func (p *Proxy) HandleTrace(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(trace); err != nil {
-		p.logger.Error("Failed to encode trace response", "error", err)
+		p.logger.ErrorContext(r.Context(), "Failed to encode trace response", "error", err)
 	}
 }
 

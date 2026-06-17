@@ -29,12 +29,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
+	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
 	// Register native Responses API converters for Vertex AI, Anthropic, and Bedrock.
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/anthropic/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/bedrock/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/vertex/responses"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 var (
@@ -53,7 +55,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(cfg.Server.LoggingLevel)
+	// ==================== Initialize OpenTelemetry ====================
+	// Must happen before logger creation so OTLP log export covers all startup logs.
+	// Export diagnostics go to a stdout-only logger: routing them through the
+	// OTEL pipeline would generate a record per export batch and loop forever.
+	otelDiagLog := logger.New(cfg.Server.LoggingLevel)
+	otelSDK, otelErr := telemetry.Setup(context.Background(), &cfg.OTEL, Version, Commit, otelDiagLog)
+
+	stdoutLogs := cfg.Server.StdoutLogsEnabled
+	if !stdoutLogs && otelSDK.LogHandler() == nil {
+		// Refusing to run a server with no log destination at all:
+		// stdout was disabled but OTEL log export is not active either.
+		slog.Warn("stdout_logs_enabled=false but OTEL log export is not active, keeping stdout logs")
+		stdoutLogs = true
+	}
+	log := logger.NewMulti(cfg.Server.LoggingLevel, stdoutLogs, otelSDK.LogHandler())
+	if otelErr != nil {
+		// OTEL is observability, not core functionality — degrade instead of failing startup.
+		log.Error("Failed to initialize OpenTelemetry, continuing without it", "error", otelErr)
+	} else if otelSDK != nil {
+		log.Info("OpenTelemetry initialized",
+			"endpoint", cfg.OTEL.Endpoint,
+			"protocol", cfg.OTEL.Protocol,
+			"logs_enabled", cfg.OTEL.LogsEnabled,
+			"traces_enabled", cfg.OTEL.TracesEnabled,
+		)
+	}
 
 	config.PrintConfig(log, cfg)
 
@@ -230,9 +257,27 @@ func main() {
 		log.Info("Prometheus metrics enabled", "path", "/metrics")
 	}
 
+	var rootHandler http.Handler = mux
+	if otelSDK.TracesEnabled() {
+		// Server spans for every API request; health/readiness probes and
+		// metrics scrapes are excluded to avoid trace noise.
+		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router",
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				switch r.URL.Path {
+				case cfg.Monitoring.HealthCheckPath, "/health/readiness", "/metrics":
+					return false
+				}
+				return true
+			}),
+			otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
+				return r.Method + " " + r.URL.Path
+			}),
+		)
+	}
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      mux,
+		Handler:      rootHandler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
@@ -315,6 +360,12 @@ func main() {
 	}
 
 	log.Info("Server shutdown complete")
+
+	// Flush pending OTEL spans and log records last so the shutdown logs above
+	// are exported too.
+	if err := otelSDK.Shutdown(context.Background()); err != nil {
+		slog.Error("OpenTelemetry shutdown error", "error", err)
+	}
 }
 
 // ==================== Helper Functions ====================

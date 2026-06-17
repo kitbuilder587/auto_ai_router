@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +27,13 @@ const (
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
+
+// LogValue implements slog.LogValuer so structured log backends (e.g. the
+// OTEL bridge) serialize ProviderType as a plain string instead of an
+// unhandled custom type.
+func (p ProviderType) LogValue() slog.Value {
+	return slog.StringValue(string(p))
+}
 
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
@@ -61,6 +69,7 @@ type Config struct {
 	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 	Redis       RedisConfig        `yaml:"redis,omitempty"`
+	OTEL        OTELConfig         `yaml:"otel,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -86,6 +95,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		ModelAlias     map[string]string      `yaml:"model_alias,omitempty"`
 		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
 		Redis          RedisConfig            `yaml:"redis,omitempty"`
+		OTEL           OTELConfig             `yaml:"otel,omitempty"`
 		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -103,6 +113,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.ModelAlias = raw.ModelAlias
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
+	c.OTEL = raw.OTEL
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -334,6 +345,7 @@ type ServerConfig struct {
 	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
 	RequestTimeout             time.Duration `yaml:"request_timeout"`
 	LoggingLevel               string        `yaml:"logging_level"`
+	StdoutLogsEnabled          bool          `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
 	MasterKey                  string        `yaml:"master_key"`
 	DefaultModelsRPM           int           `yaml:"default_models_rpm"`
 	MaxIdleConns               int           `yaml:"max_idle_conns"`
@@ -375,6 +387,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
 		RequestTimeout             string `yaml:"request_timeout"`
 		LoggingLevel               string `yaml:"logging_level"`
+		StdoutLogsEnabled          string `yaml:"stdout_logs_enabled"`
 		MasterKey                  string `yaml:"master_key"`
 		DefaultModelsRPM           string `yaml:"default_models_rpm"`
 		MaxIdleConns               string `yaml:"max_idle_conns"`
@@ -449,6 +462,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
+		return err
+	}
+	if s.StdoutLogsEnabled, err = parseField(temp.StdoutLogsEnabled, true, strconv.ParseBool, "stdout_logs_enabled"); err != nil {
 		return err
 	}
 
@@ -587,6 +603,112 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+}
+
+// OTELConfig holds OpenTelemetry export configuration for logs and traces.
+// When Enabled=false (default) no OTEL SDK components are initialized and the
+// router behaves exactly as before (pretty stdout logs, no tracing).
+type OTELConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Endpoint is the OTLP collector endpoint.
+	// For grpc protocol: "host:port" (e.g. "localhost:4317").
+	// For http protocol: "host:port" or full URL (e.g. "http://localhost:4318").
+	Endpoint string `yaml:"endpoint"`
+
+	// Protocol selects the OTLP transport: "grpc" (default) or "http" (http/protobuf).
+	Protocol string `yaml:"protocol"`
+
+	// Insecure disables TLS for the exporter connection (default: true,
+	// matching the typical in-cluster collector setup).
+	Insecure bool `yaml:"insecure"`
+
+	// ServiceName is reported as service.name resource attribute (default: "auto-ai-router").
+	ServiceName string `yaml:"service_name"`
+
+	// Headers are added to every OTLP export request (e.g. auth tokens).
+	// Values support os.environ/VAR_NAME resolution.
+	Headers map[string]string `yaml:"headers,omitempty"`
+
+	// LogsEnabled ships slog records via OTLP in addition to stdout (default: true).
+	LogsEnabled bool `yaml:"logs_enabled"`
+
+	// TracesEnabled creates server/client spans and propagates trace context
+	// to upstream providers and chained routers (default: true).
+	TracesEnabled bool `yaml:"traces_enabled"`
+
+	// TraceSampleRatio is the head sampling ratio in [0.0, 1.0] (default: 1.0).
+	// The sampler is parent-based, so sampled upstream decisions are respected.
+	TraceSampleRatio float64 `yaml:"trace_sample_ratio"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for OTELConfig with env variable support
+func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled          string            `yaml:"enabled"`
+		Endpoint         string            `yaml:"endpoint"`
+		Protocol         string            `yaml:"protocol"`
+		Insecure         string            `yaml:"insecure"`
+		ServiceName      string            `yaml:"service_name"`
+		Headers          map[string]string `yaml:"headers,omitempty"`
+		LogsEnabled      string            `yaml:"logs_enabled"`
+		TracesEnabled    string            `yaml:"traces_enabled"`
+		TraceSampleRatio string            `yaml:"trace_sample_ratio"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	var err error
+	if o.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "otel.enabled"); err != nil {
+		return err
+	}
+	if o.Insecure, err = parseField(temp.Insecure, true, strconv.ParseBool, "otel.insecure"); err != nil {
+		return err
+	}
+	if o.LogsEnabled, err = parseField(temp.LogsEnabled, true, strconv.ParseBool, "otel.logs_enabled"); err != nil {
+		return err
+	}
+	if o.TracesEnabled, err = parseField(temp.TracesEnabled, true, strconv.ParseBool, "otel.traces_enabled"); err != nil {
+		return err
+	}
+	parseFloat := func(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
+	if o.TraceSampleRatio, err = parseField(temp.TraceSampleRatio, 1.0, parseFloat, "otel.trace_sample_ratio"); err != nil {
+		return err
+	}
+
+	o.Endpoint = resolveEnvString(temp.Endpoint)
+	o.Protocol = strings.ToLower(resolveEnvString(temp.Protocol))
+	o.ServiceName = resolveEnvString(temp.ServiceName)
+
+	if len(temp.Headers) > 0 {
+		o.Headers = make(map[string]string, len(temp.Headers))
+		for k, v := range temp.Headers {
+			o.Headers[k] = resolveEnvString(v)
+		}
+	}
+
+	o.applyDefaults()
+	return nil
+}
+
+// applyDefaults fills in default values for empty OTEL config fields.
+func (o *OTELConfig) applyDefaults() {
+	if o.Protocol == "" {
+		o.Protocol = "grpc"
+	}
+	if o.ServiceName == "" {
+		o.ServiceName = "auto-ai-router"
+	}
+	if o.Endpoint == "" {
+		if o.Protocol == "grpc" {
+			o.Endpoint = "localhost:4317"
+		} else {
+			o.Endpoint = "localhost:4318"
+		}
+	}
 }
 
 // UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
@@ -764,6 +886,10 @@ func Load(path string) (*Config, error) {
 		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
 	}
 
+	if !hasMappingKey(&root, "otel") {
+		cfg.OTEL = defaultOTELConfig()
+	}
+
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
 	cfg.Monitoring.HealthCheckPath = "/health"
@@ -874,6 +1000,18 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		LogBatchSize:          100,
 		LogFlushInterval:      5 * time.Second,
 	}
+}
+
+func defaultOTELConfig() OTELConfig {
+	cfg := OTELConfig{
+		Enabled:          false,
+		Insecure:         true,
+		LogsEnabled:      true,
+		TracesEnabled:    true,
+		TraceSampleRatio: 1.0,
+	}
+	cfg.applyDefaults()
+	return cfg
 }
 
 func hasMappingKey(node *yaml.Node, key string) bool {
@@ -1064,6 +1202,19 @@ func (c *Config) Validate() error {
 	if c.Redis.Enabled {
 		if len(c.Redis.InitAddresses) == 0 {
 			return fmt.Errorf("redis.addresses is required when redis is enabled")
+		}
+	}
+
+	// Validate OTEL config
+	if c.OTEL.Enabled {
+		if c.OTEL.Protocol != "grpc" && c.OTEL.Protocol != "http" {
+			return fmt.Errorf("otel.protocol must be 'grpc' or 'http', got: %s", c.OTEL.Protocol)
+		}
+		if c.OTEL.Endpoint == "" {
+			return fmt.Errorf("otel.endpoint is required when otel is enabled")
+		}
+		if c.OTEL.TraceSampleRatio < 0 || c.OTEL.TraceSampleRatio > 1 {
+			return fmt.Errorf("otel.trace_sample_ratio must be in [0.0, 1.0], got: %f", c.OTEL.TraceSampleRatio)
 		}
 	}
 

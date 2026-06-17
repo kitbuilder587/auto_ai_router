@@ -152,7 +152,7 @@ func (p *Proxy) HandleCompactResponse(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
-		p.logger.Error("compact: encode error", "error", err)
+		p.logger.ErrorContext(r.Context(), "compact: encode error", "error", err)
 	}
 }
 
