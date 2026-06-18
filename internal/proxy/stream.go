@@ -422,7 +422,7 @@ func (p *Proxy) handleTransformedStreaming(
 		}
 	}()
 
-	if err := p.streamToClient(respCtx(resp), w, pr, credName, nil, func() { _ = pr.Close() }); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, pr, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleTransformedStreaming", err,
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
@@ -498,7 +498,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		rememberLastStreamDataChunk(&lastChunk, chunk)
 	}
 
-	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, onChunk, nil); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
@@ -731,6 +731,8 @@ func (p *Proxy) streamToClient(
 	w http.ResponseWriter,
 	reader io.Reader,
 	credName string,
+	modelID string,
+	endpoint string,
 	onChunk func([]byte),
 	onWriteErr func(),
 ) error {
@@ -756,6 +758,7 @@ func (p *Proxy) streamToClient(
 			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
 				if isClientDisconnectError(writeErr) {
 					p.logger.DebugContext(ctx, "Client disconnected during streaming", "error", writeErr, "credential", credName)
+					p.recordAbortedRequest(credName, endpoint, modelID)
 				} else {
 					p.logger.ErrorContext(ctx, "Failed to write streaming chunk", "error", writeErr, "credential", credName)
 				}
@@ -764,7 +767,16 @@ func (p *Proxy) streamToClient(
 				}
 				return writeErr
 			}
-			p.flushStreaming(ctx, controller, credName)
+			if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
+				if isClientDisconnectError(flushErr) {
+					p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
+					p.recordAbortedRequest(credName, endpoint, modelID)
+				}
+				if onWriteErr != nil {
+					onWriteErr()
+				}
+				return flushErr
+			}
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -776,19 +788,25 @@ func (p *Proxy) streamToClient(
 	return nil
 }
 
-func (p *Proxy) flushStreaming(ctx context.Context, controller *http.ResponseController, credName string) {
+func (p *Proxy) flushStreaming(ctx context.Context, controller *http.ResponseController, credName string) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			p.logger.ErrorContext(ctx, "Flusher panic", "panic", r, "credential", credName)
+			retErr = fmt.Errorf("flusher panic: %v", r)
 		}
 	}()
 	if err := controller.Flush(); err != nil {
-		if errors.Is(err, http.ErrNotSupported) {
+		switch {
+		case isClientDisconnectError(err):
+			// Disconnects are logged once by the caller; don't double-log here.
+		case errors.Is(err, http.ErrNotSupported):
 			p.logger.ErrorContext(ctx, "Streaming not supported", "credential", credName)
-		} else {
+		default:
 			p.logger.ErrorContext(ctx, "Flusher error", "error", err, "credential", credName)
 		}
+		return err
 	}
+	return nil
 }
 
 // handleResponsesAPIStreaming handles streaming for Responses API requests.
@@ -994,7 +1012,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		}
 	}
 
-	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, onChunk, nil); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {

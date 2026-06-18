@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean
+.PHONY: build run clean test fmt vet lint install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -6,6 +6,8 @@ BUILD_DIR=.
 CMD_DIR=./cmd/server
 GO=go
 GOFLAGS=-v
+GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION_NO_V=$(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 LDFLAGS=-ldflags="-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)"
@@ -36,6 +38,7 @@ help:
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
+	@echo "  install-lint         - Install pinned golangci-lint"
 	@echo "  format               - Format code and run pre-commit checks"
 	@echo "  install-deps         - Install/update dependencies"
 	@echo "  mod-tidy             - Tidy go.mod"
@@ -145,10 +148,25 @@ vet:
 
 ## lint: Run golangci-lint
 lint:
-	@echo "Running golangci-lint..."
-	@export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && which golangci-lint > /dev/null || (echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@echo "Running golangci-lint $(GOLANGCI_LINT_VERSION)..."
+	@export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH; \
+	if ! command -v golangci-lint > /dev/null; then \
+		echo "golangci-lint not installed. Run: make install-lint"; \
+		exit 1; \
+	fi; \
+	actual_version=$$(golangci-lint version | awk '{print $$4}'); \
+	if [ "$$actual_version" != "$(GOLANGCI_LINT_VERSION_NO_V)" ]; then \
+		echo "golangci-lint $$actual_version installed, expected $(GOLANGCI_LINT_VERSION_NO_V). Run: make install-lint"; \
+		exit 1; \
+	fi
 	export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && golangci-lint run ./...
 	@echo "Lint complete"
+
+## install-lint: Install pinned golangci-lint
+install-lint:
+	@echo "Installing golangci-lint $(GOLANGCI_LINT_VERSION)..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@echo "golangci-lint $(GOLANGCI_LINT_VERSION) installed"
 
 ## format: Format code and run pre-commit checks
 format:

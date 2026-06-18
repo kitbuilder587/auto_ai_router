@@ -467,6 +467,7 @@ func TestExtractTokenUsage(t *testing.T) {
 	usage := ExtractTokenUsage(chatBody)
 	if usage == nil {
 		t.Fatalf("expected usage for chat format")
+		return
 	}
 	if usage.PromptTokens != 5 || usage.CompletionTokens != 7 {
 		t.Fatalf("unexpected chat token counts: %+v", usage)
@@ -482,6 +483,7 @@ func TestExtractTokenUsage(t *testing.T) {
 	usage = ExtractTokenUsage(imageBody)
 	if usage == nil {
 		t.Fatalf("expected usage for image format")
+		return
 	}
 	if usage.PromptTokens != 9 || usage.CompletionTokens != 10 || usage.ImageTokens != 8 {
 		t.Fatalf("unexpected image token counts: %+v", usage)
@@ -508,6 +510,7 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API format")
+		return
 	}
 	if usage.PromptTokens != 150 || usage.CompletionTokens != 80 {
 		t.Fatalf("unexpected token counts: prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
@@ -533,6 +536,7 @@ func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API streaming event format")
+		return
 	}
 	if usage.PromptTokens != 16 {
 		t.Fatalf("expected prompt_tokens=16, got %d", usage.PromptTokens)

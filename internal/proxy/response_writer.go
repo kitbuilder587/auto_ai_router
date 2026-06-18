@@ -11,7 +11,7 @@ import (
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string) {
 	if resp == nil {
 		return
 	}
@@ -76,6 +76,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if _, err := w.Write(responseBody); err != nil {
 		if isClientDisconnectError(err) {
 			p.logger.DebugContext(clientReq.Context(), "Client disconnected during proxy response write", "error", err)
+			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		} else {
 			p.logger.ErrorContext(clientReq.Context(), "Failed to write proxy response body", "error", err)
 		}
@@ -91,6 +92,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	clientReq *http.Request,
 	credName string,
 	modelID string,
+	tokenizerModelID string,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
@@ -120,7 +122,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	completion := newCompletionTokenAccumulator(modelID)
+	completion := newCompletionTokenAccumulator(tokenizerModelID)
 	onChunk := func(chunk []byte) {
 		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
 			lastUsage = usage
@@ -144,10 +146,11 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			w,
 			resp.StreamBody,
 			credName,
+			modelID,
+			endpointFromRequest(clientReq),
 			onChunk,
 			nil,
 		)
-
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
 			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
@@ -166,6 +169,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
 	if _, err := io.Copy(w, resp.StreamBody); err != nil {
+		if isClientDisconnectError(err) {
+			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
+		}
 		return buildFallbackUsage(), err
 	}
 	return buildFallbackUsage(), nil
