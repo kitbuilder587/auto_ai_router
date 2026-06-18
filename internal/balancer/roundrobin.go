@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -16,6 +17,7 @@ import (
 type ModelChecker interface {
 	HasModel(credentialName, modelID string) bool
 	GetCredentialsForModel(modelID string) []string
+	GetModelWeightForCredential(modelID, credentialName string) int
 	IsEnabled() bool
 }
 
@@ -29,8 +31,7 @@ type RoundRobin struct {
 	credentials     []config.CredentialConfig
 	staticCreds     []config.CredentialConfig // immutable snapshot of YAML-defined credentials
 	credentialIndex map[string]int            // O(1) lookup by name instead of O(n) search
-	current         int
-	typeCounters    map[config.ProviderType]int // per-type counters to prevent cross-type interference
+	swrr            map[schedKey]*swrrState   // smooth weighted round-robin state per selection cycle
 	fail2ban        *fail2ban.Fail2Ban
 	rateLimiter     *ratelimit.RPMLimiter
 	modelChecker    ModelChecker
@@ -61,8 +62,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		credentials:     credentials,
 		staticCreds:     append([]config.CredentialConfig(nil), credentials...),
 		credentialIndex: credentialIndex,
-		current:         0,
-		typeCounters:    make(map[config.ProviderType]int),
+		swrr:            make(map[schedKey]*swrrState),
 		fail2ban:        f2b,
 		rateLimiter:     rl,
 		modelChecker:    nil,
@@ -182,12 +182,11 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 // nextExcluding is the core credential selection logic with optional exclude set.
 // Excluded credentials are skipped entirely and don't count as candidates.
 //
-// The algorithm runs in two phases:
+// The algorithm runs in three phases:
 //  1. Build a candidate list via structural filters (exclude, type/fallback, model availability).
 //     These are time-stable properties — they don't change between requests.
-//  2. Select the next candidate using an independent per-type counter when all candidates
-//     share the same ProviderType. This prevents high-frequency traffic of one provider type
-//     (e.g. OpenAI) from interfering with the round-robin cycling of another (e.g. Vertex AI).
+//  2. Drop banned candidates, then pick by smooth weighted round-robin per selection cycle.
+//  3. Commit the highest-priority candidate that passes its rate limits.
 func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, exclude map[string]bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -242,66 +241,46 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	// Phase 2: Determine start offset using a per-type counter when all candidates
-	// share the same ProviderType; otherwise fall back to the global counter.
-	sameType := true
-	candidateType := candidates[0].cred.Type
-	for _, c := range candidates[1:] {
-		if c.cred.Type != candidateType {
-			sameType = false
-			break
-		}
-	}
+	// Phase 2: Smooth weighted round-robin over candidates that are not banned.
+	// Banned credentials are dropped here (not in Phase 1) so they don't accumulate
+	// weight while down — otherwise a high-weight provider would burst on recovery.
+	// With equal weights this degenerates to the historical round-robin sequence.
+	state := r.swrrStateFor(r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType))
 
-	startOffset := 0
-	if sameType {
-		typeStart := r.typeCounters[candidateType]
-		for i, c := range candidates {
-			if c.absIdx >= typeStart {
-				startOffset = i
-				break
-			}
-		}
-		// If typeStart is past all candidates, wrap to beginning (startOffset stays 0).
-	} else {
-		globalStart := r.current
-		for i, c := range candidates {
-			if c.absIdx >= globalStart {
-				startOffset = i
-				break
-			}
-		}
-		// If globalStart is past all candidates, wrap to beginning.
-	}
-
-	// Phase 3: Try candidates in round-robin order, applying ban and rate-limit checks.
-	rateLimitHit := false
-	for i := 0; i < len(candidates); i++ {
-		ci := (startOffset + i) % len(candidates)
-		c := candidates[ci]
-
+	liveWeights := make(map[string]int, len(candidates))
+	live := make([]candidateEntry, 0, len(candidates))
+	for _, c := range candidates {
 		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
 			continue
 		}
+		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
+		live = append(live, c)
+	}
+	if len(live) == 0 {
+		return nil, ErrNoCredentialsAvailable
+	}
 
-		// Atomically check all rate limits (credential RPM/TPM + model RPM/TPM)
-		// and record usage only if all checks pass. This prevents TOCTOU races
-		// where separate check+record calls could allow exceeding limits.
+	total := state.advance(liveWeights)
+
+	// Order by running counter (desc); ties keep the structural candidate order so that
+	// equal weights reproduce the historical ascending round-robin sequence.
+	sort.SliceStable(live, func(i, j int) bool {
+		return state.currentOf(live[i].cred.Name) > state.currentOf(live[j].cred.Name)
+	})
+
+	// Phase 3: Commit the highest-priority candidate that passes its rate limits.
+	// TryAllowAll atomically checks credential + model RPM/TPM and records usage only on
+	// success, preventing TOCTOU races. A rate-limited candidate keeps its accumulated
+	// weight but is skipped; the RPM limit itself caps how often it can be selected.
+	rateLimitHit := false
+	for _, c := range live {
 		if !r.rateLimiter.TryAllowAll(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
 			rateLimitHit = true
 			continue
 		}
-
-		// Advance the appropriate counter past the selected credential.
-		nextIdx := (c.absIdx + 1) % len(r.credentials)
-		if sameType {
-			r.typeCounters[candidateType] = nextIdx
-		} else {
-			r.current = nextIdx
-		}
-
+		state.commit(c.cred.Name, total)
 		return c.cred, nil
 	}
 
@@ -413,7 +392,8 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 
 	r.credentials = newCreds
 	r.credentialIndex = newIndex
-	// typeCounters / current may reference stale indices; they self-correct on the next request.
+	// Drop SWRR state; it is rebuilt lazily and self-reconciles the live set per request.
+	r.swrr = make(map[schedKey]*swrrState)
 }
 
 // validateFallbackConfiguration validates fallback credential configuration

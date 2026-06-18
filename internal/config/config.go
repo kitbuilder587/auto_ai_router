@@ -50,6 +50,7 @@ type ModelRPMConfig struct {
 	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
 	RPM        int    `yaml:"rpm"`
 	TPM        int    `yaml:"tpm"`
+	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
 	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
@@ -490,6 +491,7 @@ type CredentialConfig struct {
 	BaseURL string       `yaml:"base_url"`
 	RPM     int          `yaml:"rpm"`
 	TPM     int          `yaml:"tpm"`
+	Weight  int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -514,6 +516,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		BaseURL         string           `yaml:"base_url"`
 		RPM             string           `yaml:"rpm"`
 		TPM             string           `yaml:"tpm"`
+		Weight          string           `yaml:"weight"`
 		ProjectID       string           `yaml:"project_id,omitempty"`
 		Location        string           `yaml:"location,omitempty"`
 		CredentialsFile string           `yaml:"credentials_file,omitempty"`
@@ -545,6 +548,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.TPM, err = parseField(temp.TPM, -1, strconv.Atoi, "tpm for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 
@@ -1195,6 +1201,16 @@ func (c *Config) Validate() error {
 		// TPM: 0 or -1 means unlimited, positive means limited
 		if cred.TPM < -1 {
 			return fmt.Errorf("credential %s: invalid tpm: %d (must be -1 or 0 for unlimited, or positive number)", cred.Name, cred.TPM)
+		}
+		// Weight: 0 means default (1), positive means a higher share. Negative is invalid.
+		if cred.Weight < 0 {
+			return fmt.Errorf("credential %s: invalid weight: %d (must be 0 for default or positive number)", cred.Name, cred.Weight)
+		}
+	}
+
+	for _, model := range c.Models {
+		if model.Weight < 0 {
+			return fmt.Errorf("model %s: invalid weight: %d (must be 0 for default or positive number)", model.Name, model.Weight)
 		}
 	}
 

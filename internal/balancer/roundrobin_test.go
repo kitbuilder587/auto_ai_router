@@ -14,8 +14,9 @@ import (
 // MockModelChecker implements ModelChecker interface for testing
 type MockModelChecker struct {
 	enabled            bool
-	credentialModels   map[string][]string // credential -> models
-	modelToCredentials map[string][]string // model -> credentials
+	credentialModels   map[string][]string       // credential -> models
+	modelToCredentials map[string][]string       // model -> credentials
+	modelWeights       map[string]map[string]int // model -> credential -> weight
 }
 
 func NewMockModelChecker(enabled bool) *MockModelChecker {
@@ -23,6 +24,7 @@ func NewMockModelChecker(enabled bool) *MockModelChecker {
 		enabled:            enabled,
 		credentialModels:   make(map[string][]string),
 		modelToCredentials: make(map[string][]string),
+		modelWeights:       make(map[string]map[string]int),
 	}
 }
 
@@ -51,6 +53,20 @@ func (m *MockModelChecker) GetCredentialsForModel(modelID string) []string {
 	return m.modelToCredentials[modelID]
 }
 
+func (m *MockModelChecker) GetModelWeightForCredential(modelID, credentialName string) int {
+	if creds, ok := m.modelWeights[modelID]; ok {
+		return creds[credentialName]
+	}
+	return 0
+}
+
+func (m *MockModelChecker) SetModelWeight(modelID, credentialName string, weight int) {
+	if m.modelWeights[modelID] == nil {
+		m.modelWeights[modelID] = make(map[string]int)
+	}
+	m.modelWeights[modelID][credentialName] = weight
+}
+
 func (m *MockModelChecker) IsEnabled() bool {
 	return m.enabled
 }
@@ -73,7 +89,7 @@ func TestNew(t *testing.T) {
 
 	assert.NotNil(t, bal)
 	assert.Len(t, bal.credentials, 2)
-	assert.Equal(t, 0, bal.current)
+	assert.Empty(t, bal.swrr)
 }
 
 func TestNextForModel_WithModelFilter(t *testing.T) {

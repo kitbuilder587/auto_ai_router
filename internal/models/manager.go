@@ -125,6 +125,7 @@ type ModelsResponse struct {
 type ModelLimits struct {
 	RPM        int
 	TPM        int
+	Weight     int    // Weighted round-robin weight (0 = unset, falls back to credential default / 1)
 	Credential string // If set, limits apply only to this credential
 }
 
@@ -192,6 +193,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 			m.modelLimits[staticModel.Name] = append(m.modelLimits[staticModel.Name], ModelLimits{
 				RPM:        staticModel.RPM,
 				TPM:        staticModel.TPM,
+				Weight:     staticModel.Weight,
 				Credential: staticModel.Credential,
 			})
 			// Register real model name mapping if Model field differs from Name.
@@ -550,6 +552,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		newLimits[dm.Name] = append(newLimits[dm.Name], ModelLimits{
 			RPM:        dm.RPM,
 			TPM:        dm.TPM,
+			Weight:     dm.Weight,
 			Credential: dm.Credential,
 		})
 		// Only apply DB real name if not already defined in static config.
@@ -1018,6 +1021,32 @@ func (m *Manager) GetModelRPMForCredential(modelID, credentialName string) int {
 	}
 
 	return m.defaultModelsRPM
+}
+
+// findWeightLimit searches for the weighted round-robin weight with optional credential
+// filtering. Returns the raw value (0 = unset); the balancer falls back to the credential
+// default / 1 when the resolved weight is not positive.
+func findWeightLimit(limits []ModelLimits, credentialName string) (int, bool) {
+	identity := func(v int) int { return v }
+	return findLimit(limits, credentialName, func(ml *ModelLimits) int { return ml.Weight }, identity)
+}
+
+// GetModelWeightForCredential returns the configured weight for a (model, credential) pair.
+// Returns 0 when no model-level weight is configured.
+func (m *Manager) GetModelWeightForCredential(modelID, credentialName string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	limits, ok := m.modelLimits[modelID]
+	if !ok {
+		return 0
+	}
+
+	if weight, found := findWeightLimit(limits, credentialName); found {
+		return weight
+	}
+
+	return 0
 }
 
 // findTPMLimit searches for TPM limit with optional credential filtering

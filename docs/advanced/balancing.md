@@ -18,6 +18,58 @@ Request 5 → vertex_cred_1  (cycle repeats)
 
 Credentials that are rate-limited or banned are skipped automatically.
 
+## Weighted Round-Robin
+
+By default every credential has a `weight` of `1`, so traffic is split evenly. Set a higher
+`weight` to send a proportionally larger share of requests to a credential. The router uses
+smooth weighted round-robin (the nginx algorithm): requests are handed out proportionally to
+the weights but spread evenly over time, not in bursts.
+
+With weights `100` and `1`, roughly 100 out of every 101 requests go to the first credential
+and the rest are sprinkled across the others:
+
+```
+weights: ours=100, azure=1
+... → ours (×100, interleaved) ... → azure (×1) ...  (per 101-request cycle)
+```
+
+Weight can be set per credential (the default for all of its models) and overridden per model,
+exactly like `rpm`. Resolution order is: model-level `weight` → credential `weight` → `1`.
+
+```yaml
+credentials:
+  - name: "ours"
+    type: "openai"
+    api_key: "os.environ/OUR_KEY"
+    base_url: "https://our-endpoint.example.com"
+    rpm: 5000
+    weight: 100            # default weight for every model on this credential
+
+  - name: "azure"
+    type: "openai"
+    api_key: "os.environ/AZURE_KEY"
+    base_url: "https://azure.example.com"
+    rpm: 5000
+    # weight omitted → 1
+
+models:
+  - name: "gpt-5"
+    credential: ours
+    weight: 200            # per-model override: push gpt-5 harder to "ours"
+  - name: "gpt-5"
+    credential: azure
+```
+
+Notes:
+
+- **Weight does not bypass limits.** When the high-weight credential hits its `rpm`/`tpm` or
+  is banned by fail2ban, it is skipped and the request goes to the next live
+  credential — the same failover behavior as plain round-robin.
+- **No burst after recovery.** A banned credential does not accumulate weight while it is down,
+  so it resumes its normal share on recovery instead of receiving a backlog of requests.
+- **Equal weights behave exactly like plain round-robin.** Models where all candidates share the
+  same weight (e.g. a model you give no special weight to) keep the default even rotation.
+
 ## Multiple Credentials per Model
 
 Configure multiple credentials for the same model to multiply your effective rate limits:

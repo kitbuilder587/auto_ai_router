@@ -986,3 +986,19 @@ func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
 		<-done
 	}
 }
+
+func TestManager_GetModelWeightForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4o", Credential: "ours", Weight: 200},
+		{Name: "gpt-4o", Credential: "azure"}, // no weight → unset
+		{Name: "shared", Weight: 7},           // global entry (no credential)
+	}
+	m := New(logger, 50, staticModels)
+
+	assert.Equal(t, 200, m.GetModelWeightForCredential("gpt-4o", "ours"), "credential-specific override")
+	assert.Equal(t, 0, m.GetModelWeightForCredential("gpt-4o", "azure"), "unset model weight is 0")
+	assert.Equal(t, 7, m.GetModelWeightForCredential("shared", "anyone"), "falls back to global entry")
+	assert.Equal(t, 0, m.GetModelWeightForCredential("unknown-model", "ours"), "untracked model is 0")
+}

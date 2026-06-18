@@ -1476,3 +1476,93 @@ func TestResolveEnvString(t *testing.T) {
 		})
 	}
 }
+
+func TestConfig_Validate_InvalidWeight(t *testing.T) {
+	tests := []struct {
+		name        string
+		credWeight  int
+		modelWeight int
+		wantErr     bool
+	}{
+		{"default weights", 0, 0, false},
+		{"positive credential weight", 100, 0, false},
+		{"positive model weight", 1, 200, false},
+		{"negative credential weight", -1, 0, true},
+		{"negative model weight", 1, -5, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, Weight: tt.credWeight},
+				},
+				Models: []ModelRPMConfig{
+					{Name: "gpt-4o", Credential: "test", Weight: tt.modelWeight},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCredentialConfig_UnmarshalYAML_Weight(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "test-key"
+  request_timeout: 30s
+
+credentials:
+  - name: "ours"
+    type: "openai"
+    api_key: "key"
+    base_url: "http://ours.com"
+    rpm: 100
+    weight: 100
+    models:
+      - name: "gpt-4o"
+        weight: 200
+  - name: "azure"
+    type: "openai"
+    api_key: "key2"
+    base_url: "http://azure.com"
+    rpm: 100
+
+monitoring:
+  prometheus_enabled: false
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Credentials, 2)
+	assert.Equal(t, 100, cfg.Credentials[0].Weight, "credential weight parsed")
+	assert.Equal(t, 0, cfg.Credentials[1].Weight, "omitted credential weight defaults to 0 (=1)")
+
+	var found bool
+	for _, m := range cfg.Models {
+		if m.Name == "gpt-4o" && m.Credential == "ours" {
+			assert.Equal(t, 200, m.Weight, "per-model weight parsed and unpacked")
+			found = true
+		}
+	}
+	assert.True(t, found, "model gpt-4o should be unpacked into cfg.Models")
+}
