@@ -466,12 +466,21 @@ func initializeModelManager(
 				rpm := modelManager.GetModelRPMForCredential(model.ID, cred.Name)
 				tpm := modelManager.GetModelTPMForCredential(model.ID, cred.Name)
 				rateLimiter.AddModelWithTPM(cred.Name, model.ID, rpm, tpm)
+				weight := balancer.EffectiveWeight(modelManager.GetModelWeightForCredential(model.ID, cred.Name), cred.Weight)
 				log.Debug("Initialized model rate limiters",
 					"credential", cred.Name,
 					"model", model.ID,
 					"rpm", rpm,
 					"tpm", tpm,
+					"weight", weight,
 				)
+				if weight != 1 {
+					log.Info("Weighted routing configured",
+						"credential", cred.Name,
+						"model", model.ID,
+						"weight", weight,
+					)
+				}
 			}
 		}
 	}

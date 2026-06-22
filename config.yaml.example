@@ -51,6 +51,7 @@ credentials:
     base_url: "https://api.openai.com"
     rpm: 100
     tpm: 50000
+    weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md
 
   - name: "vertex_ai"
     type: "vertex-ai"
@@ -82,6 +83,7 @@ models:
     credential: openai_main
     rpm: 100
     tpm: 50000
+    weight: 200  # Optional: per-model weight override (falls back to credential weight, then 1)
   - name: "gemini-2.5-pro"
     credential: vertex_ai
     rpm: 100
