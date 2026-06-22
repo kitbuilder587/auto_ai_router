@@ -241,23 +241,32 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	// Phase 2: Smooth weighted round-robin over candidates that are not banned.
-	// Banned credentials are dropped here (not in Phase 1) so they don't accumulate
-	// weight while down — otherwise a high-weight provider would burst on recovery.
+	// Phase 2: Smooth weighted round-robin over candidates that are available now.
+	// Banned/rate-limited credentials are dropped here (not in Phase 1) so they don't
+	// accumulate weight while down — otherwise a high-weight provider would burst on recovery.
 	// With equal weights this degenerates to the historical round-robin sequence.
-	state := r.swrrStateFor(r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType))
+	state := r.swrrStateFor(r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude)))
 
 	liveWeights := make(map[string]int, len(candidates))
 	live := make([]candidateEntry, 0, len(candidates))
+	rateLimitHit := false
 	for _, c := range candidates {
 		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			continue
+		}
+		if !r.canPassRateLimits(c.cred.Name, modelID) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
+			rateLimitHit = true
 			continue
 		}
 		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
 		live = append(live, c)
 	}
 	if len(live) == 0 {
+		if rateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
 		return nil, ErrNoCredentialsAvailable
 	}
 
@@ -271,9 +280,7 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 
 	// Phase 3: Commit the highest-priority candidate that passes its rate limits.
 	// TryAllowAll atomically checks credential + model RPM/TPM and records usage only on
-	// success, preventing TOCTOU races. A rate-limited candidate keeps its accumulated
-	// weight but is skipped; the RPM limit itself caps how often it can be selected.
-	rateLimitHit := false
+	// success, preventing TOCTOU races after the non-recording precheck above.
 	for _, c := range live {
 		if !r.rateLimiter.TryAllowAll(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
@@ -291,6 +298,26 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 	}
 	// All candidates are banned (or none remain after ban + rate-limit filtering).
 	return nil, ErrNoCredentialsAvailable
+}
+
+func (r *RoundRobin) canPassRateLimits(credentialName, modelID string) bool {
+	if !r.rateLimiter.CanAllow(credentialName) || !r.rateLimiter.AllowTokens(credentialName) {
+		return false
+	}
+	if modelID == "" {
+		return true
+	}
+	return r.rateLimiter.CanAllowModel(credentialName, modelID) &&
+		r.rateLimiter.AllowModelTokens(credentialName, modelID)
+}
+
+func hasActiveExclusion(exclude map[string]bool) bool {
+	for _, excluded := range exclude {
+		if excluded {
+			return true
+		}
+	}
+	return false
 }
 
 // NextForModelExcluding returns the next available non-fallback credential that supports
@@ -392,8 +419,6 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 
 	r.credentials = newCreds
 	r.credentialIndex = newIndex
-	// Drop SWRR state; it is rebuilt lazily and self-reconciles the live set per request.
-	r.swrr = make(map[schedKey]*swrrState)
 }
 
 // validateFallbackConfiguration validates fallback credential configuration

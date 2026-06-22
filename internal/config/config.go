@@ -61,6 +61,53 @@ type ModelRPMConfig struct {
 	PassthroughResponses *bool `yaml:"passthrough_responses,omitempty"`
 }
 
+// UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
+func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Name                 string `yaml:"name"`
+		Model                string `yaml:"model,omitempty"`
+		RPM                  string `yaml:"rpm"`
+		TPM                  string `yaml:"tpm"`
+		Weight               string `yaml:"weight"`
+		Credential           string `yaml:"credential,omitempty"`
+		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	m.Name = resolveEnvString(temp.Name)
+	m.Model = resolveEnvString(temp.Model)
+	m.Credential = resolveEnvString(temp.Credential)
+	m.PassthroughResponses = nil
+
+	var err error
+	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+	if m.TPM, err = parseField(temp.TPM, 0, strconv.Atoi, "tpm for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+	if m.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+
+	if temp.PassthroughResponses != "" {
+		resolved := resolveEnvString(temp.PassthroughResponses)
+		if resolved != "" {
+			passthroughResponses, err := strconv.ParseBool(resolved)
+			if err != nil {
+				return fmt.Errorf("invalid passthrough_responses for model '%s': %w", m.Name, err)
+			}
+			m.PassthroughResponses = &passthroughResponses
+		}
+	}
+
+	return nil
+}
+
 type Config struct {
 	Server      ServerConfig       `yaml:"server"`
 	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban,omitempty"`

@@ -1002,3 +1002,24 @@ func TestManager_GetModelWeightForCredential(t *testing.T) {
 	assert.Equal(t, 7, m.GetModelWeightForCredential("shared", "anyone"), "falls back to global entry")
 	assert.Equal(t, 0, m.GetModelWeightForCredential("unknown-model", "ours"), "untracked model is 0")
 }
+
+func TestManager_GetModelWeightForCredential_DBSpecificUnsetFallsBackToStaticGlobal(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "shared", Weight: 7},
+	}
+	m := New(logger, 50, staticModels)
+
+	staticCreds := []config.CredentialConfig{{Name: "yaml-cred"}}
+	dbCreds := []config.CredentialConfig{{Name: "db-cred"}}
+	allCreds := append(append([]config.CredentialConfig(nil), staticCreds...), dbCreds...)
+	dbModels := []config.ModelRPMConfig{
+		{Name: "shared", Credential: "db-cred"},
+	}
+
+	m.UpdateDBModels(dbModels, staticCreds, allCreds)
+
+	assert.Equal(t, 7, m.GetModelWeightForCredential("shared", "db-cred"),
+		"DB credential-specific unset weight must not block the global YAML weight")
+}

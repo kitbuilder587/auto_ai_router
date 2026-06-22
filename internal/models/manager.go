@@ -1023,12 +1023,33 @@ func (m *Manager) GetModelRPMForCredential(modelID, credentialName string) int {
 	return m.defaultModelsRPM
 }
 
-// findWeightLimit searches for the weighted round-robin weight with optional credential
-// filtering. Returns the raw value (0 = unset); the balancer falls back to the credential
-// default / 1 when the resolved weight is not positive.
+// findWeightLimit searches for a configured weighted round-robin weight with optional
+// credential filtering. Weight 0 means unset, so it must not block fallback to a global
+// model weight.
 func findWeightLimit(limits []ModelLimits, credentialName string) (int, bool) {
-	identity := func(v int) int { return v }
-	return findLimit(limits, credentialName, func(ml *ModelLimits) int { return ml.Weight }, identity)
+	if credentialName != "" {
+		for i := range limits {
+			if limits[i].Credential == credentialName && limits[i].Weight > 0 {
+				return limits[i].Weight, true
+			}
+		}
+	}
+
+	for i := range limits {
+		if limits[i].Credential == "" && limits[i].Weight > 0 {
+			return limits[i].Weight, true
+		}
+	}
+
+	if credentialName == "" {
+		for i := range limits {
+			if limits[i].Weight > 0 {
+				return limits[i].Weight, true
+			}
+		}
+	}
+
+	return 0, false
 }
 
 // GetModelWeightForCredential returns the configured weight for a (model, credential) pair.

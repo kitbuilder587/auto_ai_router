@@ -456,7 +456,7 @@ func initializeModelManager(
 				rpm := modelManager.GetModelRPMForCredential(model.ID, cred.Name)
 				tpm := modelManager.GetModelTPMForCredential(model.ID, cred.Name)
 				rateLimiter.AddModelWithTPM(cred.Name, model.ID, rpm, tpm)
-				weight := effectiveWeight(modelManager.GetModelWeightForCredential(model.ID, cred.Name), cred.Weight)
+				weight := balancer.EffectiveWeight(modelManager.GetModelWeightForCredential(model.ID, cred.Name), cred.Weight)
 				log.Debug("Initialized model rate limiters",
 					"credential", cred.Name,
 					"model", model.ID,
@@ -477,18 +477,6 @@ func initializeModelManager(
 
 	bal.SetModelChecker(modelManager)
 	return modelManager
-}
-
-// effectiveWeight resolves the weighted round-robin weight for logging, mirroring the
-// balancer: model-level weight, then credential default, then 1.
-func effectiveWeight(modelWeight, credWeight int) int {
-	if modelWeight > 0 {
-		return modelWeight
-	}
-	if credWeight > 0 {
-		return credWeight
-	}
-	return 1
 }
 
 // startDBModelTableSyncLoop starts a background goroutine that periodically reloads

@@ -221,6 +221,53 @@ func TestWeighted_RPMSkipFallsThrough(t *testing.T) {
 	assert.Equal(t, 47, counts["azure"], "overflow falls through to the next live provider")
 }
 
+func TestWeighted_ExcludingDoesNotPrunePrimaryCycle(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "k1", BaseURL: "http://1", RPM: -1},
+		{Name: "cred2", APIKey: "k2", BaseURL: "http://2", RPM: -1},
+		{Name: "cred3", APIKey: "k3", BaseURL: "http://3", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	_, err := bal.NextForModel("")
+	require.NoError(t, err)
+
+	primary := bal.swrr[schedKey{}]
+	require.NotNil(t, primary)
+	require.Contains(t, primary.nodes, "cred2")
+
+	_, err = bal.NextForModelExcluding("", map[string]bool{"cred2": true})
+	require.NoError(t, err)
+
+	assert.Contains(t, primary.nodes, "cred2", "retry exclusion must not prune the primary SWRR cycle")
+	assert.Len(t, primary.nodes, 3, "primary SWRR cycle should still track all primary credentials")
+}
+
+func TestWeighted_NoBurstAfterRPMRecovery(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "heavy", APIKey: "k1", BaseURL: "http://1", RPM: 100, Weight: 10},
+		{Name: "light", APIKey: "k2", BaseURL: "http://2", RPM: -1, Weight: 1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	rl.SetCredentialCurrentUsage("heavy", 100, 0)
+
+	during := tally(drawN(t, bal, "", 30))
+	assert.Equal(t, 30, during["light"])
+	assert.Zero(t, during["heavy"])
+
+	rl.SetCredentialCurrentUsage("heavy", 0, 0)
+
+	after := drawN(t, bal, "", 11)
+	assert.GreaterOrEqual(t, tally(after)["light"], 1, "heavy burst after RPM recovery: %v", after)
+}
+
 // A banned high-weight provider must not accumulate weight while down, otherwise it would
 // burst (serve a long uninterrupted run) the moment it recovers.
 func TestWeighted_NoBurstAfterUnban(t *testing.T) {

@@ -14,6 +14,7 @@ type schedKey struct {
 	fallbackOnly bool
 	proxyOnly    bool
 	reqType      config.ProviderType
+	excluding    bool
 }
 
 // swrrState is the SWRR scheduler for one schedKey. Nodes are keyed by credential name so
@@ -68,12 +69,12 @@ func (s *swrrState) currentOf(name string) int {
 // filtering is active; otherwise every model shares one candidate set, so they must share
 // one cycle too — keeping the key out avoids unbounded map growth from arbitrary model
 // names. Must be called with r.mu held.
-func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType) schedKey {
+func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, excluding bool) schedKey {
 	model := modelID
 	if model == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
 		model = ""
 	}
-	return schedKey{model: model, fallbackOnly: allowOnlyFallback, proxyOnly: allowOnlyProxy, reqType: requiredType}
+	return schedKey{model: model, fallbackOnly: allowOnlyFallback, proxyOnly: allowOnlyProxy, reqType: requiredType, excluding: excluding}
 }
 
 // swrrStateFor returns (creating if needed) the SWRR scheduler for a selection cycle.
@@ -87,16 +88,24 @@ func (r *RoundRobin) swrrStateFor(key schedKey) *swrrState {
 	return st
 }
 
+// EffectiveWeight resolves the weighted round-robin fallback chain: model-level override,
+// then credential default, then 1.
+func EffectiveWeight(modelWeight, credWeight int) int {
+	if modelWeight > 0 {
+		return modelWeight
+	}
+	if credWeight > 0 {
+		return credWeight
+	}
+	return 1
+}
+
 // effectiveWeight resolves the weight for a (credential, model) pair, mirroring how RPM is
 // resolved: model-level override first, then the credential default, then 1.
 func (r *RoundRobin) effectiveWeight(cred *config.CredentialConfig, modelID string) int {
+	modelWeight := 0
 	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-		if w := r.modelChecker.GetModelWeightForCredential(modelID, cred.Name); w > 0 {
-			return w
-		}
+		modelWeight = r.modelChecker.GetModelWeightForCredential(modelID, cred.Name)
 	}
-	if cred.Weight > 0 {
-		return cred.Weight
-	}
-	return 1
+	return EffectiveWeight(modelWeight, cred.Weight)
 }

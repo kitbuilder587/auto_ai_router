@@ -1519,6 +1519,8 @@ func TestConfig_Validate_InvalidWeight(t *testing.T) {
 }
 
 func TestCredentialConfig_UnmarshalYAML_Weight(t *testing.T) {
+	t.Setenv("TEST_MODEL_WEIGHT", "300")
+
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
@@ -1539,6 +1541,8 @@ credentials:
     models:
       - name: "gpt-4o"
         weight: 200
+      - name: "gpt-4o-mini"
+        weight: os.environ/TEST_MODEL_WEIGHT
   - name: "azure"
     type: "openai"
     api_key: "key2"
@@ -1558,11 +1562,17 @@ monitoring:
 	assert.Equal(t, 0, cfg.Credentials[1].Weight, "omitted credential weight defaults to 0 (=1)")
 
 	var found bool
+	var foundEnvWeight bool
 	for _, m := range cfg.Models {
 		if m.Name == "gpt-4o" && m.Credential == "ours" {
 			assert.Equal(t, 200, m.Weight, "per-model weight parsed and unpacked")
 			found = true
 		}
+		if m.Name == "gpt-4o-mini" && m.Credential == "ours" {
+			assert.Equal(t, 300, m.Weight, "per-model weight parsed from env and unpacked")
+			foundEnvWeight = true
+		}
 	}
 	assert.True(t, found, "model gpt-4o should be unpacked into cfg.Models")
+	assert.True(t, foundEnvWeight, "model gpt-4o-mini should be unpacked into cfg.Models")
 }

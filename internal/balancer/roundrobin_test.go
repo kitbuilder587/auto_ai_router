@@ -1352,3 +1352,30 @@ func TestUpdateDBCredentials(t *testing.T) {
 	assert.True(t, bal.rateLimiter.AllowTokens("db-1"), "TPM=0 should be treated as unlimited")
 	assert.True(t, bal.rateLimiter.AllowTokens("db-2"))
 }
+
+func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	staticCreds := []config.CredentialConfig{
+		{Name: "yaml-1", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1, Weight: 2},
+		{Name: "yaml-2", APIKey: "key2", BaseURL: "http://test2.com", RPM: -1, Weight: 1},
+	}
+	bal := New(staticCreds, f2b, rl)
+
+	_, err := bal.NextForModel("")
+	require.NoError(t, err)
+
+	state := bal.swrr[schedKey{}]
+	require.NotNil(t, state)
+	beforeYAML1 := state.currentOf("yaml-1")
+	beforeYAML2 := state.currentOf("yaml-2")
+
+	bal.UpdateDBCredentials([]config.CredentialConfig{
+		{Name: "db-1", APIKey: "dbkey1", BaseURL: "http://db1.com", RPM: -1},
+	})
+
+	assert.Same(t, state, bal.swrr[schedKey{}], "DB sync should not reset existing SWRR cycles")
+	assert.Equal(t, beforeYAML1, state.currentOf("yaml-1"))
+	assert.Equal(t, beforeYAML2, state.currentOf("yaml-2"))
+}
