@@ -80,6 +80,7 @@ func main() {
 			"protocol", cfg.OTEL.Protocol,
 			"logs_enabled", cfg.OTEL.LogsEnabled,
 			"traces_enabled", cfg.OTEL.TracesEnabled,
+			"metrics_enabled", otelSDK.MetricsEnabled(),
 		)
 	}
 
@@ -147,7 +148,10 @@ func main() {
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
-	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
+	// Record metrics whenever any sink consumes them — the pull /metrics
+	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
+	// endpoint and the push pipeline are wired up separately below.
+	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
 
 	// ==================== Initialize Model Pricing ====================
 	if cfg.Server.ModelPricesLink != "" {
@@ -782,7 +786,7 @@ func startMetricsUpdater(
 	wg *sync.WaitGroup,
 	updateMutex *sync.Mutex,
 ) {
-	if !cfg.Monitoring.PrometheusEnabled {
+	if !cfg.MetricsCollectionEnabled() {
 		return
 	}
 

@@ -658,7 +658,7 @@ type LiteLLMDBConfig struct {
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
 }
 
-// OTELConfig holds OpenTelemetry export configuration for logs and traces.
+// OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
 // When Enabled=false (default) no OTEL SDK components are initialized and the
 // router behaves exactly as before (pretty stdout logs, no tracing).
 type OTELConfig struct {
@@ -690,6 +690,12 @@ type OTELConfig struct {
 	// to upstream providers and chained routers (default: true).
 	TracesEnabled bool `yaml:"traces_enabled"`
 
+	// MetricExportInterval is the period between OTLP metric pushes (default: 60s).
+	// OTLP metric export is driven by monitoring.prometheus_enabled (the metrics
+	// master switch) — when OTEL is enabled and metrics are being collected, the
+	// Prometheus registry is bridged to the collector and pushed on this interval.
+	MetricExportInterval time.Duration `yaml:"metric_export_interval"`
+
 	// TraceSampleRatio is the head sampling ratio in [0.0, 1.0] (default: 1.0).
 	// The sampler is parent-based, so sampled upstream decisions are respected.
 	TraceSampleRatio float64 `yaml:"trace_sample_ratio"`
@@ -716,6 +722,7 @@ func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
 		Headers                  map[string]string `yaml:"headers,omitempty"`
 		LogsEnabled              string            `yaml:"logs_enabled"`
 		TracesEnabled            string            `yaml:"traces_enabled"`
+		MetricExportInterval     string            `yaml:"metric_export_interval"`
 		TraceSampleRatio         string            `yaml:"trace_sample_ratio"`
 		TrustIncomingTraceparent string            `yaml:"trust_incoming_traceparent"`
 	}
@@ -736,6 +743,9 @@ func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if o.TracesEnabled, err = parseField(temp.TracesEnabled, true, strconv.ParseBool, "otel.traces_enabled"); err != nil {
+		return err
+	}
+	if o.MetricExportInterval, err = parseField(temp.MetricExportInterval, 60*time.Second, time.ParseDuration, "otel.metric_export_interval"); err != nil {
 		return err
 	}
 	parseFloat := func(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
@@ -1069,12 +1079,22 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 	}
 }
 
+// MetricsCollectionEnabled reports whether request/token metrics should be
+// recorded into the Prometheus registry. Collection is decoupled from how the
+// metrics leave the process: it is needed both for the pull-based /metrics
+// endpoint (monitoring.prometheus_enabled) and for OTLP push (otel.enabled),
+// which bridges the same registry. Either sink alone is enough to require it.
+func (c *Config) MetricsCollectionEnabled() bool {
+	return c.Monitoring.PrometheusEnabled || c.OTEL.Enabled
+}
+
 func defaultOTELConfig() OTELConfig {
 	cfg := OTELConfig{
 		Enabled:                  false,
 		Insecure:                 true,
 		LogsEnabled:              true,
 		TracesEnabled:            true,
+		MetricExportInterval:     60 * time.Second,
 		TraceSampleRatio:         1.0,
 		TrustIncomingTraceparent: true,
 	}
