@@ -240,3 +240,9 @@ func (b *localBackend) setCurrentUsage(_ context.Context, key string, currentRPM
 		c.tokens = make([]tokenUsage, 0)
 	}
 }
+
+func (b *localBackend) deleteKey(_ context.Context, key string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.counters, key)
+}

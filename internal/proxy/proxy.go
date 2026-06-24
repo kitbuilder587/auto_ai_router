@@ -148,6 +148,10 @@ type Proxy struct {
 }
 
 func New(cfg *Config) *Proxy {
+	if cfg.Balancer != nil && cfg.ModelManager != nil {
+		cfg.Balancer.SetModelChecker(cfg.ModelManager)
+	}
+
 	// Create HTTP client using centralized factory with request-specific timeout
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
 	httpClientCfg.Timeout = cfg.RequestTimeout

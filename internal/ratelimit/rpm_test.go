@@ -38,6 +38,21 @@ func TestAddModel(t *testing.T) {
 	assert.True(t, rl.AllowModel("cred1", "gpt-4o-mini"))
 }
 
+func TestRemoveModel(t *testing.T) {
+	rl := New()
+
+	rl.AddModel("cred1", "gpt-4", 2)
+	assert.True(t, rl.AllowModel("cred1", "gpt-4"))
+	assert.Equal(t, 1, rl.GetCurrentModelRPM("cred1", "gpt-4"))
+
+	rl.RemoveModel("cred1", "gpt-4")
+
+	assert.Equal(t, -1, rl.GetModelLimitRPM("cred1", "gpt-4"))
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4"))
+	assert.Empty(t, rl.GetAllModelPairs())
+	assert.True(t, rl.AllowModel("cred1", "gpt-4"), "removed models are no longer model-rate-limited")
+}
+
 func TestAllow_UnderLimit(t *testing.T) {
 	rl := New()
 	rl.AddCredential("cred1", 5)
