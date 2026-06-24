@@ -1023,3 +1023,90 @@ func TestManager_GetModelWeightForCredential_DBSpecificUnsetFallsBackToStaticGlo
 	assert.Equal(t, 7, m.GetModelWeightForCredential("shared", "db-cred"),
 		"DB credential-specific unset weight must not block the global YAML weight")
 }
+
+func TestReplaceModelsForCredential_RemovesStaleModelsAndWeights(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	m.ReplaceModelsForCredential("proxy", map[string]int{
+		"claude-3-opus": 3,
+		"gpt-4":         2,
+	})
+
+	assert.True(t, m.HasModel("proxy", "gpt-4"))
+	assert.True(t, m.HasModel("proxy", "claude-3-opus"))
+	assert.Equal(t, 2, m.GetModelWeightForCredential("gpt-4", "proxy"))
+	assert.Equal(t, 3, m.GetModelWeightForCredential("claude-3-opus", "proxy"))
+
+	m.remoteModelsCache["proxy"] = remoteModelCache{
+		models:    []Model{{ID: "gpt-4"}, {ID: "claude-3-opus"}},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	m.ReplaceModelsForCredential("proxy", map[string]int{
+		"claude-3-opus": 5,
+	})
+
+	assert.False(t, m.HasModel("proxy", "gpt-4"))
+	assert.True(t, m.HasModel("proxy", "claude-3-opus"))
+	assert.Equal(t, 0, m.GetModelWeightForCredential("gpt-4", "proxy"))
+	assert.Equal(t, 5, m.GetModelWeightForCredential("claude-3-opus", "proxy"))
+	assert.Nil(t, m.GetCredentialsForModel("gpt-4"))
+	assert.ElementsMatch(t, []string{"proxy"}, m.GetCredentialsForModel("claude-3-opus"))
+	assert.NotContains(t, m.remoteModelsCache, "proxy")
+}
+
+func TestReplaceModelsForCredential_EmptySnapshotDisablesAllowAllAndSurvivesDBUpdate(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	m.ReplaceModelsForCredential("proxy", map[string]int{
+		"claude-3-opus": 1,
+	})
+	m.ReplaceModelsForCredential("proxy", map[string]int{})
+
+	assert.False(t, m.HasModel("proxy", "claude-3-opus"))
+	assert.False(t, m.HasModel("proxy", "any-new-model"))
+	assert.True(t, m.HasModel("unknown", "any-new-model"))
+
+	m.UpdateDBModels(nil, nil, []config.CredentialConfig{
+		{Name: "proxy", Type: config.ProviderTypeProxy},
+	})
+
+	assert.False(t, m.HasModel("proxy", "claude-3-opus"))
+	assert.False(t, m.HasModel("proxy", "any-new-model"))
+}
+
+func TestReplaceModelsForCredential_PreservesStaticProxyAliases(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, []config.ModelRPMConfig{
+		{Name: "static-alias", Credential: "proxy", Weight: 8},
+	})
+	m.LoadModelsFromConfig([]config.CredentialConfig{
+		{Name: "proxy", Type: config.ProviderTypeProxy},
+	})
+
+	m.ReplaceModelsForCredential("proxy", map[string]int{
+		"remote-model": 2,
+	})
+
+	assert.True(t, m.HasModel("proxy", "static-alias"))
+	assert.True(t, m.HasModel("proxy", "remote-model"))
+	assert.Equal(t, 8, m.GetModelWeightForCredential("static-alias", "proxy"))
+	assert.Equal(t, 2, m.GetModelWeightForCredential("remote-model", "proxy"))
+
+	m.ReplaceModelsForCredential("proxy", map[string]int{})
+
+	assert.True(t, m.HasModel("proxy", "static-alias"))
+	assert.False(t, m.HasModel("proxy", "remote-model"))
+	assert.False(t, m.HasModel("proxy", "unknown-model"))
+
+	m.UpdateDBModels(nil, []config.CredentialConfig{
+		{Name: "proxy", Type: config.ProviderTypeProxy},
+	}, []config.CredentialConfig{
+		{Name: "proxy", Type: config.ProviderTypeProxy},
+	})
+
+	assert.True(t, m.HasModel("proxy", "static-alias"))
+	assert.False(t, m.HasModel("proxy", "remote-model"))
+	assert.False(t, m.HasModel("proxy", "unknown-model"))
+}

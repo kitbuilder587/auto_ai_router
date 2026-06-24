@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 
+	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
@@ -44,6 +45,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			Type:       string(cred.Type),
 			IsFallback: cred.IsFallback,
 			IsBanned:   isBanned,
+			Weight:     balancer.EffectiveWeight(0, cred.Weight),
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
 			LimitRPM:   limitRPM,
@@ -59,10 +61,22 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	allTrackedModels := p.rateLimiter.GetAllModelPairs()
 	for _, pair := range allTrackedModels {
 		modelKey := pair.Credential + ":" + pair.Model
+		credWeight := 0
+		for _, cred := range creds {
+			if cred.Name == pair.Credential {
+				credWeight = cred.Weight
+				break
+			}
+		}
+		modelWeight := 0
+		if p.modelManager != nil {
+			modelWeight = p.modelManager.GetModelWeightForCredential(pair.Model, pair.Credential)
+		}
 		modelsInfo[modelKey] = httputil.ModelHealthStats{
 			Credential: pair.Credential,
 			Model:      pair.Model,
 			IsBanned:   p.balancer.IsBanned(pair.Credential, pair.Model),
+			Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
 			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
 			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
 			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),

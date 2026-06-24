@@ -91,29 +91,20 @@ func UpdateAllProxyCredentials(
 			continue
 		}
 
-		// Update rate limiter and model manager with fetched models
-		addedCount := 0
+		// Model discovery is applied inside GetRemoteModelsWithError via an
+		// authoritative snapshot. Here we only remove stale model limits; fresh
+		// model limits come from /health stats, not from mere model availability.
 		updateMutex.Lock()
+		keepModels := make(map[string]bool, len(result.models))
 		for _, model := range result.models {
-			// Get default RPM/TPM from model manager
-			modelRPM := modelManager.GetModelRPMForCredential(model.ID, result.credential.Name)
-			modelTPM := modelManager.GetModelTPMForCredential(model.ID, result.credential.Name)
-
-			// AddModelWithTPM handles duplicates internally (overwrites existing)
-			rateLimiter.AddModelWithTPM(result.credential.Name, model.ID, modelRPM, modelTPM)
-
-			// Register model in manager so HasModel() returns true for this credential.
-			// Without this the balancer's model checker always rejects proxy credentials
-			// because modelToCredentials is only populated at startup via GetAllModels().
-			modelManager.AddModel(result.credential.Name, model.ID)
-			addedCount++
+			keepModels[model.ID] = true
 		}
+		rateLimiter.RemoveModelLimitsForCredentialExcept(result.credential.Name, keepModels)
 		updateMutex.Unlock()
 
-		if addedCount > 0 {
-			log.Info("Updated proxy models",
+		if len(result.models) > 0 {
+			log.Info("Refreshed proxy models",
 				"credential", result.credential.Name,
-				"added_models", addedCount,
 				"total_models", len(result.models),
 			)
 			updatedCount++

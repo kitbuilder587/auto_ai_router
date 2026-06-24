@@ -9,9 +9,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
-// ModelManagerInterface for adding dynamically loaded models
+// ModelManagerInterface applies authoritative model snapshots loaded from remote proxies.
 type ModelManagerInterface interface {
-	AddModel(credentialName, modelID string)
+	ReplaceModelsForCredential(credentialName string, modelWeights map[string]int)
 }
 
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
@@ -77,13 +77,13 @@ func newSumLimitAggregation() *limitAggregation {
 }
 
 func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
-	if rpm == 0 {
+	if rpm <= 0 {
 		agg.hasUnlimitedRPM = true
 	} else if rpm > 0 {
 		agg.rpm += rpm
 	}
 
-	if tpm == 0 {
+	if tpm <= 0 {
 		agg.hasUnlimitedTPM = true
 	} else if tpm > 0 {
 		agg.tpm += tpm
@@ -174,12 +174,14 @@ func updateModelLimits(
 	logger *slog.Logger,
 	modelManager ModelManagerInterface,
 ) {
-	if len(health.Models) == 0 {
+	if health.Models == nil || health.Credentials == nil {
 		return
 	}
 
 	// Aggregate limits per model from multiple credentials in remote proxy
 	modelStats := make(map[string]*limitAggregation)
+	modelWeights := make(map[string]int)
+	rateLimitedModels := make(map[string]bool)
 
 	for _, modelStats_data := range health.Models {
 		credStats, ok := health.Credentials[modelStats_data.Credential]
@@ -190,6 +192,9 @@ func updateModelLimits(
 			continue
 		}
 		modelID := modelStats_data.Model
+		if modelID == "" {
+			continue
+		}
 
 		// Aggregate (sum) limits and current usage for this model
 		rpm := modelStats_data.LimitRPM
@@ -197,14 +202,22 @@ func updateModelLimits(
 		curRPM := modelStats_data.CurrentRPM
 		curTPM := modelStats_data.CurrentTPM
 
-		if rpm > 0 || tpm > 0 || curRPM > 0 || curTPM > 0 {
+		modelWeights[modelID] += effectiveRemoteModelWeight(modelStats_data, credStats)
+
+		if hasRemoteModelLimit(rpm, tpm, curRPM, curTPM) {
 			aggregation, ok := modelStats[modelID]
 			if !ok {
 				aggregation = newSumLimitAggregation()
 				modelStats[modelID] = aggregation
 			}
 			aggregation.applySum(rpm, tpm, curRPM, curTPM)
+			rateLimitedModels[modelID] = true
 		}
+	}
+
+	rateLimiter.RemoveModelLimitsForCredentialExcept(cred.Name, rateLimitedModels)
+	if modelManager != nil {
+		modelManager.ReplaceModelsForCredential(cred.Name, modelWeights)
 	}
 
 	// Update rate limiter with aggregated model limits
@@ -218,11 +231,6 @@ func updateModelLimits(
 			rateLimiter.SetModelCurrentUsage(cred.Name, modelID, stats.currentRPM, stats.currentTPM)
 		}
 
-		// Add model to modelManager for dynamic model filtering
-		if modelManager != nil {
-			modelManager.AddModel(cred.Name, modelID)
-		}
-
 		modelsUpdated++
 	}
 
@@ -232,4 +240,18 @@ func updateModelLimits(
 			"models_updated", modelsUpdated,
 		)
 	}
+}
+
+func hasRemoteModelLimit(rpm, tpm, currentRPM, currentTPM int) bool {
+	return rpm != 0 || tpm != 0 || currentRPM > 0 || currentTPM > 0
+}
+
+func effectiveRemoteModelWeight(modelStats httputil.ModelHealthStats, credStats httputil.CredentialHealthStats) int {
+	if modelStats.Weight > 0 {
+		return modelStats.Weight
+	}
+	if credStats.Weight > 0 {
+		return credStats.Weight
+	}
+	return 1
 }

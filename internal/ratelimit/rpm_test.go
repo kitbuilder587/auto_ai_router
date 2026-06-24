@@ -630,6 +630,24 @@ func TestGetModelLimitTPM(t *testing.T) {
 	assert.Equal(t, -1, rl.GetModelLimitTPM("cred1", "non-existent-model"))
 }
 
+func TestRemoveModelLimitsForCredentialExcept(t *testing.T) {
+	rl := New()
+	rl.AddModelWithTPM("proxy", "old-model", 10, 100)
+	rl.AddModelWithTPM("proxy", "kept-model", 20, 200)
+	rl.AddModelWithTPM("other-proxy", "old-model", 30, 300)
+
+	rl.RemoveModelLimitsForCredentialExcept("proxy", map[string]bool{
+		"kept-model": true,
+	})
+
+	assert.Equal(t, -1, rl.GetModelLimitRPM("proxy", "old-model"))
+	assert.Equal(t, -1, rl.GetModelLimitTPM("proxy", "old-model"))
+	assert.Equal(t, 20, rl.GetModelLimitRPM("proxy", "kept-model"))
+	assert.Equal(t, 200, rl.GetModelLimitTPM("proxy", "kept-model"))
+	assert.Equal(t, 30, rl.GetModelLimitRPM("other-proxy", "old-model"))
+	assert.Equal(t, 300, rl.GetModelLimitTPM("other-proxy", "old-model"))
+}
+
 func TestGetCurrentModelRPM_EmptyLimiter(t *testing.T) {
 	rl := New()
 	rl.AddModel("cred1", "gpt-4o", 100)

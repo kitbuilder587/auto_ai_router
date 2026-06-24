@@ -114,6 +114,23 @@ func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, 
 	r.modelLimits[key] = &limiterConfig{rpm: rpm, tpm: tpm}
 }
 
+// RemoveModelLimitsForCredentialExcept deletes tracked model limits for a credential
+// when the model is absent from a fresh remote snapshot.
+func (r *RPMLimiter) RemoveModelLimitsForCredentialExcept(credentialName string, keepModels map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for key := range r.modelLimits {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 || parts[0] != credentialName {
+			continue
+		}
+		if !keepModels[parts[1]] {
+			delete(r.modelLimits, key)
+		}
+	}
+}
+
 // Allow checks if a request for credentialName is allowed (RPM) and records it.
 func (r *RPMLimiter) Allow(credentialName string) bool {
 	return r.AllowCtx(context.Background(), credentialName)
