@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -515,3 +516,27 @@ func (b *RedisBackend) tryAllowAll(
 // setCurrentUsage is a no-op for the Redis backend: all replicas write to the
 // shared Redis instance directly, so remote-sync is unnecessary.
 func (b *RedisBackend) setCurrentUsage(_ context.Context, _ string, _, _ int) {}
+
+func (b *RedisBackend) deleteKey(ctx context.Context, key string) {
+	keys := []string{b.rpmKey(key), b.tpmKey(key)}
+
+	// TryAllowAll uses Redis Cluster hash tags for model counters. Remove those
+	// tagged keys too so stale model usage does not survive model removal.
+	if strings.HasPrefix(key, "m:") {
+		modelPair := strings.TrimPrefix(key, "m:")
+		parts := strings.SplitN(modelPair, ":", 2)
+		if len(parts) == 2 {
+			credTag := "{c:" + parts[0] + "}"
+			keys = append(keys,
+				b.keyPrefix+"rpm:"+credTag+":"+key,
+				b.keyPrefix+"tpm:"+credTag+":"+key,
+			)
+		}
+	}
+
+	for _, redisKey := range keys {
+		_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
+			return 0, b.client.Do(ctx, b.client.B().Del().Key(redisKey).Build()).Error()
+		})
+	}
+}

@@ -36,4 +36,7 @@ type counterBackend interface {
 	// current RPM and TPM values. Used to sync state from remote proxies.
 	// Redis backends may implement this as a no-op.
 	setCurrentUsage(ctx context.Context, key string, currentRPM, currentTPM int)
+
+	// deleteKey removes all RPM/TPM counters for key.
+	deleteKey(ctx context.Context, key string)
 }

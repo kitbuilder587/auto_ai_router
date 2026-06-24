@@ -927,6 +927,64 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	}
 }
 
+// ReplaceModelsForCredential replaces the dynamic proxy-discovered model list
+// for a credential with a fresh upstream snapshot. Static/DB model mappings are
+// preserved so explicit local configuration still takes precedence.
+func (m *Manager) ReplaceModelsForCredential(credentialName string, modelIDs []string) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	desiredSet := make(map[string]bool, len(modelIDs))
+	desired := make([]string, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if modelID == "" || desiredSet[modelID] {
+			continue
+		}
+		desiredSet[modelID] = true
+		desired = append(desired, modelID)
+	}
+
+	configured := make([]string, 0)
+	for modelID := range m.modelLimits {
+		if desiredSet[modelID] || !m.isConfiguredForCredentialLocked(modelID, credentialName) {
+			continue
+		}
+		configured = append(configured, modelID)
+	}
+	slices.Sort(configured)
+
+	replacement := append([]string(nil), desired...)
+	replacement = append(replacement, configured...)
+	m.credentialModels[credentialName] = replacement
+
+	for modelID, creds := range m.modelToCredentials {
+		kept := creds[:0]
+		for _, cred := range creds {
+			if cred != credentialName {
+				kept = append(kept, cred)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.modelToCredentials, modelID)
+		} else {
+			m.modelToCredentials[modelID] = kept
+		}
+	}
+
+	for _, modelID := range replacement {
+		if !m.contains(m.modelToCredentials[modelID], credentialName) {
+			m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
+		}
+	}
+
+	m.allModels = nil
+	m.allModelsCache = allModelsCache{}
+}
+
 // SetModelWeightForCredential stores a dynamic model-level weight learned from a proxy
 // upstream. Static config/DB model weights still take precedence when present.
 func (m *Manager) SetModelWeightForCredential(modelID, credentialName string, weight int) {
@@ -951,6 +1009,43 @@ func (m *Manager) SetModelWeightForCredential(modelID, credentialName string, we
 		m.dynamicModelWeights[modelID] = make(map[string]int)
 	}
 	m.dynamicModelWeights[modelID][credentialName] = weight
+}
+
+// ReplaceModelWeightsForCredential replaces all dynamic health-derived weights
+// for a credential with a fresh upstream snapshot.
+func (m *Manager) ReplaceModelWeightsForCredential(credentialName string, weights map[string]int) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for modelID, credentialWeights := range m.dynamicModelWeights {
+		delete(credentialWeights, credentialName)
+		if len(credentialWeights) == 0 {
+			delete(m.dynamicModelWeights, modelID)
+		}
+	}
+
+	for modelID, weight := range weights {
+		if modelID == "" || weight <= 0 {
+			continue
+		}
+		if m.dynamicModelWeights[modelID] == nil {
+			m.dynamicModelWeights[modelID] = make(map[string]int)
+		}
+		m.dynamicModelWeights[modelID][credentialName] = weight
+	}
+}
+
+func (m *Manager) isConfiguredForCredentialLocked(modelID, credentialName string) bool {
+	for _, limit := range m.modelLimits[modelID] {
+		if limit.Credential == "" || limit.Credential == credentialName {
+			return true
+		}
+	}
+	return false
 }
 
 // contains checks if a string slice contains a value
@@ -1314,6 +1409,7 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 	)
 
 	models, err := m.fetchRemoteModelsFromHealth(ctx, cred)
+	usedHealthSnapshot := err == nil && len(models) > 0
 	if err != nil || len(models) == 0 {
 		if err != nil {
 			m.logger.Debug("Failed to fetch remote models from proxy health; falling back to /v1/models",
@@ -1337,6 +1433,15 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 			return nil, err
 		}
 		models = modelsResp.Data
+		m.ReplaceModelWeightsForCredential(cred.Name, nil)
+	}
+
+	if len(models) > 0 {
+		m.ReplaceModelsForCredential(cred.Name, remoteModelIDs(models))
+	}
+	if !usedHealthSnapshot && len(models) == 0 {
+		m.ReplaceModelsForCredential(cred.Name, nil)
+		m.ReplaceModelWeightsForCredential(cred.Name, nil)
 	}
 
 	// Cache the result
@@ -1383,7 +1488,7 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		if modelStats.Model == "" {
 			continue
 		}
-		modelWeightsByID[modelStats.Model] += effectiveRemoteHealthWeight(modelStats, credStats)
+		modelWeightsByID[modelStats.Model] += httputil.EffectiveHealthWeight(modelStats, credStats)
 		if _, exists := modelsByID[modelStats.Model]; exists {
 			continue
 		}
@@ -1394,9 +1499,7 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		}
 	}
 
-	for modelID, weight := range modelWeightsByID {
-		m.SetModelWeightForCredential(modelID, cred.Name, weight)
-	}
+	m.ReplaceModelWeightsForCredential(cred.Name, modelWeightsByID)
 
 	models := make([]Model, 0, len(modelsByID))
 	for _, model := range modelsByID {
@@ -1409,12 +1512,12 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 	return models, nil
 }
 
-func effectiveRemoteHealthWeight(modelStats httputil.ModelHealthStats, credStats httputil.CredentialHealthStats) int {
-	if modelStats.Weight > 0 {
-		return modelStats.Weight
+func remoteModelIDs(models []Model) []string {
+	ids := make([]string, 0, len(models))
+	for _, model := range models {
+		if model.ID != "" {
+			ids = append(ids, model.ID)
+		}
 	}
-	if credStats.Weight > 0 {
-		return credStats.Weight
-	}
-	return 1
+	return ids
 }

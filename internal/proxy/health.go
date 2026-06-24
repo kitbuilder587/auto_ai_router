@@ -19,12 +19,10 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 	// Collect credentials info
 	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
-	credentialConfigs := make(map[string]config.CredentialConfig)
 	if creds == nil {
 		creds = []config.CredentialConfig{}
 	}
 	for _, cred := range creds {
-		credentialConfigs[cred.Name] = cred
 		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
 		// For other credentials, use config values
 		limitRPM := cred.RPM
@@ -62,24 +60,18 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// This includes duplicates when same model is available from different credentials
 	allTrackedModels := p.rateLimiter.GetAllModelPairs()
 	for _, pair := range allTrackedModels {
-		modelKey := pair.Credential + ":" + pair.Model
-		credWeight := 0
-		if cred, ok := credentialConfigs[pair.Credential]; ok {
-			credWeight = cred.Weight
-		}
-		modelWeight := 0
-		if p.modelManager != nil {
-			modelWeight = p.modelManager.GetModelWeightForCredential(pair.Model, pair.Credential)
-		}
-		modelsInfo[modelKey] = httputil.ModelHealthStats{
-			Credential: pair.Credential,
-			Model:      pair.Model,
-			IsBanned:   p.balancer.IsBanned(pair.Credential, pair.Model),
-			Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
-			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
-			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
-			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),
-			LimitTPM:   p.rateLimiter.GetModelLimitTPM(pair.Credential, pair.Model),
+		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model)
+	}
+
+	if p.modelManager != nil {
+		for _, cred := range creds {
+			for _, model := range p.modelManager.GetModelsForCredential(cred.Name) {
+				modelKey := cred.Name + ":" + model.ID
+				if _, ok := modelsInfo[modelKey]; ok {
+					continue
+				}
+				p.addModelHealthStats(modelsInfo, creds, cred.Name, model.ID)
+			}
 		}
 	}
 
@@ -131,6 +123,39 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	}
 
 	return healthy, status
+}
+
+func (p *Proxy) addModelHealthStats(
+	modelsInfo map[string]httputil.ModelHealthStats,
+	creds []config.CredentialConfig,
+	credentialName string,
+	modelID string,
+) {
+	modelKey := credentialName + ":" + modelID
+	credWeight := credentialWeight(creds, credentialName)
+	modelWeight := 0
+	if p.modelManager != nil {
+		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
+	}
+	modelsInfo[modelKey] = httputil.ModelHealthStats{
+		Credential: credentialName,
+		Model:      modelID,
+		IsBanned:   p.balancer.IsBanned(credentialName, modelID),
+		Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
+		CurrentRPM: p.rateLimiter.GetCurrentModelRPM(credentialName, modelID),
+		CurrentTPM: p.rateLimiter.GetCurrentModelTPM(credentialName, modelID),
+		LimitRPM:   p.rateLimiter.GetModelLimitRPM(credentialName, modelID),
+		LimitTPM:   p.rateLimiter.GetModelLimitTPM(credentialName, modelID),
+	}
+}
+
+func credentialWeight(creds []config.CredentialConfig, credentialName string) int {
+	for _, cred := range creds {
+		if cred.Name == credentialName {
+			return cred.Weight
+		}
+	}
+	return 0
 }
 
 // VisualHealthCheck serves the static health dashboard HTML.

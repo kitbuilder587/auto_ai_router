@@ -296,6 +296,66 @@ func TestGetRemoteModelsWithError_AggregatesRemoteHealthWeights(t *testing.T) {
 	assert.Equal(t, 126, m.GetModelWeightForCredential("gpt-4", "proxy-fallback"))
 }
 
+func TestGetRemoteModelsWithError_ReplacesStaleHealthModelsAndWeights(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	responseIndex := 0
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+
+		responseIndex++
+		w.Header().Set("Content-Type", "application/json")
+		health := &httputil.ProxyHealthResponse{
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"upstream": {Type: "openai", IsFallback: false, Weight: 2},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"fresh": {Credential: "upstream", Model: "fresh-model", Weight: 7},
+				"stale": {Credential: "upstream", Model: "stale-model", Weight: 5},
+			},
+		}
+		if responseIndex > 1 {
+			health.Models = map[string]httputil.ModelHealthStats{
+				"fresh": {Credential: "upstream", Model: "fresh-model", Weight: 11},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(health)
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+	m.cacheExpiration = time.Millisecond
+	cred := &config.CredentialConfig{
+		Name:    "proxy-1",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+	}
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"fresh-model", "stale-model"}, modelIDs(models))
+	assert.Equal(t, 7, m.GetModelWeightForCredential("fresh-model", "proxy-1"))
+	assert.Equal(t, 5, m.GetModelWeightForCredential("stale-model", "proxy-1"))
+	assert.True(t, m.HasModel("proxy-1", "stale-model"))
+
+	m.mu.Lock()
+	if cached, ok := m.remoteModelsCache[cred.Name]; ok {
+		cached.expiresAt = time.Now().UTC().Add(-time.Millisecond)
+		m.remoteModelsCache[cred.Name] = cached
+	}
+	m.mu.Unlock()
+
+	models, err = m.GetRemoteModelsWithError(context.Background(), cred)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"fresh-model"}, modelIDs(models))
+	assert.Equal(t, 11, m.GetModelWeightForCredential("fresh-model", "proxy-1"))
+	assert.Equal(t, 0, m.GetModelWeightForCredential("stale-model", "proxy-1"))
+	assert.False(t, m.HasModel("proxy-1", "stale-model"))
+}
+
 func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthUnavailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 

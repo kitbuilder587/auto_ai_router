@@ -13,6 +13,9 @@ import (
 type ModelManagerInterface interface {
 	AddModel(credentialName, modelID string)
 	SetModelWeightForCredential(modelID, credentialName string, weight int)
+	ReplaceModelsForCredential(credentialName string, modelIDs []string)
+	ReplaceModelWeightsForCredential(credentialName string, weights map[string]int)
+	HasModel(credentialName, modelID string) bool
 }
 
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
@@ -72,6 +75,7 @@ type limitAggregation struct {
 	currentTPM      int
 	hasUnlimitedRPM bool
 	hasUnlimitedTPM bool
+	hasLimitOrUsage bool
 }
 
 func newSumLimitAggregation() *limitAggregation {
@@ -79,15 +83,17 @@ func newSumLimitAggregation() *limitAggregation {
 }
 
 func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
-	if rpm == 0 {
+	agg.hasLimitOrUsage = true
+
+	if rpm <= 0 {
 		agg.hasUnlimitedRPM = true
-	} else if rpm > 0 {
+	} else {
 		agg.rpm += rpm
 	}
 
-	if tpm == 0 {
+	if tpm <= 0 {
 		agg.hasUnlimitedTPM = true
-	} else if tpm > 0 {
+	} else {
 		agg.tpm += tpm
 	}
 
@@ -113,6 +119,13 @@ func (agg *limitAggregation) finalizeLimits() (int, int) {
 	}
 
 	return rpm, tpm
+}
+
+func hasRemoteModelLimitOrUsage(stats httputil.ModelHealthStats) bool {
+	return stats.LimitRPM != 0 ||
+		stats.LimitTPM != 0 ||
+		stats.CurrentRPM > 0 ||
+		stats.CurrentTPM > 0
 }
 
 // updateCredentialLimits updates credential limits from remote credentials data
@@ -183,11 +196,25 @@ func updateModelLimits(
 	modelManager ModelManagerInterface,
 ) {
 	if len(health.Models) == 0 {
+		if modelManager != nil {
+			modelManager.ReplaceModelsForCredential(cred.Name, nil)
+			modelManager.ReplaceModelWeightsForCredential(cred.Name, nil)
+		}
+		removedModels := removeStaleModelLimits(cred.Name, map[string]bool{}, rateLimiter)
+		if removedModels > 0 {
+			logger.Debug("Removed stale model limits from remote proxy",
+				"proxy", cred.Name,
+				"models_removed", removedModels,
+			)
+		}
 		return
 	}
 
 	// Aggregate limits per model from multiple credentials in remote proxy
 	modelStats := make(map[string]*limitAggregation)
+	modelIDs := make([]string, 0, len(health.Models))
+	modelIDSet := make(map[string]bool, len(health.Models))
+	modelWeights := make(map[string]int)
 
 	for _, modelStats_data := range health.Models {
 		credStats, ok := health.Credentials[modelStats_data.Credential]
@@ -198,57 +225,75 @@ func updateModelLimits(
 			continue
 		}
 		modelID := modelStats_data.Model
+		if modelID == "" {
+			continue
+		}
+		if !modelIDSet[modelID] {
+			modelIDSet[modelID] = true
+			modelIDs = append(modelIDs, modelID)
+		}
 
 		// Aggregate (sum) limits and current usage for this model
 		rpm := modelStats_data.LimitRPM
 		tpm := modelStats_data.LimitTPM
 		curRPM := modelStats_data.CurrentRPM
 		curTPM := modelStats_data.CurrentTPM
-		weight := effectiveRemoteModelWeight(modelStats_data, credStats)
+		weight := httputil.EffectiveHealthWeight(modelStats_data, credStats)
 
 		aggregation, ok := modelStats[modelID]
 		if !ok {
 			aggregation = newSumLimitAggregation()
 			modelStats[modelID] = aggregation
 		}
-		aggregation.applySum(rpm, tpm, curRPM, curTPM)
+		if hasRemoteModelLimitOrUsage(modelStats_data) {
+			aggregation.applySum(rpm, tpm, curRPM, curTPM)
+		}
 		aggregation.applyWeight(weight)
+		modelWeights[modelID] = aggregation.weight
+	}
+
+	if modelManager != nil {
+		modelManager.ReplaceModelsForCredential(cred.Name, modelIDs)
+		modelManager.ReplaceModelWeightsForCredential(cred.Name, modelWeights)
 	}
 
 	// Update rate limiter with aggregated model limits
 	modelsUpdated := 0
+	limitedModelIDs := make(map[string]bool, len(modelStats))
 	for modelID, stats := range modelStats {
+		if !stats.hasLimitOrUsage {
+			continue
+		}
 		rpm, tpm := stats.finalizeLimits()
 
 		rateLimiter.AddModelWithTPM(cred.Name, modelID, rpm, tpm)
+		limitedModelIDs[modelID] = true
 		// Sync current usage for this model
 		if stats.currentRPM > 0 || stats.currentTPM > 0 {
 			rateLimiter.SetModelCurrentUsage(cred.Name, modelID, stats.currentRPM, stats.currentTPM)
 		}
 
-		// Add model to modelManager for dynamic model filtering
-		if modelManager != nil {
-			modelManager.AddModel(cred.Name, modelID)
-			modelManager.SetModelWeightForCredential(modelID, cred.Name, stats.weight)
-		}
-
 		modelsUpdated++
 	}
+	removedModels := removeStaleModelLimits(cred.Name, limitedModelIDs, rateLimiter)
 
-	if modelsUpdated > 0 {
+	if modelsUpdated > 0 || removedModels > 0 {
 		logger.Debug("Updated model limits from remote proxy",
 			"proxy", cred.Name,
 			"models_updated", modelsUpdated,
+			"models_removed", removedModels,
 		)
 	}
 }
 
-func effectiveRemoteModelWeight(modelStats httputil.ModelHealthStats, credStats httputil.CredentialHealthStats) int {
-	if modelStats.Weight > 0 {
-		return modelStats.Weight
+func removeStaleModelLimits(credentialName string, currentModelLimits map[string]bool, rateLimiter *ratelimit.RPMLimiter) int {
+	removed := 0
+	for _, pair := range rateLimiter.GetAllModelPairs() {
+		if pair.Credential != credentialName || currentModelLimits[pair.Model] {
+			continue
+		}
+		rateLimiter.RemoveModel(pair.Credential, pair.Model)
+		removed++
 	}
-	if credStats.Weight > 0 {
-		return credStats.Weight
-	}
-	return 1
+	return removed
 }

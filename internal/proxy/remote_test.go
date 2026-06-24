@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpdateCredentialLimits_EmptyCredentials(t *testing.T) {
@@ -179,12 +180,16 @@ func TestUpdateModelLimits_MultipleModels_Aggregation(t *testing.T) {
 	assert.NotNil(t, rateLimiter)
 }
 
-func TestUpdateModelLimits_ZeroValues_ConvertedToUnlimited(t *testing.T) {
+func TestUpdateModelLimits_ZeroValues_TrackedInManagerOnly(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"remote": {Weight: 4},
+		},
 		Models: map[string]httputil.ModelHealthStats{
 			"model:proxy": {
 				Model:      "claude-3-opus",
-				LimitRPM:   0, // 0 means unlimited in remote
+				Credential: "remote",
+				LimitRPM:   0,
 				LimitTPM:   0,
 				CurrentRPM: 0,
 				CurrentTPM: 0,
@@ -195,14 +200,13 @@ func TestUpdateModelLimits_ZeroValues_ConvertedToUnlimited(t *testing.T) {
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
 	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
 
-	updateModelLimits(health, cred, rateLimiter, logger, nil)
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
 
-	// 0 should be converted to -1 (unlimited)
-	limitRPM := rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus")
-	limitTPM := rateLimiter.GetModelLimitTPM("test_proxy", "claude-3-opus")
-	assert.Equal(t, -1, limitRPM)
-	assert.Equal(t, -1, limitTPM)
+	assert.Empty(t, rateLimiter.GetAllModelPairs(), "all-zero model stats must not create an unlimited limiter entry")
+	assert.True(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "model remains discoverable for routing")
+	assert.Equal(t, 4, mockMM.GetModelWeightForCredential("claude-3-opus", "test_proxy"))
 }
 
 func TestUpdateModelLimits_NoCurrentUsage(t *testing.T) {
@@ -278,11 +282,47 @@ func TestUpdateModelLimits_MixedZeroAndNonZeroRPM(t *testing.T) {
 	assert.NotNil(t, rateLimiter)
 }
 
+func TestUpdateModelLimits_NegativeLimitAggregatesAsUnlimited(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"limited":   {},
+			"unlimited": {},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"limited": {
+				Credential: "limited",
+				Model:      "test-model",
+				LimitRPM:   200,
+				LimitTPM:   2000,
+			},
+			"unlimited": {
+				Credential: "unlimited",
+				Model:      "test-model",
+				LimitRPM:   -1,
+				LimitTPM:   -1,
+			},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
+
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("test_proxy", "test-model"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitTPM("test_proxy", "test-model"))
+}
+
 func TestUpdateModelLimits_AllZeroInOne(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cred1": {},
+		},
 		Models: map[string]httputil.ModelHealthStats{
 			"model:cred1": {
 				Model:      "test-model",
+				Credential: "cred1",
 				LimitRPM:   0,
 				LimitTPM:   0,
 				CurrentRPM: 0,
@@ -297,7 +337,7 @@ func TestUpdateModelLimits_AllZeroInOne(t *testing.T) {
 
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
-	// Should not add model if all values are 0
+	assert.Empty(t, rateLimiter.GetAllModelPairs(), "all-zero stats should not add an unlimited model limiter")
 }
 
 func TestUpdateCredentialLimits_NegativeLimitSelection(t *testing.T) {
@@ -315,8 +355,8 @@ func TestUpdateCredentialLimits_NegativeLimitSelection(t *testing.T) {
 
 	updateCredentialLimits(health, cred, rateLimiter, logger)
 
-	// Should only consider positive values
-	// The function checks > 0, so -1 is ignored
+	assert.Equal(t, -1, rateLimiter.GetLimitRPM("test_proxy"), "-1 from upstream should make aggregate RPM unlimited")
+	assert.Equal(t, -1, rateLimiter.GetLimitTPM("test_proxy"), "-1 from upstream should make aggregate TPM unlimited")
 }
 
 func TestUpdateCredentialLimits_LargeNumbers(t *testing.T) {
@@ -340,8 +380,9 @@ func TestUpdateCredentialLimits_LargeNumbers(t *testing.T) {
 
 // MockModelManager implements ModelManagerInterface for testing
 type MockModelManager struct {
-	mu    sync.Mutex
-	added []struct {
+	mu     sync.Mutex
+	models map[string]map[string]bool
+	added  []struct {
 		credential string
 		model      string
 	}
@@ -350,6 +391,7 @@ type MockModelManager struct {
 
 func NewMockModelManager() *MockModelManager {
 	return &MockModelManager{
+		models: make(map[string]map[string]bool),
 		added: make([]struct {
 			credential string
 			model      string
@@ -361,10 +403,39 @@ func NewMockModelManager() *MockModelManager {
 func (m *MockModelManager) AddModel(credentialName, modelID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.models[credentialName] == nil {
+		m.models[credentialName] = make(map[string]bool)
+	}
+	m.models[credentialName][modelID] = true
 	m.added = append(m.added, struct {
 		credential string
 		model      string
 	}{credentialName, modelID})
+}
+
+func (m *MockModelManager) ReplaceModelsForCredential(credentialName string, modelIDs []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.models[credentialName] = make(map[string]bool, len(modelIDs))
+	filtered := m.added[:0]
+	for _, added := range m.added {
+		if added.credential != credentialName {
+			filtered = append(filtered, added)
+		}
+	}
+	m.added = filtered
+
+	for _, modelID := range modelIDs {
+		if modelID == "" || m.models[credentialName][modelID] {
+			continue
+		}
+		m.models[credentialName][modelID] = true
+		m.added = append(m.added, struct {
+			credential string
+			model      string
+		}{credentialName, modelID})
+	}
 }
 
 func (m *MockModelManager) SetModelWeightForCredential(modelID, credentialName string, weight int) {
@@ -383,6 +454,32 @@ func (m *MockModelManager) SetModelWeightForCredential(modelID, credentialName s
 		m.weights[modelID] = make(map[string]int)
 	}
 	m.weights[modelID][credentialName] = weight
+}
+
+func (m *MockModelManager) ReplaceModelWeightsForCredential(credentialName string, weights map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for modelID, credentialWeights := range m.weights {
+		delete(credentialWeights, credentialName)
+		if len(credentialWeights) == 0 {
+			delete(m.weights, modelID)
+		}
+	}
+	for modelID, weight := range weights {
+		if weight <= 0 {
+			continue
+		}
+		if m.weights[modelID] == nil {
+			m.weights[modelID] = make(map[string]int)
+		}
+		m.weights[modelID][credentialName] = weight
+	}
+}
+
+func (m *MockModelManager) HasModel(credentialName, modelID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.models[credentialName][modelID]
 }
 
 func (m *MockModelManager) GetModelWeightForCredential(modelID, credentialName string) int {
@@ -529,6 +626,74 @@ func TestUpdateStatsFromHealth_AggregatesRemoteWeightsWithLegacyFallback(t *test
 
 	assert.Equal(t, 10, mockMM.GetModelWeightForCredential("gpt-4", "proxy-remote"),
 		"explicit model weight + credential fallback + legacy default should be aggregated")
+}
+
+func TestUpdateStatsFromHealth_ReplacesStaleRemoteModelsAndWeights(t *testing.T) {
+	mockMM := NewMockModelManager()
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+	cred := &config.CredentialConfig{Name: "proxy-remote"}
+
+	firstHealth := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"upstream": {Weight: 2},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"fresh": {Credential: "upstream", Model: "fresh-model", Weight: 7, LimitRPM: 10, LimitTPM: 100},
+			"stale": {Credential: "upstream", Model: "stale-model", Weight: 5, LimitRPM: 20, LimitTPM: 200},
+		},
+	}
+	UpdateStatsFromHealth(firstHealth, cred, rateLimiter, logger, mockMM)
+
+	require.Equal(t, 7, mockMM.GetModelWeightForCredential("fresh-model", "proxy-remote"))
+	require.Equal(t, 5, mockMM.GetModelWeightForCredential("stale-model", "proxy-remote"))
+	require.True(t, mockMM.HasModel("proxy-remote", "stale-model"))
+	require.Equal(t, 20, rateLimiter.GetModelLimitRPM("proxy-remote", "stale-model"))
+
+	secondHealth := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"upstream": {Weight: 3},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"fresh": {Credential: "upstream", Model: "fresh-model", Weight: 11, LimitRPM: 30, LimitTPM: 300},
+		},
+	}
+	UpdateStatsFromHealth(secondHealth, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 11, mockMM.GetModelWeightForCredential("fresh-model", "proxy-remote"))
+	assert.Equal(t, 0, mockMM.GetModelWeightForCredential("stale-model", "proxy-remote"))
+	assert.False(t, mockMM.HasModel("proxy-remote", "stale-model"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-remote", "stale-model"))
+	assert.Equal(t, 30, rateLimiter.GetModelLimitRPM("proxy-remote", "fresh-model"))
+}
+
+func TestUpdateStatsFromHealth_ClearsModelsWhenRemoteSnapshotIsEmpty(t *testing.T) {
+	mockMM := NewMockModelManager()
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+	cred := &config.CredentialConfig{Name: "proxy-remote"}
+
+	firstHealth := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"upstream": {Weight: 2},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"stale": {Credential: "upstream", Model: "stale-model", Weight: 5, LimitRPM: 20, LimitTPM: 200},
+		},
+	}
+	UpdateStatsFromHealth(firstHealth, cred, rateLimiter, logger, mockMM)
+	require.True(t, mockMM.HasModel("proxy-remote", "stale-model"))
+	require.Equal(t, 5, mockMM.GetModelWeightForCredential("stale-model", "proxy-remote"))
+
+	emptyHealth := &httputil.ProxyHealthResponse{
+		Credentials: firstHealth.Credentials,
+		Models:      map[string]httputil.ModelHealthStats{},
+	}
+	UpdateStatsFromHealth(emptyHealth, cred, rateLimiter, logger, mockMM)
+
+	assert.False(t, mockMM.HasModel("proxy-remote", "stale-model"))
+	assert.Equal(t, 0, mockMM.GetModelWeightForCredential("stale-model", "proxy-remote"))
+	assert.Empty(t, rateLimiter.GetAllModelPairs())
 }
 
 func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {
