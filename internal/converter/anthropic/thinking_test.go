@@ -27,6 +27,16 @@ func TestMapReasoningEffortToBudget(t *testing.T) {
 	}
 }
 
+func TestEnsureMaxTokensForThinking(t *testing.T) {
+	thinking := &AnthropicThinking{Type: "enabled", BudgetTokens: 5000}
+
+	assert.Equal(t, 6000, EnsureMaxTokensForThinking(6000, thinking))
+	assert.Equal(t, 6024, EnsureMaxTokensForThinking(5000, thinking))
+	assert.Equal(t, 6024, EnsureMaxTokensForThinking(4096, thinking))
+	assert.Equal(t, 4096, EnsureMaxTokensForThinking(4096, nil))
+	assert.Equal(t, 4096, EnsureMaxTokensForThinking(4096, &AnthropicThinking{Type: "adaptive"}))
+}
+
 // Claude 3.x: expects type="enabled" + budget_tokens, no output_config.
 func TestMapThinkingConfig_Classic(t *testing.T) {
 	const model = "claude-3-7-sonnet-20250219"

@@ -551,11 +551,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Mid-retry failure — the request will be retried with another credential.
 			// The final failure (if all attempts fail) is logged at ERROR when the
 			// response is written to the client.
-			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry",
+			retryLogArgs := []any{
 				"error_code", proxyResp.StatusCode, "credential", cred.Name,
 				"reason", retryReason, "model", modelID,
-				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
-				"response_body", logger.TruncateLongFields(string(proxyResp.Body), 500))
+				"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
+			}
+			if shouldMaskUpstreamErrors(cred) {
+				retryLogArgs = append(retryLogArgs, "response_body_masked", true)
+			} else {
+				retryLogArgs = append(retryLogArgs, "response_body", logger.TruncateLongFields(string(proxyResp.Body), 500))
+			}
+			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry", retryLogArgs...)
 		}
 
 		// After retry loop: try fallback proxy as last resort
@@ -1001,8 +1007,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
 		case config.ProviderTypeGemini:
 			proxyReq.Header.Set("x-goog-api-key", cred.APIKey)
-		case config.ProviderTypeAnthropic:
-			proxyReq.Header.Set("X-Api-Key", cred.APIKey)
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+			if cred.AuthType == "bearer" {
+				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			} else {
+				proxyReq.Header.Set("X-Api-Key", cred.APIKey)
+			}
 			proxyReq.Header.Set("anthropic-version", "2023-06-01")
 		case config.ProviderTypeBedrock:
 			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
@@ -1117,11 +1127,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Mid-retry failure — the request will be retried with another credential.
 		// The final failure (if all attempts fail) is logged at ERROR when the
 		// response is written to the client.
-		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry",
+		retryLogArgs := []any{
 			"error_code", resp.StatusCode, "credential", cred.Name,
 			"reason", retryReason, "model", modelID,
-			"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
-			"response_body", logger.TruncateLongFields(string(responseBody), 500))
+			"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
+		}
+		if shouldMaskUpstreamErrors(cred) {
+			retryLogArgs = append(retryLogArgs, "response_body_masked", true)
+		} else {
+			retryLogArgs = append(retryLogArgs, "response_body", logger.TruncateLongFields(string(responseBody), 500))
+		}
+		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry", retryLogArgs...)
 	}
 
 	// After retry loop: try proxy fallback as last resort
@@ -1199,11 +1215,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !prepared.nativeResponses && conv != nil && !conv.IsPassthrough() {
 			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
 			if convErr != nil {
-				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format",
+				args := []any{
 					"credential", cred.Name, "provider", string(cred.Type),
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
-					"response_body", logger.TruncateLongFields(decodedBody, 500))
+				}
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
 				finalResponseBody = []byte(decodedBody)
 			} else {
 				finalResponseBody = convertedBody
@@ -1226,11 +1244,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Native Responses converter: convert provider response → *responses.Response.
 			nativeResp, convErr := provResponses.ResponseTo([]byte(decodedBody), modelID)
 			if convErr != nil {
-				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response",
+				args := []any{
 					"credential", cred.Name, "provider", string(cred.Type),
 					"model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID,
-					"response_body", logger.TruncateLongFields(decodedBody, 500))
+				}
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
 				// finalResponseBody already holds decodedBody — return as-is
 			} else {
 				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
@@ -1287,6 +1307,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		rawErrorBody := finalResponseBody
+		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
+			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+			bodyForTokenExtraction = finalResponseBody
+			resp.Header.Set("Content-Type", "application/json")
+		}
+
 		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1298,9 +1325,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
-			p.logger.DebugContext(r.Context(), "Proxy response body",
-				"credential", cred.Name, "content_encoding", contentEncoding,
-				"body", logger.TruncateLongFields(string(finalResponseBody), 500))
+			if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
+				p.logger.DebugContext(r.Context(), "Proxy response body masked",
+					"credential", cred.Name,
+					"content_encoding", contentEncoding,
+					"status_code", resp.StatusCode)
+			} else {
+				p.logger.DebugContext(r.Context(), "Proxy response body",
+					"credential", cred.Name, "content_encoding", contentEncoding,
+					"body", logger.TruncateLongFields(string(finalResponseBody), 500))
+			}
 		}
 
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
@@ -1313,10 +1347,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
-			logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
+			if shouldMaskUpstreamErrors(cred) {
+				logCtx.ErrorMsg = "Upstream provider error"
+			} else {
+				logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
+			}
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
-			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, finalResponseBody,
+			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
 		} else if logCtx.TokenUsage != nil {
@@ -1353,6 +1391,18 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logUpstreamError(r.Context(), "Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
+			if shouldMaskUpstreamErrors(cred) {
+				body := maskedUpstreamErrorBody(resp.StatusCode)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+				w.WriteHeader(resp.StatusCode)
+				_, _ = w.Write(body)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = resp.StatusCode
+				logCtx.ErrorMsg = "Upstream provider error"
+				logCtx.TargetURL = targetURL
+				return
+			}
 		}
 		w.WriteHeader(resp.StatusCode)
 

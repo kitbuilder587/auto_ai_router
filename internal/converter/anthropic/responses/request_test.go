@@ -245,6 +245,26 @@ func TestResponsesRequestToAnthropic_ReasoningEffortLow(t *testing.T) {
 	assert.Equal(t, "low", outputConfig["effort"])
 }
 
+func TestResponsesRequestToAnthropic_ReasoningBudgetRaisesMaxTokens(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": "test",
+		"reasoning": {"effort": "low"},
+		"max_output_tokens": 5000
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	thinking := ar["thinking"].(map[string]interface{})
+	assert.Equal(t, "enabled", thinking["type"])
+	assert.Equal(t, float64(5000), thinking["budget_tokens"])
+	assert.Equal(t, float64(6024), ar["max_tokens"])
+}
+
 func TestResponsesRequestToAnthropic_ReasoningEffortNone(t *testing.T) {
 	body := `{
 		"model": "claude-opus-4-5",

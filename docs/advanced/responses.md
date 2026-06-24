@@ -1,6 +1,6 @@
 # Responses API
 
-Auto AI Router implements the [OpenAI Responses API](../refs/openai_responses_api.md) and routes requests natively to Anthropic, Vertex AI, and AWS Bedrock — without converting through Chat Completions format as an intermediary.
+Auto AI Router implements the [OpenAI Responses API](../refs/openai_responses_api.md) and routes requests natively to Anthropic, Comet API, Vertex AI, and AWS Bedrock — without converting through Chat Completions format as an intermediary.
 
 ## Endpoints
 
@@ -275,7 +275,7 @@ The router uses two modes for Responses API requests:
 | **Native**      | Responses API request → provider-specific format directly. Preserves all provider features |
 | **Passthrough** | Responses API request → Chat Completions → provider, then Chat Completions → Responses API |
 
-Native mode is used automatically for **Anthropic**, **Vertex AI**, and **AWS Bedrock**. Passthrough is used for OpenAI and other providers that already speak Responses API natively.
+Native mode is used automatically for **Anthropic**, **Comet API**, **Vertex AI**, and **AWS Bedrock**. Passthrough is used for OpenAI and other providers that already speak Responses API natively.
 
 The mode can be overridden via model configuration:
 
@@ -287,19 +287,19 @@ models:
 
 ## Provider Support
 
-| Feature                  | Anthropic | Vertex AI | Bedrock | OpenAI |
-| ------------------------ | --------- | --------- | ------- | ------ |
-| Non-streaming            | ✅        | ✅        | ✅      | ✅     |
-| Streaming (SSE)          | ✅        | ✅        | ✅      | ✅     |
-| WebSocket                | ✅        | ✅        | ✅      | ✅     |
-| `store` / response store | ✅        | ✅        | ✅      | ✅     |
-| `previous_response_id`   | ✅        | ✅        | ✅      | ✅     |
-| `tools` (function)       | ✅        | ✅        | ✅      | ✅     |
-| `reasoning`              | ✅        | ✅        | ✅      | ✅     |
-| `presence_penalty`       | ❌        | ✅        | ❌      | ✅     |
-| `frequency_penalty`      | ❌        | ✅        | ❌      | ✅     |
-| `top_logprobs`           | ❌        | ✅        | ❌      | ✅     |
-| `compact` endpoint       | ✅        | ✅        | ✅      | ✅     |
+| Feature                  | Anthropic | Comet API | Vertex AI | Bedrock | OpenAI |
+| ------------------------ | --------- | --------- | --------- | ------- | ------ |
+| Non-streaming            | ✅        | ✅        | ✅        | ✅      | ✅     |
+| Streaming (SSE)          | ✅        | ✅        | ✅        | ✅      | ✅     |
+| WebSocket                | ✅        | ✅        | ✅        | ✅      | ✅     |
+| `store` / response store | ✅        | ✅        | ✅        | ✅      | ✅     |
+| `previous_response_id`   | ✅        | ✅        | ✅        | ✅      | ✅     |
+| `tools` (function)       | ✅        | ✅        | ✅        | ✅      | ✅     |
+| `reasoning`              | ✅        | ✅        | ✅        | ✅      | ✅     |
+| `presence_penalty`       | ❌        | ❌        | ✅        | ❌      | ✅     |
+| `frequency_penalty`      | ❌        | ❌        | ✅        | ❌      | ✅     |
+| `top_logprobs`           | ❌        | ❌        | ✅        | ❌      | ✅     |
+| `compact` endpoint       | ✅        | ✅        | ✅        | ✅      | ✅     |
 
 ## Retry and Fallback
 

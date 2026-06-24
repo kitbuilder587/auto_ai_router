@@ -119,7 +119,7 @@ func (p *Proxy) orchestrateRequest(
 	// Auto-inject Anthropic prompt-caching markers when a session is active.
 	// This maximises cache hit rate when session-sticky routing keeps traffic on one credential.
 	if p.stickyAutoCacheCtrl &&
-		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeBedrock) &&
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeBedrock) &&
 		(logCtx.SessionID != "" || preferredCredentialName != "") {
 		body = anthropicconv.InjectCacheControl(body)
 	}

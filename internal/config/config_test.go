@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoad_ValidConfig(t *testing.T) {
@@ -40,6 +41,7 @@ credentials:
     type: "openai"
     api_key: "sk-yyyy"
     base_url: "https://api.custom-provider.com"
+    auth_type: "bearer"
     rpm: 120
 
 monitoring:
@@ -70,10 +72,30 @@ monitoring:
 	assert.Len(t, cfg.Credentials, 2)
 	assert.Equal(t, "provider_1", cfg.Credentials[0].Name)
 	assert.Equal(t, 60, cfg.Credentials[0].RPM)
+	assert.Equal(t, "bearer", cfg.Credentials[1].AuthType)
 
 	// Validate monitoring
 	assert.True(t, cfg.Monitoring.PrometheusEnabled)
 	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
+}
+
+func TestConfig_Validate_InvalidAuthType(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "test", Type: "anthropic", APIKey: "key", BaseURL: "http://test.com", AuthType: "basic", RPM: 10},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	err := cfg.Validate()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid auth_type")
 }
 
 func TestLoad_FileNotFound(t *testing.T) {
@@ -599,6 +621,7 @@ func TestProviderType_IsValid(t *testing.T) {
 	}{
 		{"openai", ProviderTypeOpenAI, true},
 		{"vertex-ai", ProviderTypeVertexAI, true},
+		{"cometapi", ProviderTypeCometAPI, true},
 		{"invalid", ProviderType("azure"), false},
 		{"empty", ProviderType(""), false},
 	}
@@ -608,6 +631,20 @@ func TestProviderType_IsValid(t *testing.T) {
 			assert.Equal(t, tt.valid, tt.provider.IsValid())
 		})
 	}
+}
+
+func TestCredentialConfig_NormalizeCometAPIProviderType(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: comet
+type: comet-api
+api_key: key
+base_url: https://api.cometapi.com/v1
+rpm: 60
+`), &cred)
+
+	require.NoError(t, err)
+	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
 }
 
 func TestConfig_Validate_VertexAI(t *testing.T) {

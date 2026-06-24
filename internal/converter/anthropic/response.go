@@ -124,7 +124,8 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 	// map cache_read + cache_creation tokens to prompt_tokens_details
 	if usage.CacheReadInputTokens > 0 || usage.CacheCreationInputTokens > 0 {
 		result.PromptTokensDetails = &openai.TokenDetails{
-			CachedTokens: usage.CacheReadInputTokens,
+			CachedTokens:        usage.CacheReadInputTokens,
+			CacheCreationTokens: usage.CacheCreationInputTokens,
 		}
 	}
 	return result

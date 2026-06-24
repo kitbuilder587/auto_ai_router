@@ -32,10 +32,50 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 	}
 	args = append(args, "model", modelID)
 	if len(responseBody) > 0 {
-		args = append(args, "response_body", logger.TruncateLongFields(string(responseBody), 500))
+		args = appendResponseBodyForLogs(args, cred, string(responseBody))
 	}
 	args = append(args, extra...)
 	p.logger.ErrorContext(ctx, msg, args...)
+}
+
+func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
+	if shouldMaskUpstreamErrors(cred) {
+		return append(args, "response_body_masked", true)
+	}
+	return append(args, "response_body", logger.TruncateLongFields(body, 500))
+}
+
+func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
+	return isCometAPICredential(cred)
+}
+
+func isCometAPICredential(cred *config.CredentialConfig) bool {
+	if cred == nil {
+		return false
+	}
+	if cred.Type == config.ProviderTypeCometAPI {
+		return true
+	}
+	name := strings.ToLower(cred.Name)
+	return isCometAPIHost(cred.BaseURL) ||
+		strings.Contains(name, "cometapi") ||
+		strings.Contains(name, "comet-api")
+}
+
+func isCometAPIHost(rawBaseURL string) bool {
+	baseURL := strings.TrimSpace(rawBaseURL)
+	if baseURL == "" {
+		return false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Hostname() == "" {
+		u, err = url.Parse("https://" + baseURL)
+		if err != nil {
+			return false
+		}
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are

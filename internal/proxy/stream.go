@@ -290,7 +290,9 @@ func (p *Proxy) handleProviderStreaming(
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return p.handleVertexStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
 	case config.ProviderTypeAnthropic:
-		return p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred.Name, realModelID, displayModelID, cred.Type, "Anthropic", logCtx)
+	case config.ProviderTypeCometAPI:
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred.Name, realModelID, displayModelID, cred.Type, "Comet API", logCtx)
 	case config.ProviderTypeBedrock:
 		return p.handleBedrockStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
 	default:
@@ -306,12 +308,12 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", transformer, logCtx)
 }
 
-func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
-	conv := converter.New(config.ProviderTypeAnthropic, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
+func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
+	conv := converter.New(providerType, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}
-	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", transformer, logCtx)
+	return p.handleTransformedStreaming(w, resp, credName, modelID, providerLabel, transformer, logCtx)
 }
 
 func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {

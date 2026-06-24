@@ -24,6 +24,7 @@ const (
 	ProviderTypeVertexAI  ProviderType = "vertex-ai"
 	ProviderTypeGemini    ProviderType = "gemini"
 	ProviderTypeAnthropic ProviderType = "anthropic"
+	ProviderTypeCometAPI  ProviderType = "cometapi"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
@@ -38,10 +39,19 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeBedrock, ProviderTypeProxy:
 		return true
 	}
 	return false
+}
+
+func normalizeProviderType(raw string) ProviderType {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "comet-api", "comet_api":
+		return ProviderTypeCometAPI
+	default:
+		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
+	}
 }
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
@@ -532,13 +542,14 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name    string       `yaml:"name"`
-	Type    ProviderType `yaml:"type"`
-	APIKey  string       `yaml:"api_key"`
-	BaseURL string       `yaml:"base_url"`
-	RPM     int          `yaml:"rpm"`
-	TPM     int          `yaml:"tpm"`
-	Weight  int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	Name     string       `yaml:"name"`
+	Type     ProviderType `yaml:"type"`
+	APIKey   string       `yaml:"api_key"`
+	BaseURL  string       `yaml:"base_url"`
+	AuthType string       `yaml:"auth_type,omitempty"`
+	RPM      int          `yaml:"rpm"`
+	TPM      int          `yaml:"tpm"`
+	Weight   int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -561,6 +572,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		Type            string           `yaml:"type"`
 		APIKey          string           `yaml:"api_key"`
 		BaseURL         string           `yaml:"base_url"`
+		AuthType        string           `yaml:"auth_type,omitempty"`
 		RPM             string           `yaml:"rpm"`
 		TPM             string           `yaml:"tpm"`
 		Weight          string           `yaml:"weight"`
@@ -579,9 +591,10 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Resolve string fields
 	c.Name = resolveEnvString(temp.Name)
-	c.Type = ProviderType(resolveEnvString(temp.Type))
+	c.Type = normalizeProviderType(resolveEnvString(temp.Type))
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
+	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
 
 	// Resolve Vertex AI specific fields
 	c.ProjectID = resolveEnvString(temp.ProjectID)
@@ -1194,7 +1207,10 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+		}
+		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
+			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
 		}
 
 		// Validate by provider type

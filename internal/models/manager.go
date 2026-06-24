@@ -311,6 +311,7 @@ var providerPassthroughDefaults = map[config.ProviderType]bool{
 	config.ProviderTypeVertexAI:  false,
 	config.ProviderTypeGemini:    false,
 	config.ProviderTypeAnthropic: false,
+	config.ProviderTypeCometAPI:  false,
 	config.ProviderTypeBedrock:   false,
 }
 
@@ -1123,6 +1124,7 @@ var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
 	config.ProviderTypeVertexAI:  "vertex_ai",
 	config.ProviderTypeGemini:    "gemini",
 	config.ProviderTypeAnthropic: "anthropic",
+	config.ProviderTypeCometAPI:  "cometapi",
 	config.ProviderTypeBedrock:   "bedrock",
 	config.ProviderTypeProxy:     "openai",
 }
