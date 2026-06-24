@@ -76,3 +76,56 @@ func TestDecodeBase64(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildVersionedURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		apiPath string
+		want    string
+	}{
+		{
+			name:    "base without version",
+			baseURL: "https://api.example.com",
+			apiPath: "/v1/messages",
+			want:    "https://api.example.com/v1/messages",
+		},
+		{
+			name:    "base with same version",
+			baseURL: "https://api.example.com/v1",
+			apiPath: "/v1/messages",
+			want:    "https://api.example.com/v1/messages",
+		},
+		{
+			name:    "base with trailing slash and same version",
+			baseURL: "https://api.example.com/v1/",
+			apiPath: "/v1/messages",
+			want:    "https://api.example.com/v1/messages",
+		},
+		{
+			name:    "path without leading slash",
+			baseURL: "https://api.example.com/v1",
+			apiPath: "v1/messages",
+			want:    "https://api.example.com/v1/messages",
+		},
+		{
+			name:    "different versions are preserved",
+			baseURL: "https://api.example.com/v2",
+			apiPath: "/v1/messages",
+			want:    "https://api.example.com/v2/v1/messages",
+		},
+		{
+			name:    "non-version suffix is preserved",
+			baseURL: "https://api.example.com/api",
+			apiPath: "/v1/messages",
+			want:    "https://api.example.com/api/v1/messages",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildVersionedURL(tt.baseURL, tt.apiPath)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

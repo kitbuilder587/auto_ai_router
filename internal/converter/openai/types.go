@@ -121,8 +121,9 @@ type ImageData struct {
 }
 
 type TokenDetails struct {
-	CachedTokens int `json:"cached_tokens,omitempty"`
-	AudioTokens  int `json:"audio_tokens,omitempty"`
+	CachedTokens        int `json:"cached_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	AudioTokens         int `json:"audio_tokens,omitempty"`
 }
 
 type CompletionTokenDetails struct {

@@ -79,6 +79,7 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 		if tc != nil {
 			ar.Thinking = tc
 			ar.OutputConfig = oc
+			ar.MaxTokens = anthropic.EnsureMaxTokensForThinking(ar.MaxTokens, tc)
 			if oc != nil {
 				ar.AnthropicBeta = appendUnique(ar.AnthropicBeta, "effort-2025-11-24")
 			} else {

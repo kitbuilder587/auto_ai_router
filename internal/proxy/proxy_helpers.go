@@ -144,10 +144,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	// Build usage_object and additional_usage_values
 	promptTokensDetails := map[string]interface{}{
-		"text_tokens":   nil,
-		"audio_tokens":  0,
-		"image_tokens":  nil,
-		"cached_tokens": 0,
+		"text_tokens":           nil,
+		"audio_tokens":          0,
+		"image_tokens":          nil,
+		"cached_tokens":         0,
+		"cache_creation_tokens": 0,
 	}
 	completionTokensDetails := map[string]interface{}{
 		"text_tokens":                nil,
@@ -162,6 +163,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	if usage != nil {
 		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
+		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
 		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
 		completionTokensDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
@@ -177,8 +179,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	additionalUsage := map[string]interface{}{
 		"prompt_tokens_details": map[string]interface{}{
-			"audio_tokens":  promptTokensDetails["audio_tokens"],
-			"cached_tokens": promptTokensDetails["cached_tokens"],
+			"audio_tokens":          promptTokensDetails["audio_tokens"],
+			"cached_tokens":         promptTokensDetails["cached_tokens"],
+			"cache_creation_tokens": promptTokensDetails["cache_creation_tokens"],
 		},
 		"completion_tokens_details": map[string]interface{}{
 			"audio_tokens":               completionTokensDetails["audio_tokens"],

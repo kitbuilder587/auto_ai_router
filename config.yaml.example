@@ -68,6 +68,23 @@ credentials:
     rpm: 60
     tpm: -1
 
+  # Comet API using the Anthropic-compatible Messages API
+  - name: "comet_anthropic"
+    type: "cometapi"
+    api_key: "os.environ/COMET_API_KEY"
+    base_url: "https://api.cometapi.com/v1"
+    rpm: 60
+    tpm: -1
+
+  # CheapGPT / AIProductiv using the Anthropic-compatible Messages API
+  - name: "cheapgpt_anthropic"
+    type: "anthropic"
+    api_key: "os.environ/CHEAPGPT_API_KEY"
+    auth_type: "bearer"
+    base_url: "https://api.aiproductiv.ru/v1"
+    rpm: 60
+    tpm: -1
+
   # Proxy credential (forwards requests to another auto_ai_router instance)
   - name: "proxy_fallback"
     type: "proxy"
@@ -88,6 +105,118 @@ models:
     credential: vertex_ai
     rpm: 100
     tpm: 50000
+
+  # Comet API Claude aliases for public model names.
+  - name: "anthropic/claude-haiku-4.5"
+    model: "claude-haiku-4-5-20251001"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-haiku-4.5"
+    model: "claude-haiku-4-5-20251001"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-haiku-4-5-20251001"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.1"
+    model: "claude-opus-4-1-20250805"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4.1"
+    model: "claude-opus-4-1-20250805"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-1-20250805"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.5"
+    model: "claude-opus-4-5-20251101"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4.5"
+    model: "claude-opus-4-5-20251101"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-5-20251101"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.6"
+    model: "claude-opus-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.7"
+    model: "claude-opus-4-7"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-7"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-sonnet-4"
+    model: "claude-sonnet-4-20250514"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4"
+    model: "claude-sonnet-4-20250514"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-sonnet-4.5"
+    model: "claude-sonnet-4-5-20250929"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4.5"
+    model: "claude-sonnet-4-5-20250929"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4-5-20250929"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4-5"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-sonnet-4.6"
+    model: "claude-sonnet-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "cheapgpt/claude-sonnet-4.5"
+    model: "claude-sonnet-4-5"
+    credential: cheapgpt_anthropic
+    rpm: 60
+    tpm: -1
 
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are

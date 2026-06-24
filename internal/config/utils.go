@@ -121,6 +121,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"name":        cred.Name,
 			"type":        cred.Type,
 			"base_url":    cred.BaseURL,
+			"auth_type":   cred.AuthType,
 			"rpm":         rpmToString(cred.RPM),
 			"tpm":         tpmToString(cred.TPM),
 			"is_fallback": cred.IsFallback,
@@ -234,7 +235,7 @@ func banDurationToString(d time.Duration) string {
 func convertMapToArgs(m map[string]any) []any {
 	// Define preferred order of keys
 	keyOrder := []string{
-		"name", "type", "base_url", "api_key", "project_id", "location",
+		"name", "type", "base_url", "auth_type", "api_key", "project_id", "location",
 		"credentials_file", "credentials_json", "rpm", "tpm", "is_fallback",
 	}
 
