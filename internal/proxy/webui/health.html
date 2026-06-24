@@ -76,6 +76,7 @@
           <button class="wf-btn" id="sortName" onclick="sortModels('name',this)">sort by name</button>
           <button class="wf-btn" id="sortRpm" onclick="sortModels('rpm',this)">sort by RPM</button>
           <button class="wf-btn primary" id="sortTpm" onclick="sortModels('tpm',this)">sort by TPM</button>
+          <button class="wf-btn" id="sortWeight" onclick="sortModels('weight',this)">sort by weight</button>
           <button class="wf-btn" id="sortCred" onclick="sortModels('credential',this)">sort by cred</button>
         </div>
         <table class="wf-table">
@@ -83,6 +84,7 @@
             <tr>
               <th>model</th>
               <th>credential</th>
+              <th style="width:90px;">weight</th>
               <th style="width:200px;">RPM</th>
               <th style="width:200px;">TPM</th>
               <th>status</th>
@@ -187,6 +189,7 @@
         const bannedCls = c.is_banned ? ' banned' : '';
 
         let badges = badge(TYPE_CLASS[c.type] || '', c.type);
+        badges += badge('info', `w:${fmtNum(c.weight || 1)}`);
         if (c.is_fallback) badges += badge('', 'fallback');
         if (c.is_banned) badges += badge('err', 'banned');
 
@@ -238,6 +241,7 @@
             bv = modelFamily(b.model) + '\x00' + b.model.toLowerCase();
             break;
           case 'credential': av = a.credential.toLowerCase(); bv = b.credential.toLowerCase(); break;
+          case 'weight': av = a.weight || 1; bv = b.weight || 1; break;
           case 'rpm': av = pct(a.current_rpm, a.limit_rpm); bv = pct(b.current_rpm, b.limit_rpm); break;
           default: av = pct(a.current_tpm, a.limit_tpm); bv = pct(b.current_tpm, b.limit_tpm);
         }
@@ -257,7 +261,7 @@
             : modelFamily(m.model);
           if (groupKey !== lastGroupKey) {
             lastGroupKey = groupKey;
-            rows.push(`<tr class="group-header"><td colspan="5">${esc(groupKey)}</td></tr>`);
+            rows.push(`<tr class="group-header"><td colspan="6">${esc(groupKey)}</td></tr>`);
           }
         }
 
@@ -272,6 +276,7 @@
         rows.push(`<tr>
       <td>${esc(m.model)}</td>
       <td class="muted">${esc(m.credential)}</td>
+      <td class="muted">${fmtNum(m.weight || 1)}</td>
       <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
       <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
       <td>${statusBadge}</td>

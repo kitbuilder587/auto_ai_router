@@ -246,6 +246,56 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 	assert.ElementsMatch(t, []string{"fallback-only", "primary-only", "shared-model"}, modelIDs(fallbackModels))
 }
 
+func TestGetRemoteModelsWithError_AggregatesRemoteHealthWeights(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+				Credentials: map[string]httputil.CredentialHealthStats{
+					"primary-heavy":  {Type: "openai", IsFallback: false, Weight: 20},
+					"primary-model":  {Type: "openai", IsFallback: false, Weight: 3},
+					"primary-legacy": {Type: "openai", IsFallback: false},
+					"fallback":       {Type: "openai", IsFallback: true, Weight: 100},
+				},
+				Models: map[string]httputil.ModelHealthStats{
+					"m1": {Credential: "primary-heavy", Model: "gpt-4"},
+					"m2": {Credential: "primary-model", Model: "gpt-4", Weight: 5},
+					"m3": {Credential: "primary-legacy", Model: "gpt-4"},
+					"m4": {Credential: "fallback", Model: "gpt-4"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+
+	primaryModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+		Name:       "proxy-primary",
+		Type:       config.ProviderTypeProxy,
+		BaseURL:    server.URL,
+		IsFallback: false,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gpt-4"}, modelIDs(primaryModels))
+	assert.Equal(t, 26, m.GetModelWeightForCredential("gpt-4", "proxy-primary"))
+
+	fallbackModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+		Name:       "proxy-fallback",
+		Type:       config.ProviderTypeProxy,
+		BaseURL:    server.URL,
+		IsFallback: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gpt-4"}, modelIDs(fallbackModels))
+	assert.Equal(t, 126, m.GetModelWeightForCredential("gpt-4", "proxy-fallback"))
+}
+
 func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthUnavailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 

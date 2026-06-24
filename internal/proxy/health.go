@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 
+	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
@@ -18,10 +19,12 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 	// Collect credentials info
 	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
+	credentialConfigs := make(map[string]config.CredentialConfig)
 	if creds == nil {
 		creds = []config.CredentialConfig{}
 	}
 	for _, cred := range creds {
+		credentialConfigs[cred.Name] = cred
 		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
 		// For other credentials, use config values
 		limitRPM := cred.RPM
@@ -44,6 +47,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			Type:       string(cred.Type),
 			IsFallback: cred.IsFallback,
 			IsBanned:   isBanned,
+			Weight:     balancer.EffectiveWeight(0, cred.Weight),
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
 			LimitRPM:   limitRPM,
@@ -59,10 +63,19 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	allTrackedModels := p.rateLimiter.GetAllModelPairs()
 	for _, pair := range allTrackedModels {
 		modelKey := pair.Credential + ":" + pair.Model
+		credWeight := 0
+		if cred, ok := credentialConfigs[pair.Credential]; ok {
+			credWeight = cred.Weight
+		}
+		modelWeight := 0
+		if p.modelManager != nil {
+			modelWeight = p.modelManager.GetModelWeightForCredential(pair.Model, pair.Credential)
+		}
 		modelsInfo[modelKey] = httputil.ModelHealthStats{
 			Credential: pair.Credential,
 			Model:      pair.Model,
 			IsBanned:   p.balancer.IsBanned(pair.Credential, pair.Model),
+			Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
 			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
 			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
 			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),

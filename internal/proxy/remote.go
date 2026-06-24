@@ -12,6 +12,7 @@ import (
 // ModelManagerInterface for adding dynamically loaded models
 type ModelManagerInterface interface {
 	AddModel(credentialName, modelID string)
+	SetModelWeightForCredential(modelID, credentialName string, weight int)
 }
 
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
@@ -66,6 +67,7 @@ func UpdateStatsFromHealth(
 type limitAggregation struct {
 	rpm             int
 	tpm             int
+	weight          int
 	currentRPM      int
 	currentTPM      int
 	hasUnlimitedRPM bool
@@ -91,6 +93,12 @@ func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
 
 	agg.currentRPM += currentRPM
 	agg.currentTPM += currentTPM
+}
+
+func (agg *limitAggregation) applyWeight(weight int) {
+	if weight > 0 {
+		agg.weight += weight
+	}
 }
 
 func (agg *limitAggregation) finalizeLimits() (int, int) {
@@ -196,15 +204,15 @@ func updateModelLimits(
 		tpm := modelStats_data.LimitTPM
 		curRPM := modelStats_data.CurrentRPM
 		curTPM := modelStats_data.CurrentTPM
+		weight := effectiveRemoteModelWeight(modelStats_data, credStats)
 
-		if rpm > 0 || tpm > 0 || curRPM > 0 || curTPM > 0 {
-			aggregation, ok := modelStats[modelID]
-			if !ok {
-				aggregation = newSumLimitAggregation()
-				modelStats[modelID] = aggregation
-			}
-			aggregation.applySum(rpm, tpm, curRPM, curTPM)
+		aggregation, ok := modelStats[modelID]
+		if !ok {
+			aggregation = newSumLimitAggregation()
+			modelStats[modelID] = aggregation
 		}
+		aggregation.applySum(rpm, tpm, curRPM, curTPM)
+		aggregation.applyWeight(weight)
 	}
 
 	// Update rate limiter with aggregated model limits
@@ -221,6 +229,7 @@ func updateModelLimits(
 		// Add model to modelManager for dynamic model filtering
 		if modelManager != nil {
 			modelManager.AddModel(cred.Name, modelID)
+			modelManager.SetModelWeightForCredential(modelID, cred.Name, stats.weight)
 		}
 
 		modelsUpdated++
@@ -232,4 +241,14 @@ func updateModelLimits(
 			"models_updated", modelsUpdated,
 		)
 	}
+}
+
+func effectiveRemoteModelWeight(modelStats httputil.ModelHealthStats, credStats httputil.CredentialHealthStats) int {
+	if modelStats.Weight > 0 {
+		return modelStats.Weight
+	}
+	if credStats.Weight > 0 {
+		return credStats.Weight
+	}
+	return 1
 }

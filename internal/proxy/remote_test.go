@@ -345,6 +345,7 @@ type MockModelManager struct {
 		credential string
 		model      string
 	}
+	weights map[string]map[string]int
 }
 
 func NewMockModelManager() *MockModelManager {
@@ -353,6 +354,7 @@ func NewMockModelManager() *MockModelManager {
 			credential string
 			model      string
 		}, 0),
+		weights: make(map[string]map[string]int),
 	}
 }
 
@@ -363,6 +365,33 @@ func (m *MockModelManager) AddModel(credentialName, modelID string) {
 		credential string
 		model      string
 	}{credentialName, modelID})
+}
+
+func (m *MockModelManager) SetModelWeightForCredential(modelID, credentialName string, weight int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if weight <= 0 {
+		if weights, ok := m.weights[modelID]; ok {
+			delete(weights, credentialName)
+			if len(weights) == 0 {
+				delete(m.weights, modelID)
+			}
+		}
+		return
+	}
+	if m.weights[modelID] == nil {
+		m.weights[modelID] = make(map[string]int)
+	}
+	m.weights[modelID][credentialName] = weight
+}
+
+func (m *MockModelManager) GetModelWeightForCredential(modelID, credentialName string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if weights, ok := m.weights[modelID]; ok {
+		return weights[credentialName]
+	}
+	return 0
 }
 
 func (m *MockModelManager) GetAddedModels() []struct {
@@ -469,6 +498,37 @@ func TestUpdateStatsFromRemoteProxy_Success(t *testing.T) {
 	// Both gpt-4 and claude-3-opus should be present (they have non-zero limits/usage)
 	assert.True(t, modelSet["gpt-4"], "gpt-4 model should be added (aggregated from multiple credentials)")
 	assert.True(t, modelSet["claude-3-opus"], "claude-3-opus model should be added")
+
+	assert.Equal(t, 12, mockMM.GetModelWeightForCredential("gpt-4", "proxy-remote"),
+		"gpt-4 weight should be sum of remote model weights")
+	assert.Equal(t, 3, mockMM.GetModelWeightForCredential("claude-3-opus", "proxy-remote"),
+		"model without explicit weight should fall back to remote credential weight")
+}
+
+func TestUpdateStatsFromHealth_AggregatesRemoteWeightsWithLegacyFallback(t *testing.T) {
+	mockMM := NewMockModelManager()
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"weighted-a": {Weight: 20},
+			"weighted-b": {Weight: 2},
+			"legacy":     {},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"gpt4-a": {Credential: "weighted-a", Model: "gpt-4", Weight: 7},
+			"gpt4-b": {Credential: "weighted-b", Model: "gpt-4"},
+			"gpt4-c": {Credential: "legacy", Model: "gpt-4"},
+		},
+	}
+
+	UpdateStatsFromHealth(health, &config.CredentialConfig{
+		Name: "proxy-remote",
+	}, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 10, mockMM.GetModelWeightForCredential("gpt-4", "proxy-remote"),
+		"explicit model weight + credential fallback + legacy default should be aggregated")
 }
 
 func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {

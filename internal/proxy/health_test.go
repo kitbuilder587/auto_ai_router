@@ -75,6 +75,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 			BaseURL:    "http://openai.com",
 			RPM:        100,
 			TPM:        2000,
+			Weight:     7,
 			IsFallback: false,
 		},
 		{
@@ -107,6 +108,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	openaiStats := status.Credentials["openai_cred"]
 	assert.Equal(t, "openai", openaiStats.Type)
 	assert.Equal(t, false, openaiStats.IsFallback)
+	assert.Equal(t, 7, openaiStats.Weight)
 	assert.Equal(t, 100, openaiStats.LimitRPM)
 	assert.Equal(t, 2000, openaiStats.LimitTPM)
 
@@ -159,6 +161,7 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 		APIKey:  "sk-test",
 		BaseURL: "http://test.com",
 		RPM:     100,
+		Weight:  4,
 	}
 
 	rl.AddCredential(cred.Name, 100)
@@ -170,7 +173,9 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	mm := models.New(logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-4", Credential: "test_cred", Weight: 9},
+	})
 
 	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
@@ -178,6 +183,8 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 
 	// Should have model info
 	assert.NotNil(t, status.Models)
+	assert.Equal(t, 9, status.Models["test_cred:gpt-4"].Weight)
+	assert.Equal(t, 4, status.Models["test_cred:claude-3-opus"].Weight)
 }
 
 func TestVisualHealthCheck_Success(t *testing.T) {

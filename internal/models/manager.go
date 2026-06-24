@@ -152,6 +152,7 @@ type Manager struct {
 	staticModelRealNames        map[string]string            // immutable snapshot of global real names from config.yaml
 	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
 	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
+	dynamicModelWeights         map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
 	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
 	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
@@ -179,6 +180,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
+		dynamicModelWeights:         make(map[string]map[string]int),
 		defaultModelsRPM:            defaultModelsRPM,
 		logger:                      logger,
 		credentials:                 make([]config.CredentialConfig, 0),
@@ -925,6 +927,32 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	}
 }
 
+// SetModelWeightForCredential stores a dynamic model-level weight learned from a proxy
+// upstream. Static config/DB model weights still take precedence when present.
+func (m *Manager) SetModelWeightForCredential(modelID, credentialName string, weight int) {
+	if modelID == "" || credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if weight <= 0 {
+		if weights, ok := m.dynamicModelWeights[modelID]; ok {
+			delete(weights, credentialName)
+			if len(weights) == 0 {
+				delete(m.dynamicModelWeights, modelID)
+			}
+		}
+		return
+	}
+
+	if m.dynamicModelWeights[modelID] == nil {
+		m.dynamicModelWeights[modelID] = make(map[string]int)
+	}
+	m.dynamicModelWeights[modelID][credentialName] = weight
+}
+
 // contains checks if a string slice contains a value
 func (m *Manager) contains(slice []string, value string) bool {
 	for _, item := range slice {
@@ -1059,13 +1087,16 @@ func (m *Manager) GetModelWeightForCredential(modelID, credentialName string) in
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	limits, ok := m.modelLimits[modelID]
-	if !ok {
-		return 0
+	if limits, ok := m.modelLimits[modelID]; ok {
+		if weight, found := findWeightLimit(limits, credentialName); found {
+			return weight
+		}
 	}
 
-	if weight, found := findWeightLimit(limits, credentialName); found {
-		return weight
+	if weights, ok := m.dynamicModelWeights[modelID]; ok {
+		if weight := weights[credentialName]; weight > 0 {
+			return weight
+		}
 	}
 
 	return 0
@@ -1336,6 +1367,7 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 	}
 
 	modelsByID := make(map[string]Model)
+	modelWeightsByID := make(map[string]int)
 	for _, modelStats := range health.Models {
 		credStats, ok := health.Credentials[modelStats.Credential]
 		if !ok {
@@ -1351,6 +1383,7 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		if modelStats.Model == "" {
 			continue
 		}
+		modelWeightsByID[modelStats.Model] += effectiveRemoteHealthWeight(modelStats, credStats)
 		if _, exists := modelsByID[modelStats.Model]; exists {
 			continue
 		}
@@ -1359,6 +1392,10 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 			Object:  "model",
 			OwnedBy: credStats.Type,
 		}
+	}
+
+	for modelID, weight := range modelWeightsByID {
+		m.SetModelWeightForCredential(modelID, cred.Name, weight)
 	}
 
 	models := make([]Model, 0, len(modelsByID))
@@ -1370,4 +1407,14 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 	})
 
 	return models, nil
+}
+
+func effectiveRemoteHealthWeight(modelStats httputil.ModelHealthStats, credStats httputil.CredentialHealthStats) int {
+	if modelStats.Weight > 0 {
+		return modelStats.Weight
+	}
+	if credStats.Weight > 0 {
+		return credStats.Weight
+	}
+	return 1
 }
