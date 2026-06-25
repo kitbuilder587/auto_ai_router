@@ -40,7 +40,10 @@ func (p *Proxy) logUpstreamError(ctx context.Context, msg string, errorCode int,
 
 func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body string) []any {
 	if shouldMaskUpstreamErrors(cred) {
-		return append(args, "response_body_masked", true)
+		return append(args,
+			"response_body_masked", true,
+			"response_body", body,
+		)
 	}
 	return append(args, "response_body", logger.TruncateLongFields(body, 500))
 }

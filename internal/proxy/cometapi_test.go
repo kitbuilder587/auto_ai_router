@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -46,4 +47,16 @@ func TestIsCometAPICredential(t *testing.T) {
 			assert.Equal(t, tt.want, shouldMaskUpstreamErrors(tt.cred))
 		})
 	}
+}
+
+func TestAppendResponseBodyForLogs_CometKeepsMaskedFlagAndLogsBody(t *testing.T) {
+	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
+	body := `{"error":{"code":"permission_denied","message":"` + strings.Repeat("model access denied ", 50) + `","type":"comet_api_error"}}`
+
+	args := appendResponseBodyForLogs([]any{}, cred, body)
+
+	assert.Contains(t, args, "response_body_masked")
+	assert.Contains(t, args, true)
+	assert.Contains(t, args, "response_body")
+	assert.Contains(t, args, body)
 }
