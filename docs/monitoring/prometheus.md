@@ -9,6 +9,8 @@ monitoring:
 
 Metrics are available at `/metrics`.
 
+The same metrics can also be **pushed** to an OTLP collector instead of (or in addition to) being scraped — see [OpenTelemetry](otel.md).
+
 ## Available Metrics
 
 | Metric                                     | Type      | Description                                                |
