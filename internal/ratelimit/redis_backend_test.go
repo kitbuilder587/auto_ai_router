@@ -265,21 +265,22 @@ func TestRedisBackend_Integration_TryAllowAll_AllPass(t *testing.T) {
 
 	allowed := b.tryAllowAll(ctx, "cred1", 10, 10000, "model1", 5, 5000)
 	assert.True(t, allowed)
-	assert.Equal(t, 1, b.currentRPM(ctx, "cred1"))
-	assert.Equal(t, 1, b.currentRPM(ctx, "model1"))
+	// tryAllowAll uses rpmKey/tpmKey — same namespace as currentRPM/currentTPM.
+	assert.Equal(t, 1, b.currentRPM(ctx, "cred1"), "cred RPM must be recorded")
+	assert.Equal(t, 1, b.currentRPM(ctx, "model1"), "model RPM must be recorded")
 }
 
 func TestRedisBackend_Integration_TryAllowAll_CredRPMExhausted(t *testing.T) {
 	b := redisBackendForTest(t, "test:all2:")
 	ctx := context.Background()
 
-	// exhaust cred RPM
+	// Exhaust cred RPM via the same key namespace that tryAllowAll checks.
 	b.tryAllowRPM(ctx, "cred1", 2)
 	b.tryAllowRPM(ctx, "cred1", 2)
 
 	allowed := b.tryAllowAll(ctx, "cred1", 2, -1, "model1", 10, -1)
 	assert.False(t, allowed)
-	// model RPM should not have been recorded
+	// model RPM must not have been recorded (check failed before record).
 	assert.Equal(t, 0, b.currentRPM(ctx, "model1"))
 }
 
@@ -287,13 +288,13 @@ func TestRedisBackend_Integration_TryAllowAll_ModelRPMExhausted(t *testing.T) {
 	b := redisBackendForTest(t, "test:all3:")
 	ctx := context.Background()
 
-	// exhaust model RPM
+	// Exhaust model RPM via the same key namespace that tryAllowAll checks.
 	b.tryAllowRPM(ctx, "model1", 2)
 	b.tryAllowRPM(ctx, "model1", 2)
 
 	allowed := b.tryAllowAll(ctx, "cred1", 10, -1, "model1", 2, -1)
 	assert.False(t, allowed)
-	// cred RPM must NOT have been recorded (atomic check-and-record)
+	// Cred RPM must NOT have been recorded (atomic check-and-record).
 	assert.Equal(t, 0, b.currentRPM(ctx, "cred1"))
 }
 
@@ -301,10 +302,42 @@ func TestRedisBackend_Integration_TryAllowAll_NoModel(t *testing.T) {
 	b := redisBackendForTest(t, "test:all4:")
 	ctx := context.Background()
 
-	// Empty modelKey means no model checks
+	// Empty modelKey means no model checks.
 	allowed := b.tryAllowAll(ctx, "cred1", 10, -1, "", -1, -1)
 	assert.True(t, allowed)
 	assert.Equal(t, 1, b.currentRPM(ctx, "cred1"))
+}
+
+func TestRedisBackend_Integration_TryAllowAll_CredTPMExhausted(t *testing.T) {
+	b := redisBackendForTest(t, "test:all5:")
+	ctx := context.Background()
+
+	// Fill cred TPM window.
+	b.consumeTokens(ctx, "cred1", 1000)
+
+	allowed := b.tryAllowAll(ctx, "cred1", 10, 1000, "", -1, -1)
+	assert.False(t, allowed, "cred TPM at limit must block")
+	// RPM must not have been recorded.
+	assert.Equal(t, 0, b.currentRPM(ctx, "cred1"))
+}
+
+func TestRedisBackend_Integration_TryAllowAll_ConsumeTokensVisible(t *testing.T) {
+	b := redisBackendForTest(t, "test:all6:")
+	ctx := context.Background()
+
+	// Consume tokens then verify tryAllowAll sees them via the same key namespace.
+	b.consumeTokens(ctx, "cred1", 500)
+	assert.Equal(t, 500, b.currentTPM(ctx, "cred1"))
+
+	// Limit is 1000, current is 500 → should pass.
+	assert.True(t, b.tryAllowAll(ctx, "cred1", 10, 1000, "", -1, -1))
+
+	// Consume remaining budget.
+	b.consumeTokens(ctx, "cred1", 500)
+	assert.Equal(t, 1000, b.currentTPM(ctx, "cred1"))
+
+	// Now at limit → must be rejected.
+	assert.False(t, b.tryAllowAll(ctx, "cred1", 10, 1000, "", -1, -1))
 }
 
 func TestRedisBackend_Integration_CurrentRPM_Empty(t *testing.T) {
