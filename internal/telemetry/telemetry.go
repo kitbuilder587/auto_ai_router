@@ -1,11 +1,15 @@
 // Package telemetry initializes the OpenTelemetry SDK: an OTLP trace exporter
-// with a TracerProvider and an OTLP log exporter with a LoggerProvider.
-// Both are optional and controlled by the otel section of the YAML config.
+// with a TracerProvider, an OTLP log exporter with a LoggerProvider, and an OTLP
+// metric exporter with a MeterProvider. All three are optional and controlled by
+// the otel section of the YAML config.
 //
 // Traces use the global otel.TracerProvider / TextMapPropagator so that
 // otelhttp server and client instrumentation picks them up automatically.
 // Logs are exposed as a slog.Handler (otelslog bridge) that the application
 // fans out to alongside the stdout handler.
+// Metrics reuse the existing Prometheus registry via the prometheus bridge: a
+// PeriodicReader pulls the default Prometheus gatherer and pushes the metrics
+// over OTLP, so no application instrumentation needs to change.
 package telemetry
 
 import (
@@ -20,14 +24,18 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
+	otelprom "go.opentelemetry.io/contrib/bridges/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
@@ -45,11 +53,17 @@ const (
 type Telemetry struct {
 	tracerProvider *sdktrace.TracerProvider
 	loggerProvider *sdklog.LoggerProvider
+	meterProvider  *sdkmetric.MeterProvider
 	logHandler     slog.Handler
 }
 
 // Setup initializes OTEL exporters according to cfg.
 // Returns nil (and no error) when OTEL is disabled in the config.
+//
+// When enabled, metrics are always exported via OTLP: the MeterProvider bridges
+// the application's Prometheus registry (the caller is responsible for keeping
+// collection on whenever OTEL is enabled — see config.MetricsCollectionEnabled).
+// This is independent of the pull-based /metrics endpoint.
 //
 // diag is a logger for export diagnostics (batch sizes at DEBUG, export
 // failures at WARN). It MUST NOT itself ship records via OTEL: logging about
@@ -102,13 +116,9 @@ func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string, 
 	if cfg.LogsEnabled {
 		logExporter, err := newLogExporter(ctx, cfg)
 		if err != nil {
-			// Roll back the partially initialized tracer provider so we don't
-			// leak a background batch goroutine on a failed Setup.
-			if t.tracerProvider != nil {
-				shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
-				_ = t.tracerProvider.Shutdown(shutdownCtx)
-				cancel()
-			}
+			// Roll back the partially initialized providers so we don't leak a
+			// background batch goroutine on a failed Setup.
+			t.rollback(ctx)
 			return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
 		}
 		t.loggerProvider = sdklog.NewLoggerProvider(
@@ -121,7 +131,44 @@ func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string, 
 		)
 	}
 
+	// Metrics are exported via OTLP whenever OTEL is enabled, independently of the
+	// pull-based /metrics endpoint.
+	metricExporter, err := newMetricExporter(ctx, cfg)
+	if err != nil {
+		t.rollback(ctx)
+		return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
+	}
+	// Bridge the existing Prometheus registry (promauto in internal/monitoring)
+	// into the OTEL pipeline instead of re-instrumenting on the OTEL metric API.
+	// The PeriodicReader pulls the default gatherer and the exporter pushes the
+	// result over OTLP on every interval.
+	reader := sdkmetric.NewPeriodicReader(metricExporter,
+		sdkmetric.WithInterval(cfg.MetricExportInterval),
+		sdkmetric.WithProducer(otelprom.NewMetricProducer()),
+	)
+	t.meterProvider = sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(reader),
+	)
+	otel.SetMeterProvider(t.meterProvider)
+
 	return t, nil
+}
+
+// rollback shuts down any providers initialized so far. Used when a later
+// provider fails during Setup so we don't leak background batch/export goroutines.
+func (t *Telemetry) rollback(ctx context.Context) {
+	shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+	defer cancel()
+	if t.meterProvider != nil {
+		_ = t.meterProvider.Shutdown(shutdownCtx)
+	}
+	if t.loggerProvider != nil {
+		_ = t.loggerProvider.Shutdown(shutdownCtx)
+	}
+	if t.tracerProvider != nil {
+		_ = t.tracerProvider.Shutdown(shutdownCtx)
+	}
 }
 
 // LogHandler returns the slog.Handler that ships records via OTLP,
@@ -138,6 +185,11 @@ func (t *Telemetry) TracesEnabled() bool {
 	return t != nil && t.tracerProvider != nil
 }
 
+// MetricsEnabled reports whether the MeterProvider was initialized.
+func (t *Telemetry) MetricsEnabled() bool {
+	return t != nil && t.meterProvider != nil
+}
+
 // Shutdown flushes pending spans and log records and stops the providers.
 func (t *Telemetry) Shutdown(ctx context.Context) error {
 	if t == nil {
@@ -148,6 +200,11 @@ func (t *Telemetry) Shutdown(ctx context.Context) error {
 	defer cancel()
 
 	var errs []error
+	if t.meterProvider != nil {
+		if err := t.meterProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("meter provider shutdown: %w", err))
+		}
+	}
 	if t.loggerProvider != nil {
 		if err := t.loggerProvider.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("logger provider shutdown: %w", err))
@@ -294,4 +351,36 @@ func newLogExporter(ctx context.Context, cfg *config.OTELConfig) (sdklog.Exporte
 		opts = append(opts, otlploggrpc.WithHeaders(cfg.Headers))
 	}
 	return otlploggrpc.New(ctx, opts...)
+}
+
+func newMetricExporter(ctx context.Context, cfg *config.OTELConfig) (sdkmetric.Exporter, error) {
+	if cfg.Protocol == "http" {
+		opts := []otlpmetrichttp.Option{}
+		if hasURLScheme(cfg.Endpoint) {
+			opts = append(opts, otlpmetrichttp.WithEndpointURL(withSignalPath(cfg.Endpoint, "/v1/metrics")))
+		} else {
+			opts = append(opts, otlpmetrichttp.WithEndpoint(cfg.Endpoint))
+		}
+		if cfg.Insecure {
+			opts = append(opts, otlpmetrichttp.WithInsecure())
+		}
+		if len(cfg.Headers) > 0 {
+			opts = append(opts, otlpmetrichttp.WithHeaders(cfg.Headers))
+		}
+		return otlpmetrichttp.New(ctx, opts...)
+	}
+
+	opts := []otlpmetricgrpc.Option{}
+	if hasURLScheme(cfg.Endpoint) {
+		opts = append(opts, otlpmetricgrpc.WithEndpointURL(cfg.Endpoint))
+	} else {
+		opts = append(opts, otlpmetricgrpc.WithEndpoint(cfg.Endpoint))
+	}
+	if cfg.Insecure {
+		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	}
+	if len(cfg.Headers) > 0 {
+		opts = append(opts, otlpmetricgrpc.WithHeaders(cfg.Headers))
+	}
+	return otlpmetricgrpc.New(ctx, opts...)
 }

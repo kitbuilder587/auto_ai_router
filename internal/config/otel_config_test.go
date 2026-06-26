@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,6 +44,7 @@ func TestOTELConfig_DefaultsWhenSectionAbsent(t *testing.T) {
 	assert.True(t, cfg.OTEL.Insecure)
 	assert.True(t, cfg.OTEL.LogsEnabled)
 	assert.True(t, cfg.OTEL.TracesEnabled)
+	assert.Equal(t, 60*time.Second, cfg.OTEL.MetricExportInterval)
 	assert.Equal(t, 1.0, cfg.OTEL.TraceSampleRatio)
 	assert.True(t, cfg.OTEL.TrustIncomingTraceparent)
 }
@@ -57,6 +59,7 @@ otel:
   service_name: "my-router"
   logs_enabled: true
   traces_enabled: false
+  metric_export_interval: 15s
   trace_sample_ratio: 0.25
   trust_incoming_traceparent: false
   headers:
@@ -71,6 +74,7 @@ otel:
 	assert.Equal(t, "my-router", cfg.OTEL.ServiceName)
 	assert.True(t, cfg.OTEL.LogsEnabled)
 	assert.False(t, cfg.OTEL.TracesEnabled)
+	assert.Equal(t, 15*time.Second, cfg.OTEL.MetricExportInterval)
 	assert.Equal(t, 0.25, cfg.OTEL.TraceSampleRatio)
 	assert.False(t, cfg.OTEL.TrustIncomingTraceparent)
 	assert.Equal(t, "Bearer token123", cfg.OTEL.Headers["Authorization"])

@@ -38,6 +38,7 @@ otel:
   service_name: "auto-ai-router"  # Reported as service.name resource attribute
   logs_enabled: true  # Ship slog records via OTLP in addition to stdout
   traces_enabled: true  # Server/client spans + traceparent propagation to providers and chained routers
+  metric_export_interval: 60s  # OTLP metric push interval. When otel.enabled is true, metrics are always pushed via OTLP (bridged from the Prometheus registry), independently of the pull-based /metrics endpoint (which is gated by monitoring.prometheus_enabled).
   trace_sample_ratio: 1.0  # Head sampling ratio [0.0-1.0], parent-based
   trust_incoming_traceparent: true  # Adopt the caller's traceparent so spans nest under it (e.g. a LiteLLM proxy with forward_traceparent_to_llm_provider: true). Set false for standalone/public-facing setups to ignore client trace context and start a fresh root span.
   # headers:  # Optional headers for OTLP requests (supports os.environ/VAR_NAME)
