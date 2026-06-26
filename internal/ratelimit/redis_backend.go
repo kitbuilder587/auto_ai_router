@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -267,8 +268,25 @@ func (b *RedisBackend) Ping(ctx context.Context) error {
 	return b.client.Do(ctx, b.client.B().Ping().Build()).Error()
 }
 
-func (b *RedisBackend) rpmKey(key string) string { return b.keyPrefix + "rpm:" + key }
-func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpm:" + key }
+func (b *RedisBackend) rpmKey(key string) string { return b.keyPrefix + "rpm:" + b.hashTag(key) }
+func (b *RedisBackend) tpmKey(key string) string { return b.keyPrefix + "tpm:" + b.hashTag(key) }
+
+// hashTag wraps key in a Redis hash tag so that all keys for the same credential
+// land in the same hash slot. This is required by valkey-go's multi-key EVAL slot
+// validation (enforced even on single-node deployments).
+//
+// Credential keys ("c:foo")     → "{c:foo}"
+// Model keys     ("m:foo:bar")  → "{c:foo}:m:foo:bar"  (inherits cred's slot)
+// Other keys                    → "{key}"
+func (b *RedisBackend) hashTag(key string) string {
+	if strings.HasPrefix(key, "m:") {
+		rest := key[2:] // "credname:modelname"
+		if i := strings.IndexByte(rest, ':'); i != -1 {
+			return "{c:" + rest[:i] + "}:" + key
+		}
+	}
+	return "{" + key + "}"
+}
 
 func nowMS() int64 { return time.Now().UTC().UnixMilli() }
 
