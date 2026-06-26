@@ -397,6 +397,82 @@ details.wf-card > .detail-body { padding: var(--sp-2) 0; }
 
 /* collapsible diagram section — inherits details.wf-card styles */
 details.diagram-section { margin: var(--sp-6) 0 0; }
+details.diagram-section > summary {
+  flex-wrap: wrap;
+}
+.diagram-toolbar {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.diagram-tool {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+  font-size: var(--fs-md);
+  line-height: 1;
+}
+.diagram-reset {
+  height: 28px;
+  padding: 0 var(--sp-2);
+}
+.diagram-zoom {
+  width: 54px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--fg-muted);
+  background: var(--bg-2);
+  font-size: var(--fs-xs);
+  user-select: none;
+}
+.detail-body.diagram-viewport {
+  position: relative;
+  overflow: hidden;
+  min-height: 320px;
+  height: min(66vh, 720px);
+  padding: 0;
+  background: var(--bg);
+  cursor: grab;
+  touch-action: none;
+}
+.diagram-viewport.is-dragging {
+  cursor: grabbing;
+}
+.diagram-canvas {
+  min-width: 100%;
+  min-height: 100%;
+  padding: var(--sp-3);
+  display: inline-flex;
+  align-items: flex-start;
+  justify-content: center;
+  transform-origin: 0 0;
+  will-change: transform;
+  user-select: none;
+}
+.diagram-canvas svg {
+  display: block;
+  max-width: none;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+.diagram-placeholder {
+  margin: 0;
+  padding: var(--sp-4);
+  color: var(--fg-muted);
+}
+
+@media (max-width: 760px) {
+  .diagram-toolbar {
+    width: 100%;
+    margin-left: 0;
+  }
+}
 
 /* group header rows in models table */
 .wf-table tr.group-header td {
