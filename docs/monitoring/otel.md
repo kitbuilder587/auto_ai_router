@@ -24,19 +24,19 @@ otel:
   #   Authorization: "os.environ/OTEL_AUTH_HEADER"
 ```
 
-| Field                        | Default            | Description                                                                                                   |
-| ---------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `enabled`                    | `false`            | Master switch. When `false`, no OTEL components are initialized.                                              |
+| Field                        | Default                    | Description                                                                                               |
+| ---------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `enabled`                    | `false`                    | Master switch. When `false`, no OTEL components are initialized.                                          |
 | `endpoint`                   | `localhost:4317` / `:4318` | OTLP collector. `host:port` for grpc; `host:port` or full URL for http. Default port depends on protocol. |
-| `protocol`                   | `grpc`             | OTLP transport: `grpc` or `http` (http/protobuf).                                                            |
-| `insecure`                   | `true`             | Disable TLS for the exporter connection (typical for an in-cluster collector).                              |
-| `service_name`               | `auto-ai-router`   | Reported as the `service.name` resource attribute.                                                          |
-| `headers`                    | —                  | Extra headers added to every OTLP export request (e.g. auth tokens). Supports `os.environ/VAR_NAME`.       |
-| `logs_enabled`               | `true`             | Ship `slog` records via OTLP in addition to stdout.                                                         |
-| `traces_enabled`             | `true`             | Create server/client spans and propagate trace context to upstreams.                                       |
-| `metric_export_interval`     | `60s`              | Period between OTLP metric pushes.                                                                          |
-| `trace_sample_ratio`         | `1.0`              | Head sampling ratio in `[0.0, 1.0]`. Parent-based (sampled upstream decisions are respected).              |
-| `trust_incoming_traceparent` | `true`             | Adopt the caller's W3C `traceparent` so the router's spans nest under it.                                   |
+| `protocol`                   | `grpc`                     | OTLP transport: `grpc` or `http` (http/protobuf).                                                         |
+| `insecure`                   | `true`                     | Disable TLS for the exporter connection (typical for an in-cluster collector).                            |
+| `service_name`               | `auto-ai-router`           | Reported as the `service.name` resource attribute.                                                        |
+| `headers`                    | —                          | Extra headers added to every OTLP export request (e.g. auth tokens). Supports `os.environ/VAR_NAME`.      |
+| `logs_enabled`               | `true`                     | Ship `slog` records via OTLP in addition to stdout.                                                       |
+| `traces_enabled`             | `true`                     | Create server/client spans and propagate trace context to upstreams.                                      |
+| `metric_export_interval`     | `60s`                      | Period between OTLP metric pushes.                                                                        |
+| `trace_sample_ratio`         | `1.0`                      | Head sampling ratio in `[0.0, 1.0]`. Parent-based (sampled upstream decisions are respected).             |
+| `trust_incoming_traceparent` | `true`                     | Adopt the caller's W3C `traceparent` so the router's spans nest under it.                                 |
 
 All fields support environment variable resolution via `os.environ/VAR_NAME`, so the endpoint, headers, and toggles can be supplied at deploy time.
 
@@ -61,7 +61,7 @@ OpenTelemetry initialized  endpoint=otel-collector:4317 protocol=grpc logs_enabl
 ```
 
 !!! note "Failures degrade gracefully"
-    OTEL is observability, not core functionality. If the SDK fails to initialize (bad endpoint, unreachable collector at boot), the router logs the error and **continues running without it** instead of failing startup.
+OTEL is observability, not core functionality. If the SDK fails to initialize (bad endpoint, unreachable collector at boot), the router logs the error and **continues running without it** instead of failing startup.
 
 ## Signals
 
@@ -74,14 +74,14 @@ When `traces_enabled` is true, the router instruments inbound and outbound HTTP 
 
 Each server span is annotated with routing attributes:
 
-| Attribute               | Example                  | Description                          |
-| ----------------------- | ------------------------ | ------------------------------------ |
-| `gen_ai.request.model`  | `gpt-4o`                 | Model requested by the client        |
-| `aar.real_model`        | `gpt-4o-2024-08-06`      | Resolved underlying model            |
-| `aar.credential`        | `openai_main`            | Credential selected by the balancer  |
-| `aar.provider`          | `openai`                 | Provider type                        |
-| `aar.streaming`         | `true`                   | Whether the response is streamed     |
-| `aar.request_id`        | `req_abc123`             | Internal request identifier          |
+| Attribute              | Example             | Description                         |
+| ---------------------- | ------------------- | ----------------------------------- |
+| `gen_ai.request.model` | `gpt-4o`            | Model requested by the client       |
+| `aar.real_model`       | `gpt-4o-2024-08-06` | Resolved underlying model           |
+| `aar.credential`       | `openai_main`       | Credential selected by the balancer |
+| `aar.provider`         | `openai`            | Provider type                       |
+| `aar.streaming`        | `true`              | Whether the response is streamed    |
+| `aar.request_id`       | `req_abc123`        | Internal request identifier         |
 
 **Sampling** is head-based and parent-based: `trace_sample_ratio` controls the fraction of new root traces that are sampled, while decisions inherited from an upstream `traceparent` are always honored.
 
