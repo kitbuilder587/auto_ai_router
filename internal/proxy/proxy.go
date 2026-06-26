@@ -560,11 +560,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"reason", retryReason, "model", modelID,
 				"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 			}
-			if shouldMaskUpstreamErrors(cred) {
-				retryLogArgs = append(retryLogArgs, "response_body_masked", true)
-			} else {
-				retryLogArgs = append(retryLogArgs, "response_body", logger.TruncateLongFields(string(proxyResp.Body), 500))
-			}
+			retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(proxyResp.Body))
 			p.logger.WarnContext(r.Context(), "Proxy credential returned retryable error, will retry", retryLogArgs...)
 		}
 
@@ -1136,11 +1132,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			"reason", retryReason, "model", modelID,
 			"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
 		}
-		if shouldMaskUpstreamErrors(cred) {
-			retryLogArgs = append(retryLogArgs, "response_body_masked", true)
-		} else {
-			retryLogArgs = append(retryLogArgs, "response_body", logger.TruncateLongFields(string(responseBody), 500))
-		}
+		retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, string(responseBody))
 		p.logger.WarnContext(r.Context(), "Provider returned retryable error, will retry", retryLogArgs...)
 	}
 
