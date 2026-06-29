@@ -66,6 +66,18 @@ func NewWithRedis(b *RedisBackend) *RPMLimiter {
 	}
 }
 
+// NewWithHybrid creates an RPMLimiter backed by a HybridBackend: all hot-path
+// decisions are made locally (zero added latency) and Redis is updated
+// asynchronously in batches. syncInterval controls how often remote stats are
+// pulled (default 5s when zero).
+func NewWithHybrid(b *HybridBackend) *RPMLimiter {
+	return &RPMLimiter{
+		limits:      make(map[string]*limiterConfig),
+		modelLimits: make(map[string]*limiterConfig),
+		backend:     b,
+	}
+}
+
 // makeModelKey creates a composite key for a (credential, model) pair.
 func makeModelKey(credentialName, modelName string) string {
 	return fmt.Sprintf("%s:%s", credentialName, modelName)
@@ -471,6 +483,48 @@ func (r *RPMLimiter) GetModelLimitTPM(credentialName, modelName string) int {
 		return -1
 	}
 	return cfg.tpm
+}
+
+// KeyStats holds the current RPM and TPM for a single key.
+type KeyStats struct {
+	RPM int
+	TPM int
+}
+
+// BatchCurrentStats fetches RPM and TPM for all given credentials and model pairs
+// in a single backend round-trip (one Redis pipeline when using the Redis backend).
+// Returns two maps: credName → stats, and "credName:modelName" → stats.
+func (r *RPMLimiter) BatchCurrentStats(ctx context.Context, credNames []string, modelPairs []ModelPair) (map[string]KeyStats, map[string]KeyStats) {
+	// Build the flat key list that the backend understands.
+	allKeys := make([]string, 0, len(credNames)+len(modelPairs))
+	for _, name := range credNames {
+		allKeys = append(allKeys, credKey(name))
+	}
+	for _, p := range modelPairs {
+		allKeys = append(allKeys, modelCounterKey(p.Credential, p.Model))
+	}
+
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+
+	raw := r.backend.batchCurrentStats(ctx, allKeys)
+
+	credStats := make(map[string]KeyStats, len(credNames))
+	for _, name := range credNames {
+		v := raw[credKey(name)]
+		credStats[name] = KeyStats{RPM: v[0], TPM: v[1]}
+	}
+
+	modelStats := make(map[string]KeyStats, len(modelPairs))
+	for _, p := range modelPairs {
+		v := raw[modelCounterKey(p.Credential, p.Model)]
+		modelStats[p.Credential+":"+p.Model] = KeyStats{RPM: v[0], TPM: v[1]}
+	}
+
+	return credStats, modelStats
 }
 
 // GetAllModels returns all tracked "credential:model" keys.

@@ -11,12 +11,15 @@ If Redis is not configured, both features fall back to their original in-process
 
 ## When to use Redis
 
-Enable Redis if you run **two or more replicas** of auto-ai-router. Without it:
+| Scenario                              | Recommended mode                                  |
+| ------------------------------------- | ------------------------------------------------- |
+| Single replica, Redis low-latency     | `hybrid: false` (direct Redis, exact counts)      |
+| Single replica, Redis high-latency    | `hybrid: true` (local decisions, async sync)      |
+| Multiple replicas, need exact limits  | `hybrid: false`                                   |
+| Multiple replicas, slight drift is OK | `hybrid: true` (better throughput, ~5 s accuracy) |
+| No Redis at all                       | Omit `redis` section — pure in-process counters   |
 
-- A credential with `rpm: 100` effectively allows `100 × N` requests per minute (where N is the number of pods).
-- Responses stored with `store: true` are only accessible from the pod that created them.
-
-Single-replica deployments do not need Redis.
+Single-replica deployments that don't need shared response storage can omit Redis entirely.
 
 ## Configuration
 
@@ -34,6 +37,8 @@ redis:
   conn_write_timeout: 10s
   command_timeout: 3s         # per-command deadline cap (default: 3s)
   key_ttl: 120                # rate-limit key TTL in seconds (default: 120)
+  hybrid: false               # see "Hybrid mode" below
+  sync_interval: 5s           # hybrid only: how often to pull remote counts
 ```
 
 ### All Parameters
@@ -52,6 +57,8 @@ redis:
 | `force_single_client` | bool     | `false` | Skip cluster detection (use for single-node)          |
 | `command_timeout`     | duration | `3s`    | Maximum duration for a single Redis command           |
 | `key_ttl`             | int      | `120`   | Rate-limit key TTL in seconds                         |
+| `hybrid`              | bool     | `false` | Enable hybrid mode (see below)                        |
+| `sync_interval`       | duration | `5s`    | Hybrid only: interval between Redis sync pulls        |
 | `min_idle_conns`      | int      | `10`    | Minimum idle connections (reserved for future use)    |
 | `max_idle_conns`      | int      | `100`   | Maximum idle connections (reserved for future use)    |
 | `max_conn_lifetime`   | duration | `30m`   | Maximum connection lifetime (reserved for future use) |
@@ -86,6 +93,48 @@ On startup, the router connects to Redis and immediately performs a `PING` healt
 - If Redis is **reachable** → rate limiter and response store use Redis.
 - If Redis is **unreachable** (connection error or ping timeout) → both features silently fall back to their in-process implementations. The server starts normally.
 
+## Hybrid Mode
+
+When `hybrid: true`, the router uses a **HybridBackend** that combines an in-process local counter with an asynchronous Redis sync:
+
+```
+Request arrives
+      │
+      ▼
+Local counter (in-memory, <1 µs)
+  • TryAllowAll / tryAllowRPM / canAllowTPM
+  • Decision is instant — no network call
+      │
+      ├── allowed ──► enqueue write op
+      │                    │
+      │               Background writeWorker
+      │               (batches 200 ops, flushes every 100 ms via DoMulti pipeline)
+      │                    │
+      │                    ▼
+      │               Redis (async, non-blocking)
+      │
+      └── denied ──► return 429 immediately
+```
+
+**Background sync** (every `sync_interval`, default 5 s):
+
+1. Fetch total RPM/TPM for all tracked keys from Redis (one pipeline round-trip).
+2. Subtract local counts → `remote_count = redis_total − local_total`.
+3. Store `remote_count` in memory.
+4. Next rate-limit check uses `effective_limit = limit − remote_count`, so traffic from other replicas is accounted for.
+
+### Trade-offs
+
+| Property                    | Direct Redis (`hybrid: false`) | Hybrid (`hybrid: true`)                        |
+| --------------------------- | ------------------------------ | ---------------------------------------------- |
+| Latency per request         | +1 RTT to Redis                | ~0 (in-memory)                                 |
+| `/health` endpoint latency  | 1 pipeline RTT (batched)       | ~0 (in-memory)                                 |
+| Cross-instance accuracy     | Exact (atomic Lua scripts)     | ±`sync_interval` drift (default ±5 s)          |
+| Redis unavailability impact | Requests blocked until timeout | Continues with local counters                  |
+| Write load on Redis         | 1–2 commands per request       | Batched async; typically 1 pipeline per 100 ms |
+
+Use `hybrid: false` when you need hard rate-limit enforcement across replicas with zero tolerance for drift. Use `hybrid: true` when latency matters more than exact cross-replica synchronisation.
+
 ## Key Layout
 
 All keys are namespaced under `key_prefix` (default `rl:`):
@@ -116,6 +165,10 @@ The `TryAllowAll` check (credential RPM + credential TPM + model RPM + model TPM
 
 Token consumption (`ConsumeTokens`) stores entries as `uuid:count` members so the TPM check can sum token counts with `ZRANGE` inside a Lua script.
 
+### Batched Reads (Health & Metrics)
+
+The `/health` endpoint and the metrics updater need current RPM/TPM for every credential and model. Instead of issuing one Redis command per key, the router sends all read commands in a single **pipeline** (`DoMulti`) — one network round-trip regardless of the number of credentials or models configured. This keeps `/health` response time proportional to Redis RTT, not to the size of the configuration.
+
 ## Timeouts
 
 Two independent timeout layers protect against slow Redis:
@@ -139,6 +192,8 @@ Retries are **not** performed on:
 
 **Idempotency of write operations:** Each rate-limit entry uses a UUID as the ZSET member. If a retry sends the same command after a silent success, Redis `ZADD` updates the score (timestamp) of the existing member rather than inserting a duplicate — so requests are never double-counted.
 
+> In hybrid mode, writes go through the async queue and are not retried individually. If a batch fails the affected entries are simply lost. The next sync cycle will re-read the true Redis total and correct the remote-count estimate.
+
 ## Memory Sizing
 
 A rough guide for the rate-limit keyspace:
@@ -155,3 +210,4 @@ Start with `--maxmemory 256mb` and adjust based on observed usage.
 - **Redis Cluster**: only standalone and basic single-node deployments are supported. Cluster mode is not supported (keys in multi-key Lua scripts must share a hash slot).
 - **Sentinel**: not supported. Use a load-balancer in front of Redis for HA.
 - **Pool settings** (`min_idle_conns`, `max_idle_conns`, `max_conn_lifetime`): parsed and reserved for future use; the valkey-go client manages its own connection pool internally.
+- **Hybrid mode and response store**: `hybrid` only affects rate limiting. The response store always talks to Redis directly (reads must be synchronous).

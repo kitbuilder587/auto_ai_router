@@ -309,6 +309,15 @@ type RedisConfig struct {
 
 	// CommandTimeout is the timeout for individual Redis commands (default: 3s).
 	CommandTimeout time.Duration `yaml:"command_timeout,omitempty"`
+
+	// Hybrid enables the hybrid backend: rate-limit decisions are made locally
+	// (zero added latency) and Redis is updated asynchronously in batches.
+	// Recommended when Redis latency is high or for single-instance deployments.
+	Hybrid bool `yaml:"hybrid,omitempty"`
+
+	// SyncInterval controls how often the hybrid backend pulls aggregated stats
+	// from Redis to account for traffic from other instances (default: 5s).
+	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
@@ -329,6 +338,8 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxConnLifetime   string   `yaml:"max_conn_lifetime,omitempty"`
 		KeyTTL            string   `yaml:"key_ttl,omitempty"`
 		CommandTimeout    string   `yaml:"command_timeout,omitempty"`
+		Hybrid            string   `yaml:"hybrid,omitempty"`
+		SyncInterval      string   `yaml:"sync_interval,omitempty"`
 	}
 
 	var temp tempConfig
@@ -386,6 +397,13 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Command timeout
 	if r.CommandTimeout, err = parseField(temp.CommandTimeout, 3*time.Second, time.ParseDuration, "redis.command_timeout"); err != nil {
+		return err
+	}
+
+	if r.Hybrid, err = parseField(temp.Hybrid, false, strconv.ParseBool, "redis.hybrid"); err != nil {
+		return err
+	}
+	if r.SyncInterval, err = parseField(temp.SyncInterval, 5*time.Second, time.ParseDuration, "redis.sync_interval"); err != nil {
 		return err
 	}
 

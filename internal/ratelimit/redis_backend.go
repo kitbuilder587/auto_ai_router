@@ -527,6 +527,48 @@ func (b *RedisBackend) tryAllowAll(
 	return res == 1
 }
 
+// batchCurrentStats returns [rpm, tpm] for each key in a single pipeline round-trip.
+func (b *RedisBackend) batchCurrentStats(ctx context.Context, keys []string) map[string][2]int {
+	if len(keys) == 0 {
+		return nil
+	}
+	now := nowMS()
+	nowStr := fmt.Sprintf("%d", now)
+	windowStr := fmt.Sprintf("%d", rpmWindow.Milliseconds())
+
+	cmds := make([]valkey.Completed, 0, len(keys)*2)
+	for _, key := range keys {
+		cmds = append(cmds,
+			b.client.B().Eval().
+				Script(luaCurrentRPM).Numkeys(1).
+				Key(b.rpmKey(key)).Arg(nowStr).Arg(windowStr).
+				Build(),
+			b.client.B().Eval().
+				Script(luaCurrentTPM).Numkeys(1).
+				Key(b.tpmKey(key)).Arg(nowStr).Arg(windowStr).
+				Build(),
+		)
+	}
+
+	cmdCtx, cancel := b.cmdCtx(ctx)
+	defer cancel()
+
+	results := b.client.DoMulti(cmdCtx, cmds...)
+
+	out := make(map[string][2]int, len(keys))
+	for i, key := range keys {
+		var rpm, tpm int64
+		if v, err := results[i*2].AsInt64(); err == nil {
+			rpm = v
+		}
+		if v, err := results[i*2+1].AsInt64(); err == nil {
+			tpm = v
+		}
+		out[key] = [2]int{int(rpm), int(tpm)}
+	}
+	return out
+}
+
 // setCurrentUsage is a no-op for the Redis backend: all replicas write to the
 // shared Redis instance directly, so remote-sync is unnecessary.
 func (b *RedisBackend) setCurrentUsage(_ context.Context, _ string, _, _ int) {}
