@@ -387,9 +387,33 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		realModelID = realName
 	}
 
+	if p.isImageGenerationModel(modelID, realModelID) && r.URL.Path == "/v1/chat/completions" {
+		message := fmt.Sprintf("Model %s must be called via /v1/images/generations", modelID)
+		p.logger.Warn("Rejected image generation model on chat completions endpoint",
+			"error_code", http.StatusBadRequest,
+			"model", modelID,
+			"real_model", realModelID,
+			"path", r.URL.Path)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = message
+		WriteErrorBadRequest(w, message)
+		return nil, "", "", false, false
+	}
+
 	body = openai.ReplaceBodyParam(realModelID, body)
 
 	return body, modelID, realModelID, streaming, true
+}
+
+func (p *Proxy) isImageGenerationModel(modelID, realModelID string) bool {
+	if p.modelManager == nil {
+		return false
+	}
+	if p.modelManager.GetModelMode(modelID) == config.ModelModeImageGeneration {
+		return true
+	}
+	return realModelID != modelID && p.modelManager.GetModelMode(realModelID) == config.ModelModeImageGeneration
 }
 
 func (p *Proxy) selectCredentialForModel(

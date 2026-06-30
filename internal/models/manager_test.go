@@ -41,6 +41,18 @@ func TestNew_WithStaticModels(t *testing.T) {
 	assert.Equal(t, 2, len(models.Data))
 }
 
+func TestGetModelMode_WithStaticModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	manager := New(logger, 50, []config.ModelRPMConfig{
+		{Name: "google/gemini-3-pro-image-preview", Model: "gemini-3-pro-image-preview", Mode: "IMAGE_GENERATION"},
+	})
+
+	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("google/gemini-3-pro-image-preview"))
+	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("gemini-3-pro-image-preview"))
+	assert.Empty(t, manager.GetModelMode("google/gemini-2.5-pro"))
+}
+
 func TestGetAllModels_WithStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 

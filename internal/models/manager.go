@@ -150,11 +150,13 @@ type Manager struct {
 	staticModelLimits           map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
 	staticModelRealNames        map[string]string            // immutable snapshot of global real names from config.yaml
 	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
+	staticModelModes            map[string]string            // immutable snapshot of modes from config.yaml
 	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
 	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
 	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred       map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
+	modelModes                  map[string]string            // model ID or real model name -> mode
 	defaultModelsRPM            int                          // default RPM for models
 	logger                      *slog.Logger
 	credentials                 []config.CredentialConfig   // credentials for fetching remote models
@@ -173,10 +175,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		staticModelLimits:           make(map[string][]ModelLimits),
 		staticModelRealNames:        make(map[string]string),
 		staticModelRealNamesPerCred: make(map[string]map[string]string),
+		staticModelModes:            make(map[string]string),
 		dbModelNames:                make(map[string]bool),
 		modelAliases:                make(map[string]string),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
+		modelModes:                  make(map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
 		defaultModelsRPM:            defaultModelsRPM,
 		logger:                      logger,
@@ -218,6 +222,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				logger.Debug("Registered passthrough_responses override",
 					"model", staticModel.Name, "value", *staticModel.PassthroughResponses)
 			}
+			applyModelMode(m.modelModes, nil, staticModel)
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
 				"real_model", staticModel.Model,
@@ -242,8 +247,31 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		}
 		m.staticModelRealNamesPerCred[cred] = snapshot
 	}
+	for k, v := range m.modelModes {
+		m.staticModelModes[k] = v
+	}
 
 	return m
+}
+
+func applyModelMode(modes map[string]string, preserve map[string]string, model config.ModelRPMConfig) {
+	mode := strings.ToLower(strings.TrimSpace(model.Mode))
+	if mode == "" {
+		return
+	}
+	set := func(modelName string) {
+		if modelName == "" {
+			return
+		}
+		if preserve != nil {
+			if _, ok := preserve[modelName]; ok {
+				return
+			}
+		}
+		modes[modelName] = mode
+	}
+	set(model.Name)
+	set(model.Model)
 }
 
 // GetRealModelName returns the global real model name for a given alias (from models[].model
@@ -273,6 +301,13 @@ func (m *Manager) GetRealModelNameForCredential(alias, credential string) (strin
 		return real, true
 	}
 	return alias, false
+}
+
+// GetModelMode returns the configured mode for a model, if any.
+func (m *Manager) GetModelMode(modelID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelModes[modelID]
 }
 
 // responsesAPIModelPrefixes lists model name substrings that natively support
@@ -543,6 +578,10 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		}
 		newRealNamesPerCred[cred] = snapshot
 	}
+	newModes := make(map[string]string, len(m.staticModelModes)+len(dbModels))
+	for k, v := range m.staticModelModes {
+		newModes[k] = v
+	}
 
 	// 3. Apply DB model data.
 	newDBNames := make(map[string]bool, len(dbModels))
@@ -570,12 +609,14 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 				}
 			}
 		}
+		applyModelMode(newModes, m.staticModelModes, dm)
 		newDBNames[dm.Name] = true
 	}
 
 	m.modelLimits = newLimits
 	m.modelRealNames = newRealNames
 	m.modelRealNamesPerCred = newRealNamesPerCred
+	m.modelModes = newModes
 	m.dbModelNames = newDBNames
 
 	// 4. Rebuild ALL credential↔model mappings from the merged modelLimits.

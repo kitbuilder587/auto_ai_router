@@ -27,6 +27,9 @@ const (
 	ProviderTypeProxy     ProviderType = "proxy"
 )
 
+// ModelModeImageGeneration marks models that must use the image generation endpoint.
+const ModelModeImageGeneration = "image_generation"
+
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
@@ -40,6 +43,7 @@ func (p ProviderType) IsValid() bool {
 type ModelRPMConfig struct {
 	Name       string `yaml:"name"`
 	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	Mode       string `yaml:"mode,omitempty"`
 	RPM        int    `yaml:"rpm"`
 	TPM        int    `yaml:"tpm"`
 	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
@@ -899,6 +903,9 @@ func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
 	for i := range c.Credentials {
 		c.Credentials[i].BaseURL = strings.TrimSuffix(c.Credentials[i].BaseURL, "/v1")
+	}
+	for i := range c.Models {
+		c.Models[i].Mode = strings.ToLower(strings.TrimSpace(c.Models[i].Mode))
 	}
 }
 
