@@ -13,6 +13,7 @@ type ProxyHealthResponse struct {
 // CredentialHealthStats represents health stats for a single credential
 type CredentialHealthStats struct {
 	Type              string      `json:"type"`
+	BaseURL           string      `json:"base_url,omitempty"`
 	IsFallback        bool        `json:"is_fallback"`
 	IsBanned          bool        `json:"is_banned"`
 	CurrentRPM        int         `json:"current_rpm"`

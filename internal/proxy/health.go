@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -42,6 +44,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:       string(cred.Type),
+			BaseURL:    cleanBaseURL(cred.BaseURL),
 			IsFallback: cred.IsFallback,
 			IsBanned:   isBanned,
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
@@ -118,6 +121,21 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	}
 
 	return healthy, status
+}
+
+func cleanBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 // VisualHealthCheck serves the static health dashboard HTML.

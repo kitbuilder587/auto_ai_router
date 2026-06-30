@@ -31,30 +31,91 @@
     </div>
     <nav class="wf-nav">
       <div class="group">workspace</div>
-      <a class="item" href="/vhealth"><span class="glyph">▸</span> system health</a>
-      <a class="item active" href="/vtrace"><span class="glyph">▸</span> router trace</a>
-      <a class="item" href="/vconfig"><span class="glyph">▸</span> server config</a>
+      <a class="item" href="/vhealth"><span class="glyph">></span> system health</a>
+      <a class="item active" href="/vtrace"><span class="glyph">></span> router trace</a>
+      <a class="item" href="/vconfig"><span class="glyph">></span> server config</a>
     </nav>
     <main class="wf-main">
-      <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:var(--sp-4);">
+      <div class="trace-head">
         <div>
           <h1 class="wf-h1">Router chain trace</h1>
-          <p class="wf-sub" id="subtitle">loading…</p>
+          <p class="wf-sub" id="subtitle">loading...</p>
         </div>
-        <div style="display:flex;gap:var(--sp-2);align-items:center;">
-          <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">—</span></span>
-          <button class="wf-btn" onclick="load(true)">refresh <span class="key">R</span></button>
+        <div class="trace-head-actions">
+          <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">-</span></span>
+          <button class="wf-btn" onclick="load()">refresh <span class="key">R</span></button>
         </div>
       </div>
 
       <details class="diagram-section wf-card" id="diagramSection" open>
         <summary id="diagramSummary">
-          <span id="diagramArrow">▾</span>
+          <span id="diagramArrow">v</span>
+          route diagram
+        </summary>
+        <div class="trace-panel">
+          <div class="trace-tabs" id="focusTabs"></div>
+
+          <div class="trace-toolbar">
+            <div class="trace-filter-group">
+              <span class="trace-label">providers</span>
+              <div class="trace-chips" id="providerFilters"></div>
+            </div>
+            <label class="trace-search">
+              <span class="trace-label">model</span>
+              <input id="modelFilter" type="search" placeholder="claude, gpt-5, gemini..." autocomplete="off">
+            </label>
+            <label class="trace-select-wrap">
+              <span class="trace-label">route</span>
+              <select id="routeMode">
+                <option value="all">all lines</option>
+                <option value="primary">primary only</option>
+                <option value="fallback">fallback only</option>
+                <option value="problems">limits & errors</option>
+              </select>
+            </label>
+            <div class="trace-zoom" hidden>
+              <button class="wf-btn icon-btn" id="zoomOut" title="Zoom out">-</button>
+              <span class="trace-zoom-value" id="zoomLabel">100%</span>
+              <button class="wf-btn icon-btn" id="zoomIn" title="Zoom in">+</button>
+              <button class="wf-btn" id="fitGraph">fit</button>
+              <button class="wf-btn" id="resetView">reset</button>
+            </div>
+          </div>
+
+          <div class="trace-stats" id="traceStats"></div>
+
+          <div class="trace-canvas" id="diagramWrap">
+            <p class="trace-empty">Loading...</p>
+          </div>
+
+          <div class="trace-legend">
+            <span><i class="legend-line primary"></i> primary route</span>
+            <span><i class="legend-line fallback"></i> fallback after 429, 5xx, ban, or limit</span>
+            <span><i class="legend-dot ok"></i> healthy</span>
+            <span><i class="legend-dot warn"></i> near limit</span>
+            <span><i class="legend-dot err"></i> banned or unreachable</span>
+          </div>
+        </div>
+      </details>
+
+      <details class="diagram-section wf-card chain-section" id="chainSection" open>
+        <summary>
+          <span id="chainArrow">v</span>
           chain diagram
         </summary>
-        <div class="detail-body" style="padding:var(--sp-3);min-height:300px;overflow-x:auto;text-align:center;"
-          id="diagramWrap">
-          <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
+        <div class="chain-panel">
+          <div class="chain-toolbar">
+            <span class="trace-label">full topology</span>
+            <div class="chain-zoom">
+              <button class="wf-btn icon-btn" id="chainZoomOut" title="Zoom out">-</button>
+              <span class="trace-zoom-value" id="chainZoomLabel">100%</span>
+              <button class="wf-btn icon-btn" id="chainZoomIn" title="Zoom in">+</button>
+              <button class="wf-btn" id="chainZoomReset">reset</button>
+            </div>
+          </div>
+          <div class="chain-canvas" id="chainDiagramWrap">
+            <p class="trace-empty">Loading...</p>
+          </div>
         </div>
       </details>
 
@@ -66,27 +127,60 @@
   <script>
     'use strict';
 
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const CHAIN_ZOOM_MIN = 0.5;
+    const CHAIN_ZOOM_MAX = 20;
+    const state = {
+      trace: null,
+      focusPath: 'root',
+      providers: new Set(),
+      modelQuery: '',
+      routeMode: 'all',
+      zoom: 1,
+      chainZoom: 1,
+      chainRenderId: 0,
+      layout: null,
+    };
+
     let countdownSecs = 30;
     let countdownTimer = null;
 
-    // ── theme ──────────────────────────────────────────────────────────────────
     function toggleTheme() {
       const cur = document.documentElement.getAttribute('data-theme') || 'dark';
       const next = cur === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', next);
       localStorage.setItem('theme', next);
-      // re-render diagram with new theme
-      if (window._lastTrace) renderDiagram(window._lastTrace);
+      render();
     }
+
     (function initTheme() {
       document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
     })();
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function attr(s) {
+      return esc(s).replace(/'/g, '&#39;');
+    }
+
+    function badge(cls, text) {
+      return `<span class="wf-badge ${cls}"><span class="dotS"></span>${esc(text)}</span>`;
+    }
+
+    function statusClass(s) {
+      return s === 'healthy' ? 'ok' : s === 'degraded' ? 'warn' : s === 'unhealthy' ? 'err' : '';
+    }
 
     function isDark() {
       return (document.documentElement.getAttribute('data-theme') || 'dark') === 'dark';
     }
 
-    // ── mermaid init ───────────────────────────────────────────────────────────
     function getMermaidConfig() {
       const dark = isDark();
       return {
@@ -104,57 +198,593 @@
       };
     }
 
-    // ── helpers ────────────────────────────────────────────────────────────────
-    function esc(s) {
-      return String(s)
+    function mermaidText(s) {
+      return String(s ?? '')
         .replace(/&/g, '&amp;')
-        .replace(/"/g, '#quot;')
+        .replace(/"/g, '&quot;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
     }
 
-    function badge(cls, text) {
-      return `<span class="wf-badge ${cls}"><span class="dotS"></span>${text}</span>`;
-    }
-
-    function statusClass(s) {
-      return s === 'healthy' ? 'ok' : s === 'degraded' ? 'warn' : s === 'unhealthy' ? 'err' : '';
-    }
-
     function fmtNum(n) {
-      if (!n && n !== 0) return '—';
+      if (n === null || n === undefined || Number.isNaN(Number(n))) return '-';
+      if (n < 0) return 'unlimited';
       if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-      if (n >= 1_000) return (n / 1_000).toFixed(0) + 'k';
+      if (n >= 1_000) return (n / 1_000).toFixed(1).replace('.0', '') + 'k';
       return String(n);
     }
 
     function fmtRate(cur, lim) {
       if (lim > 0) return `${fmtNum(cur)} / ${fmtNum(lim)}`;
-      if (cur > 0) return `${fmtNum(cur)} / ∞`;
-      return '—';
+      if (cur > 0) return `${fmtNum(cur)} / unlimited`;
+      return 'idle';
     }
 
-    // ── mermaid diagram builder ────────────────────────────────────────────────
+    function limitRatio(cur, lim) {
+      return lim > 0 ? Math.max(0, cur || 0) / lim : 0;
+    }
+
+    function usageRatio(item) {
+      return Math.max(
+        limitRatio(item.currentRPM, item.limitRPM),
+        limitRatio(item.currentTPM, item.limitTPM),
+      );
+    }
+
+    function clamp(n, min, max) {
+      return Math.max(min, Math.min(max, n));
+    }
+
+    function svgEl(tag, attrs = {}, children = []) {
+      const el = document.createElementNS(SVG_NS, tag);
+      for (const [key, val] of Object.entries(attrs)) {
+        if (val !== null && val !== undefined) el.setAttribute(key, String(val));
+      }
+      for (const child of children) el.appendChild(child);
+      return el;
+    }
+
+    function svgText(lines, x, y, className, opts = {}) {
+      const t = svgEl('text', {
+        x,
+        y,
+        class: className,
+        'text-anchor': opts.anchor || 'middle',
+      });
+      lines.forEach((line, idx) => {
+        const span = svgEl('tspan', { x, dy: idx === 0 ? 0 : opts.dy || 18 });
+        span.textContent = line;
+        t.appendChild(span);
+      });
+      return t;
+    }
+
+    function truncate(s, max) {
+      const text = String(s ?? '');
+      return text.length > max ? text.slice(0, Math.max(0, max - 1)) + '...' : text;
+    }
+
+    function compactURL(raw) {
+      const text = String(raw || '').trim();
+      if (!text) return '';
+      try {
+        const u = new URL(text);
+        const path = u.pathname && u.pathname !== '/' ? u.pathname.replace(/\/$/, '') : '';
+        return truncate(`${u.host}${path}`, 42);
+      } catch (_) {
+        return truncate(text.replace(/^https?:\/\//, ''), 42);
+      }
+    }
+
+    function providerURLSummary(urls) {
+      if (!urls.length) return { text: 'not available', title: 'base_url is not present in /trace yet', empty: true };
+      const first = compactURL(urls[0]);
+      const more = urls.length > 1 ? ` +${urls.length - 1}` : '';
+      return { text: first + more, title: urls.join('\n'), empty: false };
+    }
+
+    function chainZoomStep(direction) {
+      const step = state.chainZoom >= 3 ? 1 : 0.5;
+      state.chainZoom = clamp(Math.round((state.chainZoom + direction * step) * 100) / 100, CHAIN_ZOOM_MIN, CHAIN_ZOOM_MAX);
+      applyChainZoom();
+    }
+
+    function svgViewBoxSize(svg) {
+      const parts = String(svg.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(Number);
+      if (parts.length === 4 && parts.every(Number.isFinite) && parts[2] > 0 && parts[3] > 0) {
+        return { width: parts[2], height: parts[3] };
+      }
+      return { width: svg.clientWidth || 720, height: svg.clientHeight || 360 };
+    }
+
+    function applyChainZoom() {
+      const label = document.getElementById('chainZoomLabel');
+      if (label) label.textContent = `${Math.round(state.chainZoom * 100)}%`;
+
+      const svg = document.querySelector('#chainDiagramWrap svg');
+      if (!svg) return;
+      const size = svgViewBoxSize(svg);
+      const width = Math.max(720, Math.round(size.width * state.chainZoom));
+      const height = Math.max(240, Math.round(size.height * state.chainZoom));
+
+      svg.setAttribute('width', String(width));
+      svg.setAttribute('height', String(height));
+      svg.style.width = width + 'px';
+      svg.style.height = height + 'px';
+      svg.style.maxWidth = 'none';
+      svg.style.display = 'block';
+      svg.style.margin = '0 auto';
+    }
+
+    function modelList(router, credName) {
+      const out = [];
+      for (const model of Object.values(router.models || {})) {
+        if (model && model.credential === credName) out.push(model);
+      }
+      out.sort((a, b) => String(a.model).localeCompare(String(b.model)));
+      return out;
+    }
+
+    function inferFamilies(name, cred, models) {
+      const hay = [
+        name,
+        ...models.map(m => m.model),
+      ].join(' ').toLowerCase();
+
+      const defs = [
+        ['anthropic', /(anthropic|claude)/],
+        ['openai', /openai|azure|(^|[^a-z])(gpt[-_a-z0-9.]*|text-embedding|dall-e|chatgpt)([^a-z]|$)/],
+        ['google', /(google|gemini|vertex|imagen)/],
+        ['zai', /(^|[^a-z])(zai|glm|chatglm)([^a-z]|$)/],
+        ['qwen', /(qwen|dashscope|alibaba)/],
+        ['deepseek', /deepseek/],
+        ['kimi', /(^|[^a-z])(kimi|moonshot)([^a-z]|$)/],
+        ['yandex', /yandex/],
+        ['xai', /(^|[^a-z])(xai|grok)([^a-z]|$)/],
+        ['meta', /(llama|meta)/],
+      ];
+
+      const families = defs.filter(([, re]) => re.test(hay)).map(([family]) => family);
+      if (cred.type === 'proxy') families.push('proxy');
+      if (families.length === 0) families.push(cred.type || 'unknown');
+      return [...new Set(families)];
+    }
+
+    function inferRouteSource(name, type) {
+      const raw = String(name || '').toLowerCase();
+      const compact = raw.replace(/[_\s]+/g, '-');
+
+      const rules = [
+        ['cheapgpt', /(^|-)cheapgpt($|-)/],
+        ['cometapi', /(^|-)cometapi($|-)/],
+        ['sosana', /(^|-)sosana($|-)/],
+        ['openrouter', /(^|-)openrouter($|-)|(^|-)or($|-)/],
+        ['grants', /(^|-)grant\d*($|-)|(^|-)gr\d*($|-)|(^|-)gr-[^-]+|(^|-)azure-gr\d*($|-)|(^|-)gr\d+-/],
+        ['zai', /(^|-)zai($|-)|(^|-)zai-\d+/],
+        ['yandex', /yandex/],
+        ['azure', /azure/],
+        ['bedrock', /bedrock/],
+        ['google', /google|gemini|vertex/],
+      ];
+
+      for (const [source, re] of rules) {
+        if (re.test(compact)) return source;
+      }
+      return type || 'unknown';
+    }
+
+    function routerPath(parent, credName) {
+      return parent + '/' + encodeURIComponent(credName);
+    }
+
+    function collectRouters(trace, path = 'root', via = null, depth = 0, acc = []) {
+      if (!trace || trace.fetch_error) return acc;
+      acc.push({ trace, path, via, depth });
+      for (const [credName, up] of Object.entries(trace.upstreams || {}).sort()) {
+        if (!up.fetch_error) collectRouters(up, routerPath(path, credName), credName, depth + 1, acc);
+      }
+      return acc;
+    }
+
+    function focusedRouter() {
+      const routers = collectRouters(state.trace);
+      return routers.find(r => r.path === state.focusPath) || routers[0] || null;
+    }
+
+    function requestedFocusPath() {
+      const hash = decodeURIComponent((window.location.hash || '').replace(/^#/, ''));
+      if (hash) return hash;
+      return new URLSearchParams(window.location.search).get('focus') || '';
+    }
+
+    function setFocusPath(path) {
+      state.focusPath = path;
+      if (path) history.replaceState(null, '', '#' + encodeURIComponent(path));
+    }
+
+    function credentialEntries(router) {
+      return Object.entries(router.credentials || {}).sort().map(([name, raw]) => {
+        const cred = raw || {};
+        const models = modelList(router, name);
+        const entry = {
+          name,
+          type: cred.type || 'unknown',
+          isFallback: !!cred.is_fallback,
+          isBanned: !!cred.is_banned,
+          currentRPM: Number(cred.current_rpm || 0),
+          currentTPM: Number(cred.current_tpm || 0),
+          limitRPM: Number(cred.limit_rpm ?? -1),
+          limitTPM: Number(cred.limit_tpm ?? -1),
+          weight: Number(cred.weight || 1),
+          errors: cred.banned_error_counts || {},
+          providerURL: cred.base_url || cred.provider_url || cred.url || '',
+          models,
+          upstream: (router.upstreams || {})[name],
+        };
+        entry.families = inferFamilies(name, entry, models);
+        entry.routeSource = inferRouteSource(name, entry.type);
+        entry.usage = usageRatio(entry);
+        entry.problem = entry.isBanned || entry.usage >= 0.85 || !!(entry.upstream && entry.upstream.fetch_error);
+        return entry;
+      });
+    }
+
+    function matchesFilters(entry) {
+      if (state.providers.size > 0 && !entry.families.some(f => state.providers.has(f))) return false;
+      if (state.routeMode === 'primary' && entry.isFallback) return false;
+      if (state.routeMode === 'fallback' && !entry.isFallback) return false;
+      if (state.routeMode === 'problems' && !entry.problem) return false;
+
+      const q = state.modelQuery.trim().toLowerCase();
+      if (!q) return true;
+      const hay = [
+        entry.name,
+        entry.type,
+        ...entry.families,
+        ...entry.models.map(m => m.model),
+      ].join(' ').toLowerCase();
+      return hay.includes(q);
+    }
+
+    function allProviderFamilies(trace) {
+      const families = new Set();
+      for (const { trace: router } of collectRouters(trace)) {
+        for (const entry of credentialEntries(router)) {
+          entry.families.forEach(f => families.add(f));
+        }
+      }
+      const preferred = ['anthropic', 'openai', 'google', 'zai', 'qwen', 'deepseek', 'kimi', 'yandex', 'xai', 'meta', 'proxy'];
+      return [...families].sort((a, b) => {
+        const ai = preferred.indexOf(a);
+        const bi = preferred.indexOf(b);
+        if (ai >= 0 || bi >= 0) return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+        return a.localeCompare(b);
+      });
+    }
+
+    function groupEntries(entries) {
+      const groups = [];
+      const bySource = new Map();
+
+      for (const entry of entries) {
+        if (entry.type === 'proxy') {
+          groups.push({
+            id: 'proxy:' + entry.name,
+            kind: 'proxy',
+            title: entry.name,
+            source: 'proxy',
+            apiTypes: [entry.type],
+            role: entry.isFallback ? 'fallback' : 'primary',
+            entries: [entry],
+          });
+          continue;
+        }
+
+        const key = `${entry.isFallback ? 'fallback' : 'primary'}:${entry.routeSource}`;
+        if (!bySource.has(key)) {
+          bySource.set(key, {
+            id: key,
+            kind: 'source',
+            title: entry.routeSource,
+            source: entry.routeSource,
+            apiTypes: [],
+            role: entry.isFallback ? 'fallback' : 'primary',
+            entries: [],
+          });
+        }
+        const group = bySource.get(key);
+        group.entries.push(entry);
+        if (!group.apiTypes.includes(entry.type)) group.apiTypes.push(entry.type);
+      }
+
+      groups.push(...bySource.values());
+      return groups.sort((a, b) => {
+        if (a.role !== b.role) return a.role === 'primary' ? -1 : 1;
+        if (a.kind !== b.kind) return a.kind === 'source' ? -1 : 1;
+        return a.title.localeCompare(b.title);
+      });
+    }
+
+    function summarizeGroup(group) {
+      const entries = group.entries;
+      const families = [...new Set(entries.flatMap(e => e.families).filter(f => f !== 'proxy'))];
+      const currentRPM = entries.reduce((sum, e) => sum + e.currentRPM, 0);
+      const currentTPM = entries.reduce((sum, e) => sum + e.currentTPM, 0);
+      const limitRPM = entries.reduce((sum, e) => e.limitRPM > 0 ? sum + e.limitRPM : sum, 0);
+      const limitTPM = entries.reduce((sum, e) => e.limitTPM > 0 ? sum + e.limitTPM : sum, 0);
+      const banned = entries.filter(e => e.isBanned).length;
+      const models = new Set(entries.flatMap(e => e.models.map(m => m.model)));
+      const providerURLs = [...new Set(entries.map(e => e.providerURL).filter(Boolean))];
+      const weight = entries.reduce((sum, e) => sum + e.weight, 0);
+      const upstreamError = entries.some(e => e.upstream && e.upstream.fetch_error);
+      const usage = Math.max(limitRatio(currentRPM, limitRPM), limitRatio(currentTPM, limitTPM));
+      const status = banned > 0 || upstreamError ? 'err' : usage >= 0.85 ? 'warn' : 'ok';
+
+      return {
+        families,
+        currentRPM,
+        currentTPM,
+        limitRPM,
+        limitTPM,
+        banned,
+        models: models.size,
+        providerURLs,
+        weight,
+        usage,
+        status,
+      };
+    }
+
+    function buildLayout(router) {
+      const entries = credentialEntries(router).filter(matchesFilters);
+      const groups = groupEntries(entries);
+      const primary = groups.filter(g => g.role === 'primary');
+      const fallback = groups.filter(g => g.role === 'fallback');
+      const proxyGroups = groups.filter(g => g.kind === 'proxy' && g.entries[0].upstream);
+
+      const cardW = 258;
+      const cardH = 112;
+      const gap = 26;
+      const rowW = n => Math.max(0, n * cardW + Math.max(0, n - 1) * gap);
+      const width = Math.max(920, rowW(Math.max(primary.length, fallback.length, proxyGroups.length)) + 96);
+      const hasFallback = fallback.length > 0;
+      const y = {
+        router: 28,
+        primary: 166,
+        gate: hasFallback ? 320 : 0,
+        fallback: hasFallback ? 430 : 0,
+        upstream: hasFallback ? 596 : 344,
+      };
+      const height = proxyGroups.length > 0 ? y.upstream + 132 : hasFallback ? y.fallback + 150 : y.primary + 158;
+
+      const nodes = [];
+      const edges = [];
+      const rootNode = {
+        id: 'router',
+        kind: 'router',
+        x: width / 2 - 168,
+        y: y.router,
+        w: 336,
+        h: 96,
+        title: router.router_id || 'router',
+        status: statusClass(router.status),
+        router,
+      };
+      nodes.push(rootNode);
+
+      function placeRow(row, rowY) {
+        const total = rowW(row.length);
+        const start = width / 2 - total / 2;
+        row.forEach((group, idx) => {
+          group.x = start + idx * (cardW + gap);
+          group.y = rowY;
+          group.w = cardW;
+          group.h = cardH;
+          group.summary = summarizeGroup(group);
+          group.status = group.summary.status;
+          nodes.push(group);
+        });
+      }
+
+      placeRow(primary, y.primary);
+      if (hasFallback) placeRow(fallback, y.fallback);
+
+      for (const group of primary) {
+        edges.push({ from: rootNode, to: group, kind: 'primary', label: '' });
+      }
+
+      let gate = null;
+      if (hasFallback) {
+        gate = {
+          id: 'fallback-gate',
+          kind: 'gate',
+          x: width / 2 - 176,
+          y: y.gate,
+          w: 352,
+          h: 70,
+          title: 'fallback trigger',
+        };
+        nodes.push(gate);
+        edges.push({ from: rootNode, to: gate, kind: 'fallback', label: '429 / 5xx / ban / limit' });
+        for (const group of fallback) edges.push({ from: gate, to: group, kind: 'fallback', label: '' });
+      } else if (primary.length === 0 && groups.length > 0) {
+        for (const group of groups) edges.push({ from: rootNode, to: group, kind: 'primary', label: '' });
+      }
+
+      const upstreamNodes = [];
+      proxyGroups.forEach(group => {
+        const entry = group.entries[0];
+        const up = entry.upstream;
+        const path = routerPath(state.focusPath, entry.name);
+        upstreamNodes.push({
+          id: 'upstream:' + entry.name,
+          kind: up.fetch_error ? 'upstream-error' : 'upstream',
+          proxyGroup: group,
+          x: 0,
+          y: y.upstream,
+          w: cardW,
+          h: 90,
+          title: up.fetch_error ? entry.name : (up.router_id || entry.name),
+          status: up.fetch_error ? 'err' : statusClass(up.status),
+          fetchError: up.fetch_error || '',
+          focusPath: up.fetch_error ? '' : path,
+        });
+      });
+      placeAbsoluteRow(upstreamNodes, y.upstream, width, cardW, gap);
+      for (const upNode of upstreamNodes) {
+        nodes.push(upNode);
+        edges.push({
+          from: upNode.proxyGroup,
+          to: upNode,
+          kind: upNode.kind === 'upstream-error' ? 'error' : 'primary',
+          label: upNode.kind === 'upstream-error' ? 'unreachable' : '',
+        });
+      }
+
+      return { width, height, nodes, edges, entries, groups };
+    }
+
+    function placeAbsoluteRow(row, rowY, width, cardW, gap) {
+      const total = row.length * cardW + Math.max(0, row.length - 1) * gap;
+      const start = width / 2 - total / 2;
+      row.forEach((node, idx) => {
+        node.x = start + idx * (cardW + gap);
+        node.y = rowY;
+      });
+    }
+
+    function drawEdge(svg, edge) {
+      const from = edge.from;
+      const to = edge.to;
+      const x1 = from.x + from.w / 2;
+      const y1 = from.y + from.h;
+      const x2 = to.x + to.w / 2;
+      const y2 = to.y;
+      const mid = Math.round((y1 + y2) / 2);
+      const path = `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`;
+      svg.appendChild(svgEl('path', {
+        d: path,
+        class: `route-edge ${edge.kind}`,
+        'marker-end': `url(#arrow-${edge.kind === 'fallback' ? 'fallback' : edge.kind === 'error' ? 'error' : 'primary'})`,
+      }));
+      if (edge.label) {
+        const label = svgEl('text', {
+          x: (x1 + x2) / 2,
+          y: mid - 6,
+          class: `edge-label ${edge.kind}`,
+          'text-anchor': 'middle',
+        });
+        label.textContent = edge.label;
+        svg.appendChild(label);
+      }
+    }
+
+    function drawNode(svg, node) {
+      const cls = ['route-node', node.kind, node.status || ''].join(' ');
+      const g = svgEl('g', { class: cls, transform: `translate(${node.x},${node.y})` });
+      if (node.focusPath) {
+        g.setAttribute('data-focus-path', node.focusPath);
+        g.setAttribute('tabindex', '0');
+      }
+
+      g.appendChild(svgEl('rect', { width: node.w, height: node.h, rx: 8, ry: 8 }));
+
+      if (node.kind === 'router') {
+        const creds = Object.keys(node.router.credentials || {}).length;
+        const models = Object.keys(node.router.models || {}).length;
+        g.appendChild(svgText([truncate(node.title, 38), `${node.router.status || 'unknown'} | ${creds} credentials | ${models} models`], node.w / 2, 34, 'node-title', { dy: 24 }));
+      } else if (node.kind === 'gate') {
+        g.appendChild(svgText(['fallback trigger', '429, 5xx, banned, over limit'], node.w / 2, 28, 'node-title', { dy: 22 }));
+      } else if (node.kind === 'upstream' || node.kind === 'upstream-error') {
+        g.appendChild(svgText([truncate(node.title, 30), node.kind === 'upstream-error' ? truncate(node.fetchError, 34) : 'click to focus this router'], node.w / 2, 31, 'node-title', { dy: 22 }));
+      } else {
+        const s = node.summary;
+        const role = node.role === 'fallback' ? 'fallback line' : 'primary line';
+        const families = s.families.length ? s.families.join(', ') : node.source;
+        const status = s.banned > 0 ? `${s.banned} banned` : s.usage >= 0.85 ? 'near limit' : 'healthy';
+        const title = node.kind === 'proxy' ? node.title : `${node.title} source`;
+        const lines = [
+          truncate(title, 28),
+          `${role} | weight ${fmtNum(s.weight)}`,
+          `${entriesLabel(node.entries.length)} | ${fmtNum(s.models)} models`,
+          `RPM ${fmtRate(s.currentRPM, s.limitRPM)}`,
+          truncate(`models: ${families}`, 34),
+          status,
+        ];
+        const classes = ['node-title', s.status].join(' ');
+        g.appendChild(svgText(lines, node.w / 2, 24, classes, { dy: 16 }));
+
+        const barW = node.w - 34;
+        const pct = clamp(s.usage, 0, 1);
+        g.appendChild(svgEl('rect', { class: 'usage-track', x: 17, y: node.h - 18, width: barW, height: 5, rx: 3 }));
+        g.appendChild(svgEl('rect', { class: `usage-fill ${s.status}`, x: 17, y: node.h - 18, width: Math.max(3, barW * pct), height: 5, rx: 3 }));
+      }
+
+      svg.appendChild(g);
+    }
+
+    function entriesLabel(n) {
+      return n === 1 ? '1 credential' : `${n} credentials`;
+    }
+
+    function drawDefs(svg) {
+      const defs = svgEl('defs');
+      for (const kind of ['primary', 'fallback', 'error']) {
+        const marker = svgEl('marker', {
+          id: 'arrow-' + kind,
+          viewBox: '0 0 10 10',
+          refX: 8,
+          refY: 5,
+          markerWidth: 6,
+          markerHeight: 6,
+          orient: 'auto-start-reverse',
+        });
+        marker.appendChild(svgEl('path', { d: 'M 0 0 L 10 5 L 0 10 z', class: `arrow-fill ${kind}` }));
+        defs.appendChild(marker);
+      }
+      svg.appendChild(defs);
+    }
+
+    function renderDiagram(router) {
+      const wrap = document.getElementById('diagramWrap');
+      const entries = credentialEntries(router).filter(matchesFilters);
+      const groups = groupEntries(entries).map(group => ({
+        ...group,
+        summary: summarizeGroup(group),
+      }));
+      const layout = { entries, groups };
+      state.layout = layout;
+
+      if (layout.groups.length === 0) {
+        wrap.innerHTML = '<p class="trace-empty">No routes match the current filters.</p>';
+        renderStats(layout);
+        return;
+      }
+
+      wrap.innerHTML = buildRouteDiagram(router, groups);
+      wrap.scrollTop = 0;
+      renderStats(layout);
+      document.getElementById('zoomLabel').textContent = `${Math.round(state.zoom * 100)}%`;
+    }
+
     function buildMermaid(trace) {
-      const sgBlocks  = [];   // subgraph blocks (arrays of lines)
-      const edgeDefs  = [];   // inter-node edges
-      const animDefs  = [];   // animate declarations
-      const styleDefs = [];   // style overrides
-      const defined   = new Set();
-      let nc = 0, ec = 0;
+      const sgBlocks = [];
+      const edgeDefs = [];
+      const styleDefs = [];
+      const defined = new Set();
       const idMap = new Map();
+      let nc = 0;
 
       function nid(key) {
         if (!idMap.has(key)) idMap.set(key, 'n' + nc++);
         return idMap.get(key);
       }
 
-      function addEdge(from, to, label) {
-        const eId = 'e' + ec++;
+      function addEdge(from, to, label, dotted = false) {
+        const arrow = dotted ? '-.->' : '-->';
         edgeDefs.push(label
-          ? `  ${from} ${eId}@==>|"${label}"| ${to}`
-          : `  ${from} ${eId}@==> ${to}`);
-        if (label) animDefs.push(`  ${eId}@{ animate: true }`);
+          ? `  ${from} ${arrow}|"${mermaidText(label)}"| ${to}`
+          : `  ${from} ${arrow} ${to}`);
       }
 
       function statusFill(s) {
@@ -172,80 +802,69 @@
         return total;
       }
 
-      function addRouter(t, alias) {
-        const rid = nid('r:' + t.router_id);
+      function addRouter(router, alias) {
+        const routerID = router.router_id || alias || 'router';
+        const rid = nid('r:' + routerID);
         if (defined.has(rid)) return rid;
         defined.add(rid);
 
-        const creds    = t.credentials || {};
-        const nonProxy = Object.entries(creds).filter(([, c]) => c.type !== 'proxy');
-        const total    = Object.keys(creds).length;
-        const banned   = Object.values(creds).filter(c => c.is_banned).length;
-        const dark     = isDark();
+        const creds = router.credentials || {};
+        const nonProxy = Object.entries(creds).filter(([, cred]) => cred.type !== 'proxy');
+        const total = Object.keys(creds).length;
+        const banned = Object.values(creds).filter(cred => cred.is_banned).length;
+        const title = alias && alias !== routerID ? alias : routerID;
+        const sgId = rid + 'sg';
+        const dark = isDark();
 
-        // subgraph title = alias if set, else router_id
-        const sgTitle = alias && alias !== t.router_id ? esc(alias) : esc(t.router_id);
-        const sgId    = rid + 'sg';
-        const sgFill  = dark ? '#1e2124' : '#f0f0ee';
-        const sgStroke = statusFill(t.status);
-        styleDefs.push(`  style ${sgId} fill:${sgFill},stroke:${sgStroke},stroke-width:2px`);
+        styleDefs.push(`  style ${sgId} fill:${dark ? '#1e2124' : '#f0f0ee'},stroke:${statusFill(router.status)},stroke-width:2px`);
 
-        const sg = [`  subgraph ${sgId} ["🖥 ${sgTitle}"]`];
+        const sg = [`  subgraph ${sgId}["${mermaidText(title)}"]`];
+        const routerLabel = `${mermaidText(routerID)}<br/>${mermaidText(router.status || 'unknown')} | ${total - banned}/${total} ok`;
+        sg.push(`    ${rid}["${routerLabel}"]`);
+        styleDefs.push(`  style ${rid} fill:${statusFill(router.status)},color:#fff,stroke:#fff`);
 
-        // router node (processes shape = stacked rectangle)
-        const routerLbl = `${esc(t.router_id)}<br/>${esc(t.status || '?')} · ${total - banned}/${total} ok`;
-        sg.push(`    ${rid}@{ shape: processes, label: "${routerLbl}" }`);
-        styleDefs.push(`  style ${rid} fill:${statusFill(t.status)},color:#fff,stroke:#fff`);
-
-        // credential nodes (notch-rect = card shape)
         for (const [name, cred] of nonProxy) {
-          const lid    = nid('c:' + t.router_id + ':' + name);
-          const icon   = cred.is_banned ? '✗' : '✓';
-          const errStr = Object.entries(cred.banned_error_counts || {}).map(([c, n]) => `${n}×${c}`).join(' ');
-          const lbl    = `${icon} ${esc(name)}<br/>${esc(cred.type)}${errStr ? '<br/>' + esc(errStr) : ''}`;
-          sg.push(`    ${lid}@{ shape: notch-rect, label: "${lbl}" }`);
-          styleDefs.push(`  style ${lid} fill:${cred.is_banned ? '#ef4444' : '#475569'},color:#fff,stroke:none`);
+          const cid = nid('c:' + routerID + ':' + name);
+          const stateLabel = cred.is_banned ? 'banned' : 'ok';
+          const errs = Object.entries(cred.banned_error_counts || {}).map(([code, n]) => `${n}x${code}`).join(' ');
+          const label = `${stateLabel} ${mermaidText(name)}<br/>${mermaidText(cred.type || 'unknown')}${errs ? '<br/>' + mermaidText(errs) : ''}`;
+          sg.push(`    ${cid}["${label}"]`);
+          styleDefs.push(`  style ${cid} fill:${cred.is_banned ? '#ef4444' : '#475569'},color:#fff,stroke:none`);
         }
 
-        sg.push(`  end`);
+        sg.push('  end');
         sgBlocks.push(sg);
 
-        // edges: router → credentials
         for (const [name, cred] of nonProxy) {
-          const lid = nid('c:' + t.router_id + ':' + name);
-          addEdge(rid, lid, cred.current_rpm > 0 ? `${fmtNum(cred.current_rpm)} rpm` : null);
+          const cid = nid('c:' + routerID + ':' + name);
+          addEdge(rid, cid, cred.current_rpm > 0 ? `${fmtNum(cred.current_rpm)} rpm` : '');
         }
 
-        // edges: router → upstream routers
-        const upstreamRids = [];
-        for (const [credName, up] of Object.entries(t.upstreams || {})) {
-          const upRPM = sumUpstreamRPM(up);
-          const label = upRPM > 0 ? `${fmtNum(upRPM)} rpm` : null;
+        const upstreamIDs = [];
+        for (const [credName, up] of Object.entries(router.upstreams || {})) {
+          const label = sumUpstreamRPM(up) > 0 ? `${fmtNum(sumUpstreamRPM(up))} rpm` : '';
           if (up.fetch_error) {
-            const errId  = nid('err:' + t.router_id + ':' + credName);
-            const errSgId = errId + 'sg';
+            const errID = nid('err:' + routerID + ':' + credName);
+            const errSgID = errID + 'sg';
             sgBlocks.push([
-              `  subgraph ${errSgId} ["⚠ ${esc(credName)}"]`,
-              `    ${errId}@{ shape: notch-rect, label: "unreachable" }`,
-              `  end`,
+              `  subgraph ${errSgID}["${mermaidText(credName)}"]`,
+              `    ${errID}["unreachable"]`,
+              '  end',
             ]);
-            styleDefs.push(`  style ${errId} fill:#5f656d,color:#fff,stroke:none`);
-            styleDefs.push(`  style ${errSgId} fill:${dark ? '#1e2124' : '#f0f0ee'},stroke:#5f656d,stroke-width:2px`);
-            addEdge(rid, errId, label);
-            upstreamRids.push(errId);
+            styleDefs.push(`  style ${errID} fill:#5f656d,color:#fff,stroke:none`);
+            styleDefs.push(`  style ${errSgID} fill:${dark ? '#1e2124' : '#f0f0ee'},stroke:#5f656d,stroke-width:2px`);
+            addEdge(rid, errID, label);
+            upstreamIDs.push(errID);
           } else {
             const uid = addRouter(up, credName);
             addEdge(rid, uid, label);
-            upstreamRids.push(uid);
+            upstreamIDs.push(uid);
           }
         }
 
-        // Force upstream routers to render below credential level using invisible rank edges
-        if (nonProxy.length > 0 && upstreamRids.length > 0) {
-          const firstCredId = nid('c:' + t.router_id + ':' + nonProxy[0][0]);
-          for (const uid of upstreamRids) {
-            edgeDefs.push(`  ${firstCredId} ~~~ ${uid}`);
-          }
+        if (nonProxy.length > 0 && upstreamIDs.length > 0) {
+          const firstCredID = nid('c:' + routerID + ':' + nonProxy[0][0]);
+          for (const uid of upstreamIDs) edgeDefs.push(`  ${firstCredID} ~~~ ${uid}`);
         }
 
         return rid;
@@ -256,107 +875,270 @@
         'flowchart TB',
         ...sgBlocks.flat(),
         ...edgeDefs,
-        ...animDefs,
         ...styleDefs,
       ].join('\n');
     }
 
-    async function renderDiagram(trace) {
-      const wrap = document.getElementById('diagramWrap');
-      mermaid.initialize(getMermaidConfig());
+    async function renderChainDiagram(trace) {
+      const wrap = document.getElementById('chainDiagramWrap');
+      if (!wrap || !trace) return;
+      const renderID = ++state.chainRenderId;
+      applyChainZoom();
+
+      if (!window.mermaid) {
+        wrap.innerHTML = '<p class="trace-empty err-text">Mermaid failed to load.</p>';
+        return;
+      }
+
       const diagram = buildMermaid(trace);
       try {
-        const id = 'trace_' + Date.now();
-        const { svg } = await mermaid.render(id, diagram);
+        mermaid.initialize(getMermaidConfig());
+        const { svg } = await mermaid.render('chain_' + renderID + '_' + Date.now(), diagram);
+        if (renderID !== state.chainRenderId) return;
         wrap.innerHTML = svg;
         const svgEl = wrap.querySelector('svg');
         if (svgEl && svgEl.getAttribute('viewBox')) {
-          // width="100%" as an SVG *attribute* (not CSS) + no height → браузер
-          // вычисляет высоту из viewBox-пропорций; без этого SVG схлопывается в 300×150
-          svgEl.setAttribute('width', '100%');
-          svgEl.removeAttribute('height');
-          svgEl.style.display = 'block';
-          svgEl.style.margin = '0 auto';
+          applyChainZoom();
         }
       } catch (e) {
-        wrap.innerHTML = `<pre style="color:var(--status-err);font-size:var(--fs-xs);text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
+        if (renderID !== state.chainRenderId) return;
+        wrap.innerHTML = `<pre class="chain-error">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
       }
     }
 
-    // ── router details (collapsible) ───────────────────────────────────────────
-    function buildDetails(trace) {
-      const routers = [];
+    function buildRouteDiagram(router, groups) {
+      const primary = groups.filter(g => g.role === 'primary');
+      const fallback = groups.filter(g => g.role === 'fallback');
+      const primaryFallback = primary.length > 0 && fallback.length > 0;
 
-      function collect(t, via) {
-        routers.push({ t, via });
-        for (const [credName, up] of Object.entries(t.upstreams || {})) {
-          if (!up.fetch_error) collect(up, credName);
-        }
-      }
-      collect(trace, null);
+      return `<div class="route-diagram">
+        <div class="diagram-root-stage">
+          ${routerSummary(router)}
+        </div>
+        ${lane('Primary cascade', 'Traffic starts here. Cheaper and healthy sources should be first.', primary, 'primary')}
+        ${primaryFallback ? fallbackRule() : ''}
+        ${lane('Fallback cascade', 'Used after 429, 5xx, ban, or limit pressure.', fallback, 'fallback')}
+      </div>`;
+    }
 
-      return routers.map(({ t, via }, idx) => {
-        const cls = statusClass(t.status);
-        const credCount = Object.keys(t.credentials || {}).length;
-        const viaHtml = via
-          ? `<span style="color:var(--fg-dim);font-size:var(--fs-xs);">via ${esc(via)}</span>`
-          : '';
+    function routerSummary(router) {
+      const creds = Object.keys(router.credentials || {}).length;
+      const models = Object.keys(router.models || {}).length;
+      return `<section class="route-root ${statusClass(router.status)}">
+        <div>
+          <span class="route-eyebrow">focused router</span>
+          <h2 title="${attr(router.router_id || 'router')}">${esc(router.router_id || 'router')}</h2>
+        </div>
+        <div class="route-root-metrics">
+          ${miniMetric('status', router.status || 'unknown')}
+          ${miniMetric('routes', creds)}
+          ${miniMetric('models', models)}
+        </div>
+      </section>`;
+    }
 
-        const rows = Object.entries(t.credentials || {}).sort().map(([name, c]) => {
-          const sCls = c.is_banned ? 'err' : 'ok';
-          const sTxt = c.is_banned ? 'banned' : 'ok';
-          const errs = Object.entries(c.banned_error_counts || {})
-            .map(([code, n]) => `${n}×${code}`).join(' ');
-          return `<tr>
-        <td>${esc(name)}</td>
-        <td class="dim">${esc(c.type || '—')}</td>
-        <td>${badge(sCls, sTxt)}</td>
-        <td class="muted">${fmtRate(c.current_rpm, c.limit_rpm)}</td>
-        <td class="muted">${fmtRate(c.current_tpm, c.limit_tpm)}</td>
-        <td style="font-size:var(--fs-xs);color:var(--status-err);">${esc(errs) || '—'}</td>
-      </tr>`;
-        }).join('');
+    function lane(title, hint, groups, kind) {
+      if (groups.length === 0) return '';
+      return `<section class="diagram-lane ${kind}">
+        <div class="route-lane-head">
+          <div>
+            <span class="route-eyebrow">${esc(kind)}</span>
+            <h3>${esc(title)}</h3>
+          </div>
+          <p>${esc(hint)}</p>
+        </div>
+        <div class="diagram-drop ${kind}"></div>
+        <div class="diagram-scroll">
+          ${diagramRows(groups, routeCard, kind)}
+        </div>
+      </section>`;
+    }
 
-        const unreachRows = Object.entries(t.upstreams || {})
-          .filter(([, up]) => up.fetch_error)
-          .map(([credName, up]) => `<tr>
-        <td>${esc(credName)}</td>
-        <td class="dim">proxy</td>
-        <td colspan="3" style="color:var(--status-err);font-size:var(--fs-xs);font-style:italic;">
-          unreachable: ${esc(up.fetch_error)}
-        </td>
-        <td>—</td>
-      </tr>`).join('');
+    function fallbackRule() {
+      return `<div class="diagram-bridge fallback">
+        <div class="fallback-rule">
+          <span>fallback trigger</span>
+          <b>429</b>
+          <b>5xx</b>
+          <b>ban</b>
+          <b>limit</b>
+        </div>
+      </div>`;
+    }
 
-        const openAttr = idx === 0 ? ' open' : '';
-        return `<details class="wf-card" style="margin-bottom:var(--sp-2);"${openAttr}>
-      <summary>
-        <span style="color:var(--fg-dim);">${idx === 0 ? '▾' : '▸'}</span>
-        <span style="font-size:13px;">${esc(t.router_id || '—')}</span>
-        ${badge(cls, t.status || 'unknown')}
-        ${viaHtml}
-        <span style="margin-left:auto;color:var(--fg-dim);font-size:var(--fs-xs);">${credCount} credentials</span>
-      </summary>
-      <div class="detail-body">
-        <table class="wf-table">
-          <thead>
-            <tr>
-              <th>credential</th>
-              <th>type</th>
-              <th>status</th>
-              <th>RPM</th>
-              <th>TPM</th>
-              <th>errors</th>
-            </tr>
-          </thead>
-          <tbody>${rows}${unreachRows}</tbody>
-        </table>
-      </div>
-    </details>`;
+    function diagramRows(items, renderItem, kind) {
+      return chunk(items, 4).map(row => `<div class="diagram-row ${kind}">
+        ${row.map(renderItem).join('')}
+      </div>`).join('');
+    }
+
+    function chunk(items, size) {
+      const out = [];
+      for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+      return out;
+    }
+
+    function routeCard(group) {
+      const s = group.summary;
+      const entry = group.entries[0];
+      const title = group.title;
+      const families = s.families.length ? s.families : [group.source];
+      const status = s.banned > 0 ? `${s.banned} banned` : s.usage >= 0.85 ? 'near limit' : 'healthy';
+      const statusClassName = s.status || 'ok';
+      const modelChips = families.slice(0, 4).map(f => `<span>${esc(f)}</span>`).join('');
+      const more = families.length > 4 ? `<span>+${families.length - 4}</span>` : '';
+      const modelNames = group.entries.flatMap(e => e.models.map(m => m.model)).slice(0, 16).join(', ');
+      const canDrill = entry.upstream && !entry.upstream.fetch_error;
+      const focusPath = canDrill ? routerPath(state.focusPath, entry.name) : '';
+      const apiTypes = [...new Set(group.entries.map(e => e.type))].join(', ');
+      const providerURL = providerURLSummary(s.providerURLs);
+
+      return `<article class="route-card ${group.role} ${statusClassName}" title="api protocol: ${attr(apiTypes)}" ${focusPath ? `data-focus-path="${attr(focusPath)}" tabindex="0"` : ''}>
+        <div class="route-card-top">
+          <div class="route-title" title="${attr(title)}">${esc(title)}</div>
+          <span class="route-role">${esc(group.role)}</span>
+        </div>
+        <div class="route-card-status">
+          <span class="route-status-dot ${statusClassName}"></span>
+          <span>${esc(status)}</span>
+          ${entry.upstream ? '<span class="route-proxy-tag">proxy</span>' : ''}
+        </div>
+        <div class="route-provider-url ${providerURL.empty ? 'empty' : ''}" title="${attr(providerURL.title)}">
+          <span>url</span>
+          <b>${esc(providerURL.text)}</b>
+        </div>
+        <div class="route-card-metrics">
+          ${miniMetric('credentials', group.entries.length)}
+          ${miniMetric('models', s.models)}
+          ${miniMetric('weight', fmtNum(s.weight))}
+          ${miniMetric('RPM', fmtRate(s.currentRPM, s.limitRPM))}
+        </div>
+        <div class="route-model-chips" title="${attr(modelNames)}">${modelChips}${more}</div>
+        <div class="route-usage"><i class="${statusClassName}" style="width:${Math.round(clamp(s.usage, 0, 1) * 100)}%"></i></div>
+      </article>`;
+    }
+
+    function miniMetric(label, value) {
+      return `<span class="route-mini-metric"><small>${esc(label)}</small><b>${esc(value)}</b></span>`;
+    }
+
+    function renderStats(layout) {
+      const total = credentialEntries(focusedRouter().trace).length;
+      const fallback = layout.entries.filter(e => e.isFallback).length;
+      const problems = layout.entries.filter(e => e.problem).length;
+      const models = new Set(layout.entries.flatMap(e => e.models.map(m => m.model))).size;
+      document.getElementById('traceStats').innerHTML = [
+        statBlock('visible routes', `${layout.entries.length}/${total}`),
+        statBlock('fallback routes', fallback),
+        statBlock('problem routes', problems),
+        statBlock('visible models', models),
+      ].join('');
+    }
+
+    function statBlock(label, value) {
+      return `<div class="trace-stat"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;
+    }
+
+    function renderTabs() {
+      const routers = collectRouters(state.trace);
+      document.getElementById('focusTabs').innerHTML = routers.map((r, idx) => {
+        const active = r.path === state.focusPath ? ' active' : '';
+        const status = statusClass(r.trace.status);
+        const label = idx === 0 ? 'root' : (r.via || r.trace.router_id || 'router');
+        const meta = `${Object.keys(r.trace.credentials || {}).length} routes`;
+        return `<button class="trace-tab${active}" data-focus="${attr(r.path)}">
+          <span class="tab-status ${status}"></span>
+          <span>${esc(truncate(label, 24))}</span>
+          <small>${esc(meta)}</small>
+        </button>`;
       }).join('');
     }
 
-    // ── data loading ───────────────────────────────────────────────────────────
+    function renderProviderFilters() {
+      const families = allProviderFamilies(state.trace);
+      const allActive = state.providers.size === 0 ? ' active' : '';
+      const chips = [
+        `<button class="trace-chip${allActive}" data-provider="__all">all</button>`,
+        ...families.map(f => {
+          const active = state.providers.has(f) ? ' active' : '';
+          return `<button class="trace-chip${active}" data-provider="${attr(f)}">${esc(f)}</button>`;
+        }),
+      ];
+      document.getElementById('providerFilters').innerHTML = chips.join('');
+    }
+
+    function renderDetails() {
+      const routers = collectRouters(state.trace);
+      document.getElementById('routerList').innerHTML = routers.map(({ trace, via }, idx) => {
+        const cls = statusClass(trace.status);
+        const entries = credentialEntries(trace).filter(matchesFilters);
+        const rows = entries.map(entry => {
+          const sCls = entry.problem ? (entry.isBanned || (entry.upstream && entry.upstream.fetch_error) ? 'err' : 'warn') : 'ok';
+          const sTxt = entry.isBanned ? 'banned' : (entry.upstream && entry.upstream.fetch_error) ? 'upstream error' : entry.usage >= 0.85 ? 'near limit' : 'ok';
+          const errs = Object.entries(entry.errors || {}).map(([code, n]) => `${n}x${code}`).join(' ');
+          const role = entry.isFallback ? 'fallback' : 'primary';
+          const modelHint = entry.models.slice(0, 3).map(m => m.model).join(', ');
+          return `<tr>
+            <td>${esc(entry.name)}</td>
+            <td class="dim" title="api: ${attr(entry.type)}">${esc(entry.routeSource)}</td>
+            <td>${badge(entry.isFallback ? 'warn' : 'info', role)}</td>
+            <td class="muted">${esc(entry.families.filter(f => f !== 'proxy').join(', ') || entry.type)}</td>
+            <td>${badge(sCls, sTxt)}</td>
+            <td class="dim" title="${attr(entry.providerURL || '-')}">${esc(compactURL(entry.providerURL) || '-')}</td>
+            <td class="muted">${esc(fmtRate(entry.currentRPM, entry.limitRPM))}</td>
+            <td class="muted">${esc(fmtRate(entry.currentTPM, entry.limitTPM))}</td>
+            <td class="muted">${entry.models.length || '-'}</td>
+            <td class="dim" title="${attr(modelHint)}">${esc(truncate(modelHint || '-', 42))}</td>
+            <td class="err-text">${esc(errs) || '-'}</td>
+          </tr>`;
+        }).join('');
+
+        const empty = rows ? '' : '<tr><td colspan="11" class="dim">No credentials match current filters.</td></tr>';
+        const viaHtml = via ? `<span class="trace-via">via ${esc(via)}</span>` : '';
+        const openAttr = idx === 0 || trace.router_id === focusedRouter().trace.router_id ? ' open' : '';
+        return `<details class="wf-card" style="margin-bottom:var(--sp-2);"${openAttr}>
+          <summary>
+            <span class="summary-arrow">${openAttr ? 'v' : '>'}</span>
+            <span class="trace-router-name">${esc(trace.router_id || '-')}</span>
+            ${badge(cls, trace.status || 'unknown')}
+            ${viaHtml}
+            <span class="summary-count">${entries.length}/${Object.keys(trace.credentials || {}).length} credentials</span>
+          </summary>
+          <div class="detail-body">
+            <table class="wf-table">
+              <thead>
+                <tr>
+                  <th>credential</th>
+                  <th>source</th>
+                  <th>line</th>
+                  <th>model provider</th>
+                  <th>status</th>
+                  <th>url</th>
+                  <th>RPM</th>
+                  <th>TPM</th>
+                  <th>models</th>
+                  <th>examples</th>
+                  <th>errors</th>
+                </tr>
+              </thead>
+              <tbody>${rows}${empty}</tbody>
+            </table>
+          </div>
+        </details>`;
+      }).join('');
+    }
+
+    function render() {
+      if (!state.trace) return;
+      const focus = focusedRouter();
+      if (!focus) return;
+      renderTabs();
+      renderProviderFilters();
+      renderDiagram(focus.trace);
+      void renderChainDiagram(state.trace);
+      renderDetails();
+    }
+
     async function load() {
       clearInterval(countdownTimer);
 
@@ -364,79 +1146,156 @@
         const resp = await fetch('/trace');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const trace = await resp.json();
-        window._lastTrace = trace;
+        state.trace = trace;
+        const routers = collectRouters(trace);
+        const requested = requestedFocusPath();
+        if (requested && routers.some(r => r.path === requested)) {
+          state.focusPath = requested;
+        } else if (!routers.some(r => r.path === state.focusPath)) {
+          state.focusPath = 'root';
+        }
 
-        // version from header (added by router)
         const ver = resp.headers.get('X-Router-Version') || '';
         const commit = resp.headers.get('X-Router-Commit') || '';
-        document.getElementById('verLabel').textContent =
-          ver ? `${ver}` : '';
-        document.getElementById('commitLabel').textContent =
-          commit ? `${commit ? commit.slice(0, 7) : ''}` : '';
+        document.getElementById('verLabel').textContent = ver || '';
+        document.getElementById('commitLabel').textContent = commit ? commit.slice(0, 7) : '';
 
-        // overall status derived from root router
         const rootStatus = trace.status || 'unknown';
         const cls = statusClass(rootStatus);
         const badgeEl = document.getElementById('statusBadge');
         badgeEl.className = `wf-badge ${cls}`;
         document.getElementById('statusText').textContent = rootStatus;
 
-        // count routers + creds
-        let routerCount = 0, credCount = 0;
-        function countNodes(t) {
-          routerCount++;
-          credCount += Object.keys(t.credentials || {}).length;
-          for (const up of Object.values(t.upstreams || {})) {
-            if (!up.fetch_error) countNodes(up);
-          }
-        }
-        countNodes(trace);
-
+        const credCount = routers.reduce((sum, r) => sum + Object.keys(r.trace.credentials || {}).length, 0);
+        const modelCount = routers.reduce((sum, r) => sum + Object.keys(r.trace.models || {}).length, 0);
         document.getElementById('subtitle').textContent =
-          `${routerCount} router${routerCount !== 1 ? 's' : ''} · ${credCount} credentials · updated ${new Date().toLocaleTimeString()}`;
+          `${routers.length} routers | ${credCount} credentials | ${modelCount} model routes | updated ${new Date().toLocaleTimeString()}`;
 
-        await renderDiagram(trace);
-        document.getElementById('routerList').innerHTML = buildDetails(trace);
-
-        // wire <details> toggle arrows
-        document.querySelectorAll('#routerList details').forEach(det => {
-          det.addEventListener('toggle', () => {
-            const arrow = det.querySelector('summary > span:first-child');
-            if (arrow) arrow.textContent = det.open ? '▾' : '▸';
-          });
-        });
-
-        // wire diagram section toggle arrow
-        const diagramSec = document.getElementById('diagramSection');
-        if (diagramSec) {
-          diagramSec.addEventListener('toggle', () => {
-            const arrow = document.getElementById('diagramArrow');
-            if (arrow) arrow.textContent = diagramSec.open ? '▾' : '▸';
-          });
-        }
+        render();
       } catch (e) {
         document.getElementById('diagramWrap').innerHTML =
-          `<p style="color:var(--status-err);padding:var(--sp-4);">Failed to load trace: ${esc(e.message)}</p>`;
+          `<p class="trace-empty err-text">Failed to load trace: ${esc(e.message)}</p>`;
+        document.getElementById('chainDiagramWrap').innerHTML =
+          `<p class="trace-empty err-text">Failed to load trace: ${esc(e.message)}</p>`;
         document.getElementById('routerList').innerHTML = '';
         document.getElementById('subtitle').textContent = `error: ${e.message}`;
       }
 
-      // countdown
       countdownSecs = 30;
       tickCountdown();
       countdownTimer = setInterval(() => {
         countdownSecs--;
         tickCountdown();
-        if (countdownSecs <= 0) { clearInterval(countdownTimer); load(); }
+        if (countdownSecs <= 0) {
+          clearInterval(countdownTimer);
+          load();
+        }
       }, 1000);
+    }
+
+    function fitGraph() {
+      if (!state.layout || !state.layout.width) return;
+      const wrap = document.getElementById('diagramWrap');
+      const available = Math.max(320, wrap.clientWidth - 28);
+      state.zoom = clamp(available / state.layout.width, 0.35, 3);
+      render();
     }
 
     function tickCountdown() {
       document.getElementById('countdown').textContent = `refresh in ${countdownSecs}s`;
     }
 
+    document.addEventListener('click', e => {
+      const tab = e.target.closest('[data-focus]');
+      if (tab) {
+        setFocusPath(tab.getAttribute('data-focus'));
+        state.zoom = 1;
+        render();
+        return;
+      }
+
+      const node = e.target.closest('[data-focus-path]');
+      if (node) {
+        setFocusPath(node.getAttribute('data-focus-path'));
+        state.zoom = 1;
+        render();
+        return;
+      }
+
+      const chip = e.target.closest('[data-provider]');
+      if (chip) {
+        const provider = chip.getAttribute('data-provider');
+        if (provider === '__all') {
+          state.providers.clear();
+        } else if (state.providers.has(provider)) {
+          state.providers.delete(provider);
+        } else {
+          state.providers.add(provider);
+        }
+        render();
+      }
+    });
+
+    document.addEventListener('toggle', e => {
+      if (e.target.matches('#diagramSection')) {
+        document.getElementById('diagramArrow').textContent = e.target.open ? 'v' : '>';
+      }
+      if (e.target.matches('#chainSection')) {
+        document.getElementById('chainArrow').textContent = e.target.open ? 'v' : '>';
+      }
+      if (e.target.matches('#routerList details')) {
+        const arrow = e.target.querySelector('.summary-arrow');
+        if (arrow) arrow.textContent = e.target.open ? 'v' : '>';
+      }
+    }, true);
+
+    document.getElementById('modelFilter').addEventListener('input', e => {
+      state.modelQuery = e.target.value;
+      render();
+    });
+    document.getElementById('routeMode').addEventListener('change', e => {
+      state.routeMode = e.target.value;
+      render();
+    });
+    document.getElementById('zoomIn').addEventListener('click', () => {
+      state.zoom = clamp(state.zoom + 0.25, 0.35, 3);
+      render();
+    });
+    document.getElementById('zoomOut').addEventListener('click', () => {
+      state.zoom = clamp(state.zoom - 0.25, 0.35, 3);
+      render();
+    });
+    document.getElementById('fitGraph').addEventListener('click', fitGraph);
+    document.getElementById('resetView').addEventListener('click', () => {
+      state.providers.clear();
+      state.modelQuery = '';
+      state.routeMode = 'all';
+      state.zoom = 1;
+      document.getElementById('modelFilter').value = '';
+      document.getElementById('routeMode').value = 'all';
+      render();
+    });
+    document.getElementById('chainZoomIn').addEventListener('click', () => {
+      chainZoomStep(1);
+    });
+    document.getElementById('chainZoomOut').addEventListener('click', () => {
+      chainZoomStep(-1);
+    });
+    document.getElementById('chainZoomReset').addEventListener('click', () => {
+      state.chainZoom = 1;
+      applyChainZoom();
+    });
+
     document.addEventListener('keydown', e => {
       if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
+      if ((e.key === '+' || e.key === '=') && !e.ctrlKey && !e.metaKey) {
+        state.zoom = clamp(state.zoom + 0.25, 0.35, 3);
+        render();
+      }
+      if (e.key === '-' && !e.ctrlKey && !e.metaKey) {
+        state.zoom = clamp(state.zoom - 0.25, 0.35, 3);
+        render();
+      }
     });
 
     load();
