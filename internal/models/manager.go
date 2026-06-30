@@ -151,14 +151,14 @@ type Manager struct {
 	staticModelLimits           map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
 	staticModelRealNames        map[string]string            // immutable snapshot of global real names from config.yaml
 	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
-	staticModelModes            map[string]string            // immutable snapshot of modes from config.yaml
+	staticModelModes            map[string]config.ModelMode  // immutable snapshot of modes from config.yaml
 	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
 	dynamicModelWeights         map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
 	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
 	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred       map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
-	modelModes                  map[string]string            // model ID or real model name -> mode
+	modelModes                  map[string]config.ModelMode  // model ID or real model name -> mode
 	defaultModelsRPM            int                          // default RPM for models
 	logger                      *slog.Logger
 	credentials                 []config.CredentialConfig   // credentials for fetching remote models
@@ -177,12 +177,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		staticModelLimits:           make(map[string][]ModelLimits),
 		staticModelRealNames:        make(map[string]string),
 		staticModelRealNamesPerCred: make(map[string]map[string]string),
-		staticModelModes:            make(map[string]string),
+		staticModelModes:            make(map[string]config.ModelMode),
 		dbModelNames:                make(map[string]bool),
 		modelAliases:                make(map[string]string),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
-		modelModes:                  make(map[string]string),
+		modelModes:                  make(map[string]config.ModelMode),
 		modelPassthroughResponses:   make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
 		defaultModelsRPM:            defaultModelsRPM,
@@ -258,9 +258,9 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 	return m
 }
 
-func applyModelMode(modes map[string]string, preserve map[string]string, model config.ModelRPMConfig) {
-	mode := strings.ToLower(strings.TrimSpace(model.Mode))
-	if mode == "" {
+func applyModelMode(modes map[string]config.ModelMode, preserve map[string]config.ModelMode, model config.ModelRPMConfig) {
+	mode := config.ModelMode(strings.ToLower(strings.TrimSpace(string(model.Mode))))
+	if mode == config.ModelModeFullAccess {
 		return
 	}
 	set := func(modelName string) {
@@ -308,7 +308,7 @@ func (m *Manager) GetRealModelNameForCredential(alias, credential string) (strin
 }
 
 // GetModelMode returns the configured mode for a model, if any.
-func (m *Manager) GetModelMode(modelID string) string {
+func (m *Manager) GetModelMode(modelID string) config.ModelMode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.modelModes[modelID]
@@ -583,7 +583,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		}
 		newRealNamesPerCred[cred] = snapshot
 	}
-	newModes := make(map[string]string, len(m.staticModelModes)+len(dbModels))
+	newModes := make(map[string]config.ModelMode, len(m.staticModelModes)+len(dbModels))
 	for k, v := range m.staticModelModes {
 		newModes[k] = v
 	}

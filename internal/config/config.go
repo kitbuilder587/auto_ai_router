@@ -29,11 +29,15 @@ const (
 	ProviderTypeProxy     ProviderType = "proxy"
 )
 
-// ModelModeImageGeneration marks models that must use the image generation endpoint.
-const ModelModeImageGeneration = "image_generation"
+type ModelMode string
 
-// ModelModeEmbedding marks models that must use the embeddings endpoint.
-const ModelModeEmbedding = "embedding"
+const (
+	ModelModeFullAccess          ModelMode = ""
+	ModelModeChatGeneration      ModelMode = "chat"
+	ModelModeImageGeneration     ModelMode = "image_generation"
+	ModelModeEmbeddingGeneration ModelMode = "embedding"
+	ModelModeChatImageGeneration ModelMode = "chat_image_generation"
+)
 
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
 // OTEL bridge) serialize ProviderType as a plain string instead of an
@@ -62,13 +66,13 @@ func normalizeProviderType(raw string) ProviderType {
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name       string `yaml:"name"`
-	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
-	Mode       string `yaml:"mode,omitempty"`
-	RPM        int    `yaml:"rpm"`
-	TPM        int    `yaml:"tpm"`
-	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
-	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Name       string    `yaml:"name"`
+	Model      string    `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	Mode       ModelMode `yaml:"mode,omitempty"`
+	RPM        int       `yaml:"rpm"`
+	TPM        int       `yaml:"tpm"`
+	Weight     int       `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
+	Credential string    `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
 	// are forwarded as-is to the provider's native /v1/responses endpoint instead
@@ -98,7 +102,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
-	m.Mode = resolveEnvString(temp.Mode)
+	m.Mode = ModelMode(resolveEnvString(temp.Mode))
 	m.Credential = resolveEnvString(temp.Credential)
 	m.PassthroughResponses = nil
 
@@ -1154,7 +1158,7 @@ func (c *Config) Normalize() {
 		c.Credentials[i].BaseURL = strings.TrimSuffix(c.Credentials[i].BaseURL, "/v1")
 	}
 	for i := range c.Models {
-		c.Models[i].Mode = strings.ToLower(strings.TrimSpace(c.Models[i].Mode))
+		c.Models[i].Mode = ModelMode(strings.ToLower(strings.TrimSpace(string(c.Models[i].Mode))))
 	}
 }
 

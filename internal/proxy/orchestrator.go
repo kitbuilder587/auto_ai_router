@@ -387,7 +387,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		realModelID = realName
 	}
 
-	if expectedEndpoint, mode, ok := p.requiredEndpointForModel(modelID, realModelID, r.URL.Path); ok {
+	if expectedEndpoint, mode, ok := p.requiredEndpointForModel(modelID, realModelID, body, r.URL.Path); ok {
 		message := fmt.Sprintf("Model %s must be called via %s", modelID, expectedEndpoint)
 		p.logger.Warn("Rejected model on incompatible endpoint",
 			"error_code", http.StatusBadRequest,
@@ -407,35 +407,99 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	return body, modelID, realModelID, streaming, true
 }
 
-func (p *Proxy) requiredEndpointForModel(modelID, realModelID, path string) (string, string, bool) {
+func (p *Proxy) requiredEndpointForModel(modelID, realModelID string, body []byte, path string) (string, config.ModelMode, bool) {
 	mode := p.modelMode(modelID, realModelID)
 	switch mode {
+	case config.ModelModeFullAccess:
+		return "", config.ModelModeFullAccess, false
+	case config.ModelModeChatGeneration:
+		if path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses" {
+			return "", config.ModelModeFullAccess, false
+		}
+		return "/v1/chat/completions", mode, true
 	case config.ModelModeImageGeneration:
 		if path == "/v1/images/generations" || path == "/v1/images/edits" {
-			return "", "", false
+			return "", config.ModelModeFullAccess, false
 		}
 		return "/v1/images/generations", mode, true
-	case config.ModelModeEmbedding:
+	case config.ModelModeEmbeddingGeneration:
 		if path == "/v1/embeddings" {
-			return "", "", false
+			return "", config.ModelModeFullAccess, false
 		}
 		return "/v1/embeddings", mode, true
+	case config.ModelModeChatImageGeneration:
+		if path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/responses" {
+			return "", config.ModelModeFullAccess, false
+		}
+		if path == "/v1/chat/completions" || path == "/v1/completions" {
+			if requestWantsImageOutput(body) {
+				return "/v1/images/generations or /v1/responses", mode, true
+			}
+			return "", config.ModelModeFullAccess, false
+		}
+		return "/v1/chat/completions", mode, true
 	default:
-		return "", "", false
+		return "", config.ModelModeFullAccess, false
 	}
 }
 
-func (p *Proxy) modelMode(modelID, realModelID string) string {
+func (p *Proxy) modelMode(modelID, realModelID string) config.ModelMode {
 	if p.modelManager == nil {
-		return ""
+		return config.ModelModeFullAccess
 	}
-	if mode := p.modelManager.GetModelMode(modelID); mode != "" {
+	if mode := p.modelManager.GetModelMode(modelID); mode != config.ModelModeFullAccess {
 		return mode
 	}
 	if realModelID != modelID {
 		return p.modelManager.GetModelMode(realModelID)
 	}
-	return ""
+	return config.ModelModeFullAccess
+}
+
+func requestWantsImageOutput(body []byte) bool {
+	var raw interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return false
+	}
+	return hasImageOutputModalities(raw)
+}
+
+func hasImageOutputModalities(value interface{}) bool {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		for key, nested := range v {
+			normalizedKey := strings.ToLower(strings.ReplaceAll(key, "_", ""))
+			if normalizedKey == "modalities" || normalizedKey == "responsemodalities" {
+				if containsImageModality(nested) {
+					return true
+				}
+			}
+			if hasImageOutputModalities(nested) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if hasImageOutputModalities(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsImageModality(value interface{}) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.EqualFold(v, "image")
+	case []interface{}:
+		for _, item := range v {
+			if containsImageModality(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Proxy) selectCredentialForModel(

@@ -45,14 +45,17 @@ func TestGetModelMode_WithStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	manager := New(logger, 50, []config.ModelRPMConfig{
-		{Name: "google/gemini-3-pro-image-preview", Model: "gemini-3-pro-image-preview", Mode: "IMAGE_GENERATION"},
+		{Name: "openai/gpt-image-1", Model: "gpt-image-1", Mode: "IMAGE_GENERATION"},
+		{Name: "google/gemini-3-pro-image-preview", Model: "gemini-3-pro-image-preview", Mode: "CHAT_IMAGE_GENERATION"},
 		{Name: "openai/text-embedding-3-small", Model: "text-embedding-3-small", Mode: "EMBEDDING"},
 	})
 
-	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("google/gemini-3-pro-image-preview"))
-	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("gemini-3-pro-image-preview"))
-	assert.Equal(t, config.ModelModeEmbedding, manager.GetModelMode("openai/text-embedding-3-small"))
-	assert.Equal(t, config.ModelModeEmbedding, manager.GetModelMode("text-embedding-3-small"))
+	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("openai/gpt-image-1"))
+	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("gpt-image-1"))
+	assert.Equal(t, config.ModelModeChatImageGeneration, manager.GetModelMode("google/gemini-3-pro-image-preview"))
+	assert.Equal(t, config.ModelModeChatImageGeneration, manager.GetModelMode("gemini-3-pro-image-preview"))
+	assert.Equal(t, config.ModelModeEmbeddingGeneration, manager.GetModelMode("openai/text-embedding-3-small"))
+	assert.Equal(t, config.ModelModeEmbeddingGeneration, manager.GetModelMode("text-embedding-3-small"))
 	assert.Empty(t, manager.GetModelMode("google/gemini-2.5-pro"))
 }
 
