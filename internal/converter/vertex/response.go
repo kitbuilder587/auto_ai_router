@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -45,10 +46,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 				}
 				// Handle inline data (images) from Vertex response
 				if part.InlineData != nil {
-					b64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
-					images = append(images, openai.ImageData{
-						B64JSON: b64Data,
-					})
+					if imageData, ok := inlineDataToChatImage(len(images), part.InlineData); ok {
+						images = append(images, imageData)
+					}
 				}
 				// Handle function calls from Vertex response
 				if part.FunctionCall != nil {
@@ -126,6 +126,25 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
 	}
 	return json.Marshal(openAIResp)
+}
+
+func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool) {
+	mimeType := blob.MIMEType
+	if mimeType == "" {
+		mimeType = http.DetectContentType(blob.Data)
+	}
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return openai.ImageData{}, false
+	}
+
+	b64Data := base64.StdEncoding.EncodeToString(blob.Data)
+	return openai.ImageData{
+		Type:  "image_url",
+		Index: &index,
+		ImageURL: &openai.ImageURL{
+			URL: "data:" + mimeType + ";base64," + b64Data,
+		},
+	}, true
 }
 
 // convertVertexUsageMetadata converts Vertex AI usage metadata to OpenAI format.

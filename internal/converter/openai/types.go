@@ -116,6 +116,8 @@ type OpenAIToolFunction struct {
 }
 
 type ImageData struct {
+	Type     string    `json:"type,omitempty"`
+	Index    *int      `json:"index,omitempty"`
 	B64JSON  string    `json:"b64_json,omitempty"`
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
