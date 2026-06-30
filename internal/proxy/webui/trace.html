@@ -107,14 +107,16 @@
           <div class="chain-toolbar">
             <span class="trace-label">full topology</span>
             <div class="chain-zoom">
-              <button class="wf-btn icon-btn" id="chainZoomOut" title="Zoom out">-</button>
+              <button class="wf-btn icon-btn" id="diagramZoomOut" title="Zoom out">-</button>
               <span class="trace-zoom-value" id="chainZoomLabel">100%</span>
-              <button class="wf-btn icon-btn" id="chainZoomIn" title="Zoom in">+</button>
-              <button class="wf-btn" id="chainZoomReset">reset</button>
+              <button class="wf-btn icon-btn" id="diagramZoomIn" title="Zoom in">+</button>
+              <button class="wf-btn" id="diagramReset">reset</button>
             </div>
           </div>
-          <div class="chain-canvas" id="chainDiagramWrap">
-            <p class="trace-empty">Loading...</p>
+          <div class="chain-canvas" id="diagramViewport">
+            <div id="chainDiagramWrap">
+              <p class="trace-empty">Loading...</p>
+            </div>
           </div>
         </div>
       </details>
@@ -1275,13 +1277,13 @@
       document.getElementById('routeMode').value = 'all';
       render();
     });
-    document.getElementById('chainZoomIn').addEventListener('click', () => {
+    document.getElementById('diagramZoomIn').addEventListener('click', () => {
       chainZoomStep(1);
     });
-    document.getElementById('chainZoomOut').addEventListener('click', () => {
+    document.getElementById('diagramZoomOut').addEventListener('click', () => {
       chainZoomStep(-1);
     });
-    document.getElementById('chainZoomReset').addEventListener('click', () => {
+    document.getElementById('diagramReset').addEventListener('click', () => {
       state.chainZoom = 1;
       applyChainZoom();
     });
