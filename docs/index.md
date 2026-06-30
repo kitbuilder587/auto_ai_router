@@ -32,12 +32,13 @@ graph LR
 
 ## Features
 
-- **Multi-provider routing** — OpenAI, Vertex AI, Gemini AI Studio, Anthropic
+- **Multi-provider routing** — OpenAI, Vertex AI, Gemini AI Studio, Anthropic, Comet API
 - **Proxy chains** — forward to other Auto AI Router instances as fallback
 - **Round-robin balancing** — distribute load across multiple credentials
 - **Two-level rate limiting** — per-credential RPM/TPM + per-model limits
 - **Fail2ban protection** — auto-ban credentials on repeated errors
 - **Prometheus metrics** — request counts, latency, credential utilization
+- **OpenTelemetry** — export traces, logs, and metrics over OTLP to any collector
 - **Health dashboard** — JSON API and HTML dashboard at `/health` and `/vhealth`
 - **LiteLLM DB integration** — spend logging, daily aggregation, API key auth
 - **SSE streaming** — full streaming support for all providers

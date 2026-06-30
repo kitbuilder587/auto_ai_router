@@ -40,6 +40,7 @@ func TestConvertVertexUsageMetadata_WithThoughtsTokens(t *testing.T) {
 	// CompletionTokensDetails should have ReasoningTokens set
 	if usage.CompletionTokensDetails == nil {
 		t.Fatalf("expected CompletionTokensDetails to be set")
+		return
 	}
 	if usage.CompletionTokensDetails.ReasoningTokens != 200 {
 		t.Fatalf("expected ReasoningTokens = 200, got %d", usage.CompletionTokensDetails.ReasoningTokens)
@@ -111,6 +112,7 @@ func TestConvertVertexUsageMetadata_CachedContentTokens(t *testing.T) {
 
 	if usage.PromptTokensDetails == nil {
 		t.Fatalf("expected PromptTokensDetails to be set for cached tokens")
+		return
 	}
 	if usage.PromptTokensDetails.CachedTokens != 50 {
 		t.Fatalf("expected CachedTokens = 50, got %d", usage.PromptTokensDetails.CachedTokens)
@@ -133,6 +135,7 @@ func TestConvertVertexUsageMetadata_AudioInputTokens(t *testing.T) {
 
 	if usage.PromptTokensDetails == nil {
 		t.Fatal("expected PromptTokensDetails to be non-nil")
+		return
 	}
 	if usage.PromptTokensDetails.AudioTokens != 30 {
 		t.Fatalf("expected AudioTokens = 30, got %d", usage.PromptTokensDetails.AudioTokens)
@@ -159,6 +162,7 @@ func TestConvertVertexUsageMetadata_AudioOutputTokens(t *testing.T) {
 
 	if usage.CompletionTokensDetails == nil {
 		t.Fatal("expected CompletionTokensDetails to be non-nil")
+		return
 	}
 	if usage.CompletionTokensDetails.AudioTokens != 50 {
 		t.Fatalf("expected AudioTokens = 50, got %d", usage.CompletionTokensDetails.AudioTokens)
@@ -214,6 +218,7 @@ func TestConvertVertexUsageMetadata_ToolUseAudioTokens(t *testing.T) {
 	}
 	if usage.PromptTokensDetails == nil {
 		t.Fatal("expected PromptTokensDetails to be non-nil")
+		return
 	}
 	// Both prompt and tool-use audio tokens accumulate
 	if usage.PromptTokensDetails.AudioTokens != 30 {
@@ -249,6 +254,7 @@ func TestConvertVertexUsageMetadata_CachedAudioSubtraction(t *testing.T) {
 
 	if usage.PromptTokensDetails == nil {
 		t.Fatal("expected PromptTokensDetails to be non-nil")
+		return
 	}
 	// audio_tokens = total(100) - cached(40) = 60 non-cached audio
 	// This enables correct billing: 60 at audio rate + 80 at cached rate
@@ -287,6 +293,7 @@ func TestConvertVertexUsageMetadata_AllAudioCached(t *testing.T) {
 
 	if usage.PromptTokensDetails == nil {
 		t.Fatal("expected PromptTokensDetails to be non-nil (CachedTokens must be set)")
+		return
 	}
 	// All audio is cached → audio_tokens = 0 (billed at cached rate only)
 	if usage.PromptTokensDetails.AudioTokens != 0 {

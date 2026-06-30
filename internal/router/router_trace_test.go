@@ -81,7 +81,14 @@ func TestServeHTTP_VisualTrace_Route(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, "GET /vtrace must return 200")
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html",
 		"GET /vtrace must return text/html")
-	assert.NotEmpty(t, w.Body.String(), "GET /vtrace must return a non-empty HTML body")
+	body := w.Body.String()
+	assert.NotEmpty(t, body, "GET /vtrace must return a non-empty HTML body")
+	assert.Contains(t, body, `id="diagramViewport"`,
+		"visual trace must include a pannable diagram viewport")
+	assert.Contains(t, body, `id="diagramZoomIn"`,
+		"visual trace must include zoom controls")
+	assert.Contains(t, body, `id="diagramReset"`,
+		"visual trace must include a view reset control")
 }
 
 // TestServeHTTP_Trace_NotFound_OtherPaths verifies that /trace-related paths that

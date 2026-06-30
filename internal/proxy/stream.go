@@ -290,7 +290,9 @@ func (p *Proxy) handleProviderStreaming(
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return p.handleVertexStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
 	case config.ProviderTypeAnthropic:
-		return p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred.Name, realModelID, displayModelID, cred.Type, "Anthropic", logCtx)
+	case config.ProviderTypeCometAPI:
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred.Name, realModelID, displayModelID, cred.Type, "Comet API", logCtx)
 	case config.ProviderTypeBedrock:
 		return p.handleBedrockStreaming(w, resp, cred.Name, realModelID, displayModelID, logCtx)
 	default:
@@ -306,12 +308,12 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", transformer, logCtx)
 }
 
-func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
-	conv := converter.New(config.ProviderTypeAnthropic, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
+func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
+	conv := converter.New(providerType, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}
-	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", transformer, logCtx)
+	return p.handleTransformedStreaming(w, resp, credName, modelID, providerLabel, transformer, logCtx)
 }
 
 func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
@@ -323,11 +325,11 @@ func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Respons
 }
 
 type tokenCapturingWriter struct {
-	writer          io.Writer
-	tokens          *int
-	completionChars *int // accumulated delta.content chars for fallback estimation on stream abort
-	logger          *slog.Logger
-	onChunk         func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
+	writer     io.Writer
+	tokens     *int
+	completion *completionTokenAccumulator
+	logger     *slog.Logger
+	onChunk    func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
 }
 
 func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
@@ -341,8 +343,8 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 		*tcw.tokens = tokens
 	}
 
-	if tcw.completionChars != nil {
-		*tcw.completionChars += extractCompletionDeltaChars(p)
+	if tcw.completion != nil {
+		tcw.completion.AddChunk(p)
 	}
 
 	// Invoke callback if provided (used to capture last chunk for usage extraction)
@@ -351,6 +353,15 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 	}
 
 	return tcw.writer.Write(p)
+}
+
+// rememberLastStreamDataChunk stores each chunk, keeping only the last one that contains actual data and isn't [DONE].
+func rememberLastStreamDataChunk(dst *[]byte, chunk []byte) {
+	trimmed := strings.TrimSpace(string(chunk))
+	if trimmed == "" || trimmed == "data: [DONE]" || trimmed == "[DONE]" {
+		return
+	}
+	*dst = append([]byte(nil), chunk...)
 }
 
 func (p *Proxy) handleTransformedStreaming(
@@ -362,14 +373,14 @@ func (p *Proxy) handleTransformedStreaming(
 	transformFunc streamTransformer,
 	logCtx *RequestLogContext,
 ) error {
-	p.logger.Debug("Starting streaming response", "provider", providerName, "credential", credName)
+	p.logger.DebugContext(respCtx(resp), "Starting streaming response", "provider", providerName, "credential", credName)
 
 	pr, pw := io.Pipe()
 	defer func() {
 		_ = pr.Close()
 	}()
 	var totalTokens int
-	var completionChars int
+	completion := newCompletionTokenAccumulator(modelID)
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
@@ -382,10 +393,10 @@ func (p *Proxy) handleTransformedStreaming(
 	go func() {
 		defer wg.Done()
 		err := transformFunc(resp.Body, modelID, &tokenCapturingWriter{
-			writer:          pw,
-			tokens:          &totalTokens,
-			completionChars: &completionChars,
-			logger:          p.logger,
+			writer:     pw,
+			tokens:     &totalTokens,
+			completion: completion,
+			logger:     p.logger,
 			onChunk: func(chunk []byte) {
 				chunkCount++
 
@@ -399,51 +410,46 @@ func (p *Proxy) handleTransformedStreaming(
 				}
 
 				// Store each chunk, keeping only the last one that contains actual data and isn't [DONE]
-				trimmed := strings.TrimSpace(string(chunk))
-				if trimmed != "" && trimmed != "data: [DONE]" && trimmed != "[DONE]" {
-					lastChunk = make([]byte, len(chunk))
-					copy(lastChunk, chunk)
-				}
+				rememberLastStreamDataChunk(&lastChunk, chunk)
 			},
 		})
 		if err != nil {
-			p.logger.Error("Transform goroutine error",
+			p.logger.ErrorContext(respCtx(resp), "Transform goroutine error",
 				"provider", providerName, "error", err, "chunks_written", chunkCount)
 			_ = pw.CloseWithError(fmt.Errorf("%s transform: %w", providerName, err))
 		} else {
-			p.logger.Debug("Transform goroutine completed OK",
+			p.logger.DebugContext(respCtx(resp), "Transform goroutine completed OK",
 				"provider", providerName, "chunks_written", chunkCount, "total_tokens", totalTokens)
 			_ = pw.Close()
 		}
 	}()
 
-	if err := p.streamToClient(w, pr, credName, nil, func() { _ = pr.Close() }); err != nil {
-		p.logStreamHandlerError("streamToClient error in handleTransformedStreaming", err,
+	if err := p.streamToClient(respCtx(resp), w, pr, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }); err != nil {
+		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleTransformedStreaming", err,
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
 		// Stream aborted before the final usage chunk — log with whatever tokens we have.
-		// Fall back to character-based estimation when totalTokens is still 0.
+		// Fall back to local token counting when totalTokens is still 0.
 		estimated := totalTokens
-		if estimated == 0 && completionChars > 0 {
-			estimated = (completionChars + 3) / 4
+		if estimated == 0 {
+			estimated = completion.TokenCount()
 		}
 		p.finalizeStreamingLog(logCtx, estimated, lastChunk, providerName, resp.StatusCode)
 		return err
 	}
 	wg.Wait()
 
-	p.logger.Debug("handleTransformedStreaming completed",
+	p.logger.DebugContext(respCtx(resp), "handleTransformedStreaming completed",
 		"provider", providerName, "total_tokens", totalTokens,
 		"chunks_written", chunkCount, "last_chunk_len", len(lastChunk))
 
 	// When no usage chunk arrived (provider disconnected without sending one),
-	// fall back to character-based estimation from accumulated delta text.
+	// fall back to local token counting from accumulated delta text.
 	logTokens := totalTokens
-	if logTokens == 0 && completionChars > 0 {
-		logTokens = (completionChars + 3) / 4
-		p.logger.Debug("No usage chunk received; estimated completion tokens from delta text",
-			"chars", completionChars, "estimated_tokens", logTokens,
-			"provider", providerName, "model", modelID)
+	if logTokens == 0 {
+		logTokens = completion.TokenCount()
+		p.logger.Debug("No usage chunk received; counted completion tokens from delta text",
+			"tokens", logTokens, "provider", providerName, "model", modelID)
 	}
 
 	if logTokens > 0 {
@@ -451,22 +457,22 @@ func (p *Proxy) handleTransformedStreaming(
 		if modelID != "" {
 			p.rateLimiter.ConsumeModelTokens(credName, modelID, logTokens)
 		}
-		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", logTokens)
+		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
 	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerName, resp.StatusCode)
 
-	p.logger.Debug("Streaming response completed", "provider", providerName, "credential", credName)
+	p.logger.DebugContext(respCtx(resp), "Streaming response completed", "provider", providerName, "credential", credName)
 	return nil
 }
 
 func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	p.logger.Debug("Starting streaming response with token tracking (passthrough)",
+	p.logger.DebugContext(respCtx(resp), "Starting streaming response with token tracking (passthrough)",
 		"credential", credName, "model", modelID,
 		"content_type", resp.Header.Get("Content-Type"))
 
 	var totalTokens int
-	var completionChars int
+	completion := newCompletionTokenAccumulator(modelID)
 	chunkCount := 0
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
@@ -488,18 +494,14 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		if tokens > 0 {
 			totalTokens += tokens
 		}
-		completionChars += extractCompletionDeltaChars(chunk)
+		completion.AddChunk(chunk)
 
 		// Don't let a bare [DONE] sentinel or empty chunks overwrite a lastChunk that carries usage data.
-		trimmed := strings.TrimSpace(string(chunk))
-		if trimmed != "" && trimmed != "data: [DONE]" && trimmed != "[DONE]" {
-			lastChunk = make([]byte, len(chunk))
-			copy(lastChunk, chunk)
-		}
+		rememberLastStreamDataChunk(&lastChunk, chunk)
 	}
 
-	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
-		p.logStreamHandlerError("streamToClient error in handleStreamingWithTokens", err,
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
+		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
 			// Keep reading upstream to capture the real usage chunk.
@@ -509,26 +511,25 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 			p.drainUpstream(drainCtx, resp.Body, onChunk, credName)
 		}
 		estimated := totalTokens
-		if estimated == 0 && completionChars > 0 {
-			estimated = (completionChars + 3) / 4
+		if estimated == 0 {
+			estimated = completion.TokenCount()
 		}
 		p.finalizeStreamingLog(logCtx, estimated, lastChunk, "openai", resp.StatusCode)
 		return err
 	}
 
-	p.logger.Debug("handleStreamingWithTokens completed",
+	p.logger.DebugContext(respCtx(resp), "handleStreamingWithTokens completed",
 		"credential", credName, "model", modelID,
 		"chunks_received", chunkCount, "total_tokens", totalTokens,
 		"last_chunk_len", len(lastChunk))
 
 	// When no usage chunk arrived (provider disconnected without sending one),
-	// fall back to character-based estimation from accumulated delta text.
+	// fall back to local token counting from accumulated delta text.
 	logTokens := totalTokens
-	if logTokens == 0 && completionChars > 0 {
-		logTokens = (completionChars + 3) / 4
-		p.logger.Debug("No usage chunk received; estimated completion tokens from delta text",
-			"chars", completionChars, "estimated_tokens", logTokens,
-			"credential", credName, "model", modelID)
+	if logTokens == 0 {
+		logTokens = completion.TokenCount()
+		p.logger.Debug("No usage chunk received; counted completion tokens from delta text",
+			"tokens", logTokens, "credential", credName, "model", modelID)
 	}
 
 	if logTokens > 0 {
@@ -536,12 +537,12 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		if modelID != "" {
 			p.rateLimiter.ConsumeModelTokens(credName, modelID, logTokens)
 		}
-		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", logTokens)
+		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
 	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode)
 
-	p.logger.Debug("Streaming response completed", "credential", credName)
+	p.logger.DebugContext(respCtx(resp), "Streaming response completed", "credential", credName)
 	return nil
 }
 
@@ -588,7 +589,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				logCtx.TokenUsage.CacheCreationTokens = usageInfo.CacheCreationTokens
 			}
 
-			p.logger.Debug("Extracted usage from streaming response",
+			p.logger.DebugContext(logCtx.Context(), "Extracted usage from streaming response",
 				"provider", providerName,
 				"prompt_tokens", usageInfo.PromptTokens,
 				"completion_tokens", usageInfo.CompletionTokens,
@@ -620,7 +621,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		// this check such requests are logged as success and never hit ERROR.
 		logCtx.Status = "failure"
 		logCtx.ErrorMsg = streamErr
-		p.logUpstreamError("Provider sent error event in stream", statusCode,
+		p.logUpstreamError(logCtx.Context(), "Provider sent error event in stream", statusCode,
 			logCtx.Credential, logCtx.ModelID, []byte(streamErr),
 			"request_id", logCtx.RequestID)
 	} else {
@@ -633,7 +634,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	}
 	logCtx.Logged = true
 	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-		p.logger.Warn("Failed to queue streaming spend log",
+		p.logger.WarnContext(logCtx.Context(), "Failed to queue streaming spend log",
 			"error", err,
 			"request_id", logCtx.RequestID,
 		)
@@ -728,15 +729,18 @@ func (p *Proxy) drainUpstream(ctx context.Context, body io.Reader, onChunk func(
 }
 
 func (p *Proxy) streamToClient(
+	ctx context.Context,
 	w http.ResponseWriter,
 	reader io.Reader,
 	credName string,
+	modelID string,
+	endpoint string,
 	onChunk func([]byte),
 	onWriteErr func(),
 ) error {
 	_, ok := w.(http.Flusher)
 	if !ok {
-		p.logger.Error("Streaming not supported", "credential", credName)
+		p.logger.ErrorContext(ctx, "Streaming not supported", "credential", credName)
 		WriteErrorInternal(w, "Streaming Not Supported")
 		return fmt.Errorf("streaming not supported")
 	}
@@ -755,20 +759,30 @@ func (p *Proxy) streamToClient(
 			_ = controller.SetWriteDeadline(time.Now().Add(streamChunkWriteTimeout))
 			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
 				if isClientDisconnectError(writeErr) {
-					p.logger.Debug("Client disconnected during streaming", "error", writeErr, "credential", credName)
+					p.logger.DebugContext(ctx, "Client disconnected during streaming", "error", writeErr, "credential", credName)
+					p.recordAbortedRequest(credName, endpoint, modelID)
 				} else {
-					p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
+					p.logger.ErrorContext(ctx, "Failed to write streaming chunk", "error", writeErr, "credential", credName)
 				}
 				if onWriteErr != nil {
 					onWriteErr()
 				}
 				return writeErr
 			}
-			p.flushStreaming(controller, credName)
+			if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
+				if isClientDisconnectError(flushErr) {
+					p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
+					p.recordAbortedRequest(credName, endpoint, modelID)
+				}
+				if onWriteErr != nil {
+					onWriteErr()
+				}
+				return flushErr
+			}
 		}
 		if err != nil {
 			if err != io.EOF {
-				p.logStreamHandlerError("Streaming read error", err, "credential", credName)
+				p.logStreamHandlerError(ctx, "Streaming read error", err, "credential", credName)
 			}
 			break
 		}
@@ -776,19 +790,25 @@ func (p *Proxy) streamToClient(
 	return nil
 }
 
-func (p *Proxy) flushStreaming(controller *http.ResponseController, credName string) {
+func (p *Proxy) flushStreaming(ctx context.Context, controller *http.ResponseController, credName string) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
-			p.logger.Error("Flusher panic", "panic", r, "credential", credName)
+			p.logger.ErrorContext(ctx, "Flusher panic", "panic", r, "credential", credName)
+			retErr = fmt.Errorf("flusher panic: %v", r)
 		}
 	}()
 	if err := controller.Flush(); err != nil {
-		if errors.Is(err, http.ErrNotSupported) {
-			p.logger.Error("Streaming not supported", "credential", credName)
-		} else {
-			p.logger.Error("Flusher error", "error", err, "credential", credName)
+		switch {
+		case isClientDisconnectError(err):
+			// Disconnects are logged once by the caller; don't double-log here.
+		case errors.Is(err, http.ErrNotSupported):
+			p.logger.ErrorContext(ctx, "Streaming not supported", "credential", credName)
+		default:
+			p.logger.ErrorContext(ctx, "Flusher error", "error", err, "credential", credName)
 		}
+		return err
 	}
+	return nil
 }
 
 // handleResponsesAPIStreaming handles streaming for Responses API requests.
@@ -807,7 +827,7 @@ func (p *Proxy) handleResponsesAPIStreaming(
 	onComplete func(*responses.Response),
 	meta ...*responses.ResponsesMetadata,
 ) error {
-	p.logger.Debug("Starting Responses API streaming", "credential", cred.Name, "provider", cred.Type)
+	p.logger.DebugContext(respCtx(resp), "Starting Responses API streaming", "credential", cred.Name, "provider", cred.Type)
 
 	// For providers that need transformation (Vertex, Anthropic, Bedrock),
 	// first transform to OpenAI Chat Completions SSE, then to Responses API SSE.
@@ -835,12 +855,12 @@ func (p *Proxy) handleResponsesAPIStreaming(
 	// Provider SSE -> Chat Completions SSE -> Responses API SSE
 	transformer := func(r io.Reader, id string, w io.Writer) error {
 		if conv.IsPassthrough() {
-			p.logger.Debug("Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
+			p.logger.DebugContext(respCtx(resp), "Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
 				"model", modelID, "provider", cred.Type)
 			return responses.TransformChatStreamToResponsesWithMeta(r, w, modelID, reqMeta, onComplete)
 		}
 
-		p.logger.Debug("Responses API streaming: converted mode (Provider SSE → Chat Completions SSE → Responses SSE)",
+		p.logger.DebugContext(respCtx(resp), "Responses API streaming: converted mode (Provider SSE → Chat Completions SSE → Responses SSE)",
 			"model", modelID, "provider", cred.Type)
 
 		// Non-passthrough providers: first convert to Chat Completions SSE via pipe
@@ -852,11 +872,11 @@ func (p *Proxy) handleResponsesAPIStreaming(
 			defer wg.Done()
 			transformErr = conv.StreamTo(r, pw)
 			if transformErr != nil {
-				p.logger.Error("Responses API streaming: provider→ChatCompletions transform failed",
+				p.logger.ErrorContext(respCtx(resp), "Responses API streaming: provider→ChatCompletions transform failed",
 					"error", transformErr, "provider", cred.Type)
 				_ = pw.CloseWithError(transformErr)
 			} else {
-				p.logger.Debug("Responses API streaming: provider→ChatCompletions transform completed OK",
+				p.logger.DebugContext(respCtx(resp), "Responses API streaming: provider→ChatCompletions transform completed OK",
 					"provider", cred.Type)
 				_ = pw.Close()
 			}
@@ -867,12 +887,12 @@ func (p *Proxy) handleResponsesAPIStreaming(
 		_ = pr.Close()
 		wg.Wait() // ensure goroutine completes before reading transformErr
 		if err != nil {
-			p.logger.Error("Responses API streaming: ChatCompletions→Responses transform failed",
+			p.logger.ErrorContext(respCtx(resp), "Responses API streaming: ChatCompletions→Responses transform failed",
 				"error", err, "provider", cred.Type)
 			return err
 		}
 		if transformErr != nil {
-			p.logger.Error("Responses API streaming: provider transform error after Responses transform",
+			p.logger.ErrorContext(respCtx(resp), "Responses API streaming: provider transform error after Responses transform",
 				"error", transformErr, "provider", cred.Type)
 		}
 		return transformErr
@@ -910,7 +930,7 @@ func (p *Proxy) handleNativeResponsesStreaming(
 // Token counts and the optional save callback are driven by the response.completed SSE
 // event. Because the event payload can be very large (full response JSON with reasoning),
 // it often spans multiple 8 KB buffer reads. This function maintains a line-level
-// accumulator (lineBuf) so that a data: line that arrives in pieces is reassembled
+// accumulator (partialSSELine) so that a data: line that arrives in pieces is reassembled
 // before JSON parsing, avoiding the silent json.Unmarshal failures that would otherwise
 // leave totalTokens = 0 and the store callback never invoked.
 func (p *Proxy) handlePassthroughResponsesStreaming(
@@ -920,41 +940,40 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 	logCtx *RequestLogContext,
 	onComplete func(*responses.Response),
 ) error {
-	p.logger.Debug("Starting passthrough Responses API streaming",
+	p.logger.DebugContext(respCtx(resp), "Starting passthrough Responses API streaming",
 		"credential", credName, "model", modelID)
 
 	var (
-		totalTokens   int
-		chunkCount    int
-		lastRawChunk  []byte // last raw buffer for fallback in finalizeStreamingLog
-		completedData []byte // JSON payload of response.completed (used instead of lastRawChunk)
-		lineBuf       string // partial SSE line accumulator across buffer reads
+		totalTokens           int
+		chunkCount            int
+		lastRawChunk          []byte // last raw buffer for fallback in finalizeStreamingLog
+		completedEventPayload []byte // JSON payload of response.completed (used instead of lastRawChunk)
+		partialSSELine        string // partial SSE line accumulator across buffer reads
+		completion            = newCompletionTokenAccumulator(modelID)
 	)
 
 	onChunk := func(chunk []byte) {
 		chunkCount++
+		completion.AddChunk(chunk)
 		// Same [DONE]-skip as handleStreamingWithTokens: don't overwrite a useful
 		// lastRawChunk with the bare sentinel — keeps the usage event accessible.
-		if strings.TrimSpace(string(chunk)) != "data: [DONE]" {
-			lastRawChunk = make([]byte, len(chunk))
-			copy(lastRawChunk, chunk)
-		}
+		rememberLastStreamDataChunk(&lastRawChunk, chunk)
 
 		// Combine the partial line buffered from the previous read with the new chunk.
 		// SSE data: lines can be arbitrarily long (e.g. response.completed with reasoning)
 		// and will be split across multiple 8 KB buffer reads.
-		combined := lineBuf + string(chunk)
-		lineBuf = ""
+		combined := partialSSELine + string(chunk)
+		partialSSELine = ""
 
 		lastNL := strings.LastIndex(combined, "\n")
 		if lastNL < 0 {
 			// No newline yet — entire content is an incomplete line.
-			lineBuf = combined
+			partialSSELine = combined
 			return
 		}
 		if lastNL < len(combined)-1 {
 			// Characters after the last newline are an incomplete line.
-			lineBuf = combined[lastNL+1:]
+			partialSSELine = combined[lastNL+1:]
 		}
 
 		// Walk every complete line in this chunk.
@@ -987,7 +1006,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						logCtx.TokenUsage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
 					}
 				}
-				completedData = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it
+				completedEventPayload = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it
 				if onComplete != nil {
 					onComplete(&event.Response)
 				}
@@ -995,8 +1014,8 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		}
 	}
 
-	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
-		p.logStreamHandlerError("streamToClient error in handlePassthroughResponsesStreaming", err,
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
+		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
 			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
@@ -1004,35 +1023,44 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 			p.drainUpstream(drainCtx, resp.Body, onChunk, credName)
 		}
 		finalChunk := lastRawChunk
-		if len(completedData) > 0 {
-			finalChunk = completedData
+		if len(completedEventPayload) > 0 {
+			finalChunk = completedEventPayload
 		}
-		p.finalizeStreamingLog(logCtx, totalTokens, finalChunk, "openai", resp.StatusCode)
+		logTokens := totalTokens
+		if logTokens == 0 {
+			logTokens = completion.TokenCount()
+		}
+		p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode)
 		return err
 	}
 
-	p.logger.Debug("handlePassthroughResponsesStreaming completed",
+	p.logger.DebugContext(respCtx(resp), "handlePassthroughResponsesStreaming completed",
 		"credential", credName, "model", modelID,
 		"chunks_received", chunkCount, "total_tokens", totalTokens)
 
-	if totalTokens > 0 {
-		p.rateLimiter.ConsumeTokens(credName, totalTokens)
+	logTokens := totalTokens
+	if logTokens == 0 {
+		logTokens = completion.TokenCount()
+	}
+
+	if logTokens > 0 {
+		p.rateLimiter.ConsumeTokens(credName, logTokens)
 		if modelID != "" {
-			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
+			p.rateLimiter.ConsumeModelTokens(credName, modelID, logTokens)
 		}
-		p.logger.Debug("Streaming token usage recorded",
+		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded",
 			"credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
 	// Prefer the parsed response.completed payload for detailed token extraction.
 	// The raw lastRawChunk may contain only `data: [DONE]` with no usage info.
-	// completedData is plain JSON; extractJSONPayloadsFromStreamChunk handles it
+	// completedEventPayload is plain JSON; extractJSONPayloadsFromStreamChunk handles it
 	// via the non-SSE fast path, so extractResponsesAPIUsage works correctly.
 	finalChunk := lastRawChunk
-	if len(completedData) > 0 {
-		finalChunk = completedData
+	if len(completedEventPayload) > 0 {
+		finalChunk = completedEventPayload
 	}
 
-	p.finalizeStreamingLog(logCtx, totalTokens, finalChunk, "openai", resp.StatusCode)
+	p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode)
 	return nil
 }

@@ -114,6 +114,25 @@ func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, 
 	r.modelLimits[key] = &limiterConfig{rpm: rpm, tpm: tpm}
 }
 
+// RemoveModel removes model-level limits and usage counters for a credential/model pair.
+func (r *RPMLimiter) RemoveModel(credentialName, modelName string) {
+	r.RemoveModelCtx(context.Background(), credentialName, modelName)
+}
+
+// RemoveModelCtx removes model-level limits and usage counters for a credential/model pair.
+func (r *RPMLimiter) RemoveModelCtx(ctx context.Context, credentialName, modelName string) {
+	r.mu.Lock()
+	delete(r.modelLimits, makeModelKey(credentialName, modelName))
+	r.mu.Unlock()
+
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultContextTimeout)
+		defer cancel()
+	}
+	r.backend.deleteKey(ctx, modelCounterKey(credentialName, modelName))
+}
+
 // Allow checks if a request for credentialName is allowed (RPM) and records it.
 func (r *RPMLimiter) Allow(credentialName string) bool {
 	return r.AllowCtx(context.Background(), credentialName)

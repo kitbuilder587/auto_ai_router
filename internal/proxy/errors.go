@@ -63,6 +63,30 @@ func WriteJSONError(w http.ResponseWriter, statusCode int, message, errorType st
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+func maskedUpstreamErrorBody(statusCode int) []byte {
+	code := "upstream_error"
+	switch statusCode {
+	case http.StatusTooManyRequests:
+		code = "upstream_rate_limit"
+	case http.StatusRequestTimeout:
+		code = "upstream_timeout"
+	}
+
+	resp := APIErrorResponse{
+		Error: APIError{
+			Message: "Upstream provider error",
+			Type:    errorTypeForStatus(statusCode),
+			Param:   nil,
+			Code:    &code,
+		},
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return []byte(`{"error":{"message":"Upstream provider error","type":"api_error","param":null,"code":"upstream_error"}}`)
+	}
+	return append(body, '\n')
+}
+
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.
 func WriteErrorBadRequest(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusBadRequest, message, errorTypeForStatus(http.StatusBadRequest), nil, nil)

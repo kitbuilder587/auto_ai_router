@@ -12,6 +12,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -69,19 +70,24 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		idleConnTimeout = defaultIdleConnTimeout
 	}
 
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+		TLSHandshakeTimeout:   timeout,                   // Timeout for TLS handshake phase
+		ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
+		DisableKeepAlives:     false,
+	}
+
 	return &http.Client{
 		// No global timeout — streaming responses can run for minutes.
 		// ResponseHeaderTimeout on Transport protects the connect + header phase.
 		Timeout: 0,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-			TLSHandshakeTimeout:   timeout,                   // Timeout for TLS handshake phase
-			ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
-			MaxIdleConns:          maxIdleConns,
-			MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-			IdleConnTimeout:       idleConnTimeout,
-			DisableKeepAlives:     false,
-		},
+		// otelhttp creates client spans and injects traceparent into outgoing
+		// requests (providers and chained routers). It uses the global
+		// TracerProvider, which is a no-op unless OTEL is enabled in config.
+		Transport: otelhttp.NewTransport(transport),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -102,6 +108,25 @@ var proxyHTTPClient = NewHTTPClient(&HTTPClientConfig{
 	IdleConnTimeout:     defaultIdleConnTimeout,
 })
 
+// proxyFetchTimeout is the timeout applied to proxy health/models fetch requests.
+// Override at startup via SetProxyFetchTimeout.
+var proxyFetchTimeout = defaultTimeout
+
+// SetProxyFetchTimeout reconfigures the shared proxy HTTP client with a new timeout.
+// Must be called before the first proxy fetch (typically right after config load).
+func SetProxyFetchTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	proxyFetchTimeout = d
+	proxyHTTPClient = NewHTTPClient(&HTTPClientConfig{
+		Timeout:             d,
+		MaxIdleConns:        defaultMaxIdleConns,
+		MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:     defaultIdleConnTimeout,
+	})
+}
+
 // FetchFromProxy makes an HTTP GET request to a proxy credential
 // and returns the response body. Handles timeouts, auth headers, and error logging.
 // Note: caller should provide ctx with timeout if defaultTimeout is insufficient
@@ -114,7 +139,7 @@ func FetchFromProxy(
 	// Create context with timeout if not already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+		ctx, cancel = context.WithTimeout(ctx, proxyFetchTimeout)
 		defer cancel()
 	}
 

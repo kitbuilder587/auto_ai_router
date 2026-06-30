@@ -90,11 +90,15 @@ On startup, the router connects to Redis and immediately performs a `PING` healt
 
 All keys are namespaced under `key_prefix` (default `rl:`):
 
-| Key pattern            | Used for                                |
-| ---------------------- | --------------------------------------- |
-| `rl:rpm:{type}:{name}` | Request count ZSET (sliding 60s window) |
-| `rl:tpm:{type}:{name}` | Token count ZSET (sliding 60s window)   |
-| `rl:response:{id}`     | Stored Responses API entry              |
+| Key pattern                            | Used for                                    |
+| -------------------------------------- | ------------------------------------------- |
+| `rl:rpm:{c:credname}`                  | Credential request count ZSET (sliding 60s) |
+| `rl:tpm:{c:credname}`                  | Credential token count ZSET (sliding 60s)   |
+| `rl:rpm:{c:credname}:m:credname:model` | Model request count ZSET (sliding 60s)      |
+| `rl:tpm:{c:credname}:m:credname:model` | Model token count ZSET (sliding 60s)        |
+| `rl:response:{id}`                     | Stored Responses API entry                  |
+
+The `{c:credname}` portion is a Redis **hash tag** — it ensures all four keys for a given credential (`cred rpm`, `cred tpm`, `model rpm`, `model tpm`) land in the same hash slot. This is required by valkey-go's multi-key `EVAL` slot validation, which is enforced even on single-node deployments.
 
 Rate-limit keys expire after `key_ttl` seconds of inactivity (default **120 seconds**) via Redis `EXPIRE`. Response keys use the TTL from the `ttl` field of the request, or persist indefinitely when `ttl: 0`.
 

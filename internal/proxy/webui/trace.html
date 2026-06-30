@@ -50,11 +50,18 @@
       <details class="diagram-section wf-card" id="diagramSection" open>
         <summary id="diagramSummary">
           <span id="diagramArrow">▾</span>
-          chain diagram
+          <span>chain diagram</span>
+          <div class="diagram-toolbar" id="diagramToolbar" aria-label="Diagram controls">
+            <button class="wf-btn diagram-tool" type="button" id="diagramZoomOut" title="Zoom out">-</button>
+            <span class="diagram-zoom" id="diagramZoomLabel">100%</span>
+            <button class="wf-btn diagram-tool" type="button" id="diagramZoomIn" title="Zoom in">+</button>
+            <button class="wf-btn diagram-reset" type="button" id="diagramReset" title="Reset view">reset</button>
+          </div>
         </summary>
-        <div class="detail-body" style="padding:var(--sp-3);min-height:300px;overflow-x:auto;text-align:center;"
-          id="diagramWrap">
-          <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
+        <div class="detail-body diagram-viewport" id="diagramViewport">
+          <div class="diagram-canvas" id="diagramWrap">
+            <p class="diagram-placeholder">Loading…</p>
+          </div>
         </div>
       </details>
 
@@ -68,6 +75,20 @@
 
     let countdownSecs = 30;
     let countdownTimer = null;
+    const DIAGRAM_MIN_ZOOM = 0.25;
+    const DIAGRAM_MAX_ZOOM = 3;
+    const DIAGRAM_ZOOM_STEP = 0.2;
+    const diagramView = {
+      scale: 1,
+      x: 0,
+      y: 0,
+      dragging: false,
+      pointerId: null,
+      startX: 0,
+      startY: 0,
+      startPanX: 0,
+      startPanY: 0,
+    };
 
     // ── theme ──────────────────────────────────────────────────────────────────
     function toggleTheme() {
@@ -132,6 +153,112 @@
       if (lim > 0) return `${fmtNum(cur)} / ${fmtNum(lim)}`;
       if (cur > 0) return `${fmtNum(cur)} / ∞`;
       return '—';
+    }
+
+    // ── diagram viewport controls ─────────────────────────────────────────────
+    function clamp(n, min, max) {
+      return Math.max(min, Math.min(max, n));
+    }
+
+    function applyDiagramTransform() {
+      const canvas = document.getElementById('diagramWrap');
+      if (canvas) {
+        canvas.style.transform =
+          `matrix(${diagramView.scale}, 0, 0, ${diagramView.scale}, ${diagramView.x}, ${diagramView.y})`;
+      }
+
+      const label = document.getElementById('diagramZoomLabel');
+      if (label) label.textContent = `${Math.round(diagramView.scale * 100)}%`;
+    }
+
+    function zoomDiagramTo(nextScale, origin) {
+      const viewport = document.getElementById('diagramViewport');
+      const prevScale = diagramView.scale;
+      const scale = clamp(nextScale, DIAGRAM_MIN_ZOOM, DIAGRAM_MAX_ZOOM);
+      if (Math.abs(scale - prevScale) < 0.001) return;
+
+      const rect = viewport
+        ? viewport.getBoundingClientRect()
+        : { left: 0, top: 0, width: 0, height: 0 };
+      const originX = origin ? origin.x - rect.left : rect.width / 2;
+      const originY = origin ? origin.y - rect.top : rect.height / 2;
+      const ratio = scale / prevScale;
+
+      diagramView.x = originX - (originX - diagramView.x) * ratio;
+      diagramView.y = originY - (originY - diagramView.y) * ratio;
+      diagramView.scale = scale;
+      applyDiagramTransform();
+    }
+
+    function nudgeDiagramZoom(delta) {
+      zoomDiagramTo(diagramView.scale + delta);
+    }
+
+    function resetDiagramView() {
+      diagramView.scale = 1;
+      diagramView.x = 0;
+      diagramView.y = 0;
+      applyDiagramTransform();
+    }
+
+    function initDiagramPanZoom() {
+      const viewport = document.getElementById('diagramViewport');
+      const toolbar = document.getElementById('diagramToolbar');
+      if (!viewport || !toolbar) return;
+
+      toolbar.addEventListener('click', e => e.stopPropagation());
+      toolbar.addEventListener('pointerdown', e => e.stopPropagation());
+      document.getElementById('diagramZoomOut')
+        ?.addEventListener('click', () => nudgeDiagramZoom(-DIAGRAM_ZOOM_STEP));
+      document.getElementById('diagramZoomIn')
+        ?.addEventListener('click', () => nudgeDiagramZoom(DIAGRAM_ZOOM_STEP));
+      document.getElementById('diagramReset')
+        ?.addEventListener('click', resetDiagramView);
+
+      viewport.addEventListener('wheel', e => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+        zoomDiagramTo(diagramView.scale * factor, { x: e.clientX, y: e.clientY });
+      }, { passive: false });
+
+      viewport.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        diagramView.dragging = true;
+        diagramView.pointerId = e.pointerId;
+        diagramView.startX = e.clientX;
+        diagramView.startY = e.clientY;
+        diagramView.startPanX = diagramView.x;
+        diagramView.startPanY = diagramView.y;
+        viewport.classList.add('is-dragging');
+        viewport.setPointerCapture(e.pointerId);
+      });
+
+      viewport.addEventListener('pointermove', e => {
+        if (!diagramView.dragging || diagramView.pointerId !== e.pointerId) return;
+        e.preventDefault();
+        diagramView.x = diagramView.startPanX + e.clientX - diagramView.startX;
+        diagramView.y = diagramView.startPanY + e.clientY - diagramView.startY;
+        applyDiagramTransform();
+      });
+
+      const stopDragging = e => {
+        if (!diagramView.dragging || diagramView.pointerId !== e.pointerId) return;
+        diagramView.dragging = false;
+        diagramView.pointerId = null;
+        viewport.classList.remove('is-dragging');
+        if (viewport.hasPointerCapture(e.pointerId)) {
+          viewport.releasePointerCapture(e.pointerId);
+        }
+      };
+
+      viewport.addEventListener('pointerup', stopDragging);
+      viewport.addEventListener('pointercancel', stopDragging);
+      viewport.addEventListener('dblclick', e => {
+        e.preventDefault();
+        resetDiagramView();
+      });
+
+      applyDiagramTransform();
     }
 
     // ── mermaid diagram builder ────────────────────────────────────────────────
@@ -278,8 +405,10 @@
           svgEl.style.display = 'block';
           svgEl.style.margin = '0 auto';
         }
+        applyDiagramTransform();
       } catch (e) {
         wrap.innerHTML = `<pre style="color:var(--status-err);font-size:var(--fs-xs);text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
+        applyDiagramTransform();
       }
     }
 
@@ -439,6 +568,7 @@
       if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
     });
 
+    initDiagramPanZoom();
     load();
   </script>
 </body>

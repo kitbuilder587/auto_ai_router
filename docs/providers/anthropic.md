@@ -12,12 +12,61 @@ credentials:
     tpm: 100000
 ```
 
+### Anthropic-Compatible Providers
+
+For Comet API, prefer the dedicated [`cometapi`](cometapi.md) provider type.
+Other Anthropic-compatible providers can still use `type: "anthropic"` with
+an optional `auth_type` override:
+
+```yaml
+credentials:
+  - name: "compatible_anthropic"
+    type: "anthropic"
+    api_key: "os.environ/COMPATIBLE_API_KEY"
+    auth_type: "bearer"  # optional; default is X-Api-Key
+    base_url: "https://api.example.com/v1"
+    rpm: 60
+    tpm: -1
+
+models:
+  - name: "provider/claude-sonnet-4.5"
+    model: "claude-sonnet-4-5-20250929"
+    credential: compatible_anthropic
+    rpm: 60
+    tpm: -1
+```
+
+### CheapGPT / AIProductiv
+
+CheapGPT can be configured as another Anthropic-compatible provider:
+
+```yaml
+credentials:
+  - name: "cheapgpt_anthropic"
+    type: "anthropic"
+    api_key: "os.environ/CHEAPGPT_API_KEY"
+    auth_type: "bearer"
+    base_url: "https://api.aiproductiv.ru/v1"
+    rpm: 60
+    tpm: -1
+
+models:
+  - name: "cheapgpt/claude-sonnet-4.5"
+    model: "claude-sonnet-4-5"
+    credential: cheapgpt_anthropic
+    rpm: 60
+    tpm: -1
+```
+
 ## Required Fields
 
 | Field      | Description                                        |
 | ---------- | -------------------------------------------------- |
 | `api_key`  | Anthropic API key (supports `os.environ/VAR_NAME`) |
 | `base_url` | API base URL (`https://api.anthropic.com`)         |
+
+By default, Anthropic credentials send `X-Api-Key`. Set `auth_type: "bearer"` for
+Anthropic-compatible providers that expect `Authorization: Bearer <token>`.
 
 ## Responses API
 

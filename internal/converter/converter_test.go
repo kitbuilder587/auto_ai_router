@@ -225,9 +225,10 @@ func TestProviderConverter_ResponseTo_Anthropic(t *testing.T) {
 		Model:      "claude",
 		StopReason: "end_turn",
 		Usage: anthropic.AnthropicUsage{
-			InputTokens:          5,
-			OutputTokens:         7,
-			CacheReadInputTokens: 2,
+			InputTokens:              5,
+			OutputTokens:             7,
+			CacheReadInputTokens:     2,
+			CacheCreationInputTokens: 3,
 		},
 		Content: []anthropic.ContentBlock{
 			{Type: "text", Text: "hello"},
@@ -254,11 +255,13 @@ func TestProviderConverter_ResponseTo_Anthropic(t *testing.T) {
 	if msg.Content != "hello" || msg.ReasoningContent != "hmm" || len(msg.ToolCalls) != 1 {
 		t.Fatalf("unexpected message: %+v", msg)
 	}
-	// PromptTokens = InputTokens + CacheReadInputTokens + CacheCreationInputTokens = 5 + 2 + 0 = 7
-	if resp.Usage == nil || resp.Usage.PromptTokens != 7 || resp.Usage.CompletionTokens != 7 || resp.Usage.TotalTokens != 14 {
+	// PromptTokens = InputTokens + CacheReadInputTokens + CacheCreationInputTokens = 5 + 2 + 3 = 10
+	if resp.Usage == nil || resp.Usage.PromptTokens != 10 || resp.Usage.CompletionTokens != 7 || resp.Usage.TotalTokens != 17 {
 		t.Fatalf("unexpected usage: %+v", resp.Usage)
 	}
-	if resp.Usage.PromptTokensDetails == nil || resp.Usage.PromptTokensDetails.CachedTokens != 2 {
+	if resp.Usage.PromptTokensDetails == nil ||
+		resp.Usage.PromptTokensDetails.CachedTokens != 2 ||
+		resp.Usage.PromptTokensDetails.CacheCreationTokens != 3 {
 		t.Fatalf("unexpected prompt token details: %+v", resp.Usage.PromptTokensDetails)
 	}
 }
@@ -428,6 +431,12 @@ func TestProviderConverter_BuildURL(t *testing.T) {
 		t.Fatalf("unexpected anthropic url: %q", got)
 	}
 
+	cred.BaseURL = "https://example.com/v1"
+	got = cAnthropic.BuildURL(cred)
+	if got != "https://example.com/v1/messages" {
+		t.Fatalf("unexpected anthropic versioned url: %q", got)
+	}
+
 	cOpenAI := New(config.ProviderTypeOpenAI, RequestMode{})
 	if got = cOpenAI.BuildURL(cred); got != "" {
 		t.Fatalf("expected empty url for openai, got %q", got)
@@ -463,15 +472,16 @@ func TestExtractTokenUsage(t *testing.T) {
 		t.Fatalf("expected nil for invalid json")
 	}
 
-	chatBody := []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":2,"audio_tokens":1},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"reasoning_tokens":6}}}`)
+	chatBody := []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":2,"cache_creation_tokens":4,"audio_tokens":1},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"reasoning_tokens":6}}}`)
 	usage := ExtractTokenUsage(chatBody)
 	if usage == nil {
 		t.Fatalf("expected usage for chat format")
+		return
 	}
 	if usage.PromptTokens != 5 || usage.CompletionTokens != 7 {
 		t.Fatalf("unexpected chat token counts: %+v", usage)
 	}
-	if usage.CachedInputTokens != 2 || usage.AudioInputTokens != 1 || usage.AudioOutputTokens != 4 || usage.ReasoningTokens != 6 {
+	if usage.CachedInputTokens != 2 || usage.CacheCreationTokens != 4 || usage.AudioInputTokens != 1 || usage.AudioOutputTokens != 4 || usage.ReasoningTokens != 6 {
 		t.Fatalf("unexpected details: %+v", usage)
 	}
 	if usage.AcceptedPredictionTokens != 3 || usage.RejectedPredictionTokens != 1 {
@@ -482,6 +492,7 @@ func TestExtractTokenUsage(t *testing.T) {
 	usage = ExtractTokenUsage(imageBody)
 	if usage == nil {
 		t.Fatalf("expected usage for image format")
+		return
 	}
 	if usage.PromptTokens != 9 || usage.CompletionTokens != 10 || usage.ImageTokens != 8 {
 		t.Fatalf("unexpected image token counts: %+v", usage)
@@ -508,6 +519,7 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API format")
+		return
 	}
 	if usage.PromptTokens != 150 || usage.CompletionTokens != 80 {
 		t.Fatalf("unexpected token counts: prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
@@ -533,6 +545,7 @@ func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API streaming event format")
+		return
 	}
 	if usage.PromptTokens != 16 {
 		t.Fatalf("expected prompt_tokens=16, got %d", usage.PromptTokens)

@@ -131,14 +131,20 @@ func TestCmdCtx_ParentDeadlineTighter_ReturnsParent(t *testing.T) {
 
 func TestRedisBackend_KeyFunctions(t *testing.T) {
 	b := &RedisBackend{keyPrefix: "rl:"}
-	assert.Equal(t, "rl:rpm:mycred", b.rpmKey("mycred"))
-	assert.Equal(t, "rl:tpm:mycred", b.tpmKey("mycred"))
+	// Credential key: wrapped in hash tag for slot consistency.
+	assert.Equal(t, "rl:rpm:{c:mycred}", b.rpmKey("c:mycred"))
+	assert.Equal(t, "rl:tpm:{c:mycred}", b.tpmKey("c:mycred"))
+	// Model key: inherits credential's hash tag.
+	assert.Equal(t, "rl:rpm:{c:mycred}:m:mycred:mymodel", b.rpmKey("m:mycred:mymodel"))
+	assert.Equal(t, "rl:tpm:{c:mycred}:m:mycred:mymodel", b.tpmKey("m:mycred:mymodel"))
+	// Generic key: wrapped as-is.
+	assert.Equal(t, "rl:rpm:{other}", b.rpmKey("other"))
 }
 
 func TestRedisBackend_KeyFunctions_EmptyPrefix(t *testing.T) {
 	b := &RedisBackend{keyPrefix: ""}
-	assert.Equal(t, "rpm:mycred", b.rpmKey("mycred"))
-	assert.Equal(t, "tpm:mycred", b.tpmKey("mycred"))
+	assert.Equal(t, "rpm:{c:mycred}", b.rpmKey("c:mycred"))
+	assert.Equal(t, "tpm:{c:mycred}", b.tpmKey("c:mycred"))
 }
 
 // ── constructors ────────────────────────────────────────────────────────────
@@ -259,52 +265,90 @@ func TestRedisBackend_Integration_CanAllowTPM_AtLimit(t *testing.T) {
 	assert.False(t, b.canAllowTPM(ctx, "cred1", 1000))
 }
 
+// Integration tests use real key prefixes matching production ("c:" for credentials,
+// "m:credname:model" for models) so that hashTag() generates consistent slot assignments
+// and multi-key EVAL does not panic.
+
 func TestRedisBackend_Integration_TryAllowAll_AllPass(t *testing.T) {
 	b := redisBackendForTest(t, "test:all1:")
 	ctx := context.Background()
 
-	allowed := b.tryAllowAll(ctx, "cred1", 10, 10000, "model1", 5, 5000)
+	// Use production-format keys: "c:" prefix for creds, "m:cred:model" for models.
+	allowed := b.tryAllowAll(ctx, "c:cred1", 10, 10000, "m:cred1:model1", 5, 5000)
 	assert.True(t, allowed)
-	assert.Equal(t, 1, b.currentRPM(ctx, "cred1"))
-	assert.Equal(t, 1, b.currentRPM(ctx, "model1"))
+	// tryAllowAll and currentRPM use the same rpmKey() — counters must be visible.
+	assert.Equal(t, 1, b.currentRPM(ctx, "c:cred1"), "cred RPM must be recorded")
+	assert.Equal(t, 1, b.currentRPM(ctx, "m:cred1:model1"), "model RPM must be recorded")
 }
 
 func TestRedisBackend_Integration_TryAllowAll_CredRPMExhausted(t *testing.T) {
 	b := redisBackendForTest(t, "test:all2:")
 	ctx := context.Background()
 
-	// exhaust cred RPM
-	b.tryAllowRPM(ctx, "cred1", 2)
-	b.tryAllowRPM(ctx, "cred1", 2)
+	// Exhaust cred RPM using the same key that tryAllowAll will check.
+	b.tryAllowRPM(ctx, "c:cred1", 2)
+	b.tryAllowRPM(ctx, "c:cred1", 2)
 
-	allowed := b.tryAllowAll(ctx, "cred1", 2, -1, "model1", 10, -1)
+	allowed := b.tryAllowAll(ctx, "c:cred1", 2, -1, "m:cred1:model1", 10, -1)
 	assert.False(t, allowed)
-	// model RPM should not have been recorded
-	assert.Equal(t, 0, b.currentRPM(ctx, "model1"))
+	// Model RPM must not have been recorded (check failed before record).
+	assert.Equal(t, 0, b.currentRPM(ctx, "m:cred1:model1"))
 }
 
 func TestRedisBackend_Integration_TryAllowAll_ModelRPMExhausted(t *testing.T) {
 	b := redisBackendForTest(t, "test:all3:")
 	ctx := context.Background()
 
-	// exhaust model RPM
-	b.tryAllowRPM(ctx, "model1", 2)
-	b.tryAllowRPM(ctx, "model1", 2)
+	// Exhaust model RPM using the same key that tryAllowAll will check.
+	b.tryAllowRPM(ctx, "m:cred1:model1", 2)
+	b.tryAllowRPM(ctx, "m:cred1:model1", 2)
 
-	allowed := b.tryAllowAll(ctx, "cred1", 10, -1, "model1", 2, -1)
+	allowed := b.tryAllowAll(ctx, "c:cred1", 10, -1, "m:cred1:model1", 2, -1)
 	assert.False(t, allowed)
-	// cred RPM must NOT have been recorded (atomic check-and-record)
-	assert.Equal(t, 0, b.currentRPM(ctx, "cred1"))
+	// Cred RPM must NOT have been recorded (atomic check-and-record).
+	assert.Equal(t, 0, b.currentRPM(ctx, "c:cred1"))
 }
 
 func TestRedisBackend_Integration_TryAllowAll_NoModel(t *testing.T) {
 	b := redisBackendForTest(t, "test:all4:")
 	ctx := context.Background()
 
-	// Empty modelKey means no model checks
-	allowed := b.tryAllowAll(ctx, "cred1", 10, -1, "", -1, -1)
+	// Empty modelKey means no model checks.
+	allowed := b.tryAllowAll(ctx, "c:cred1", 10, -1, "", -1, -1)
 	assert.True(t, allowed)
-	assert.Equal(t, 1, b.currentRPM(ctx, "cred1"))
+	assert.Equal(t, 1, b.currentRPM(ctx, "c:cred1"))
+}
+
+func TestRedisBackend_Integration_TryAllowAll_CredTPMExhausted(t *testing.T) {
+	b := redisBackendForTest(t, "test:all5:")
+	ctx := context.Background()
+
+	// Fill cred TPM; consumeTokens and tryAllowAll share the same tpmKey().
+	b.consumeTokens(ctx, "c:cred1", 1000)
+
+	allowed := b.tryAllowAll(ctx, "c:cred1", 10, 1000, "", -1, -1)
+	assert.False(t, allowed, "cred TPM at limit must block")
+	// RPM must not have been recorded.
+	assert.Equal(t, 0, b.currentRPM(ctx, "c:cred1"))
+}
+
+func TestRedisBackend_Integration_TryAllowAll_ConsumeTokensVisible(t *testing.T) {
+	b := redisBackendForTest(t, "test:all6:")
+	ctx := context.Background()
+
+	// consumeTokens and tryAllowAll must read/write the same TPM key.
+	b.consumeTokens(ctx, "c:cred1", 500)
+	assert.Equal(t, 500, b.currentTPM(ctx, "c:cred1"))
+
+	// 500 < 1000 limit → allowed.
+	assert.True(t, b.tryAllowAll(ctx, "c:cred1", 10, 1000, "", -1, -1))
+
+	// Consume remaining budget.
+	b.consumeTokens(ctx, "c:cred1", 500)
+	assert.Equal(t, 1000, b.currentTPM(ctx, "c:cred1"))
+
+	// At limit → rejected.
+	assert.False(t, b.tryAllowAll(ctx, "c:cred1", 10, 1000, "", -1, -1))
 }
 
 func TestRedisBackend_Integration_CurrentRPM_Empty(t *testing.T) {

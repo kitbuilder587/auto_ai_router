@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -29,12 +30,15 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
+	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
 	// Register native Responses API converters for Vertex AI, Anthropic, and Bedrock.
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/anthropic/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/bedrock/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/vertex/responses"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 var (
@@ -53,7 +57,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(cfg.Server.LoggingLevel)
+	httputil.SetProxyFetchTimeout(cfg.Server.ProxyHealthTimeout)
+
+	// ==================== Initialize OpenTelemetry ====================
+	// Must happen before logger creation so OTLP log export covers all startup logs.
+	// Export diagnostics go to a stdout-only logger: routing them through the
+	// OTEL pipeline would generate a record per export batch and loop forever.
+	otelDiagLog := logger.New(cfg.Server.LoggingLevel)
+	otelSDK, otelErr := telemetry.Setup(context.Background(), &cfg.OTEL, Version, Commit, otelDiagLog)
+
+	stdoutLogs := cfg.Server.StdoutLogsEnabled
+	if !stdoutLogs && otelSDK.LogHandler() == nil {
+		// Refusing to run a server with no log destination at all:
+		// stdout was disabled but OTEL log export is not active either.
+		slog.Warn("stdout_logs_enabled=false but OTEL log export is not active, keeping stdout logs")
+		stdoutLogs = true
+	}
+	log := logger.NewMulti(cfg.Server.LoggingLevel, stdoutLogs, otelSDK.LogHandler())
+	if otelErr != nil {
+		// OTEL is observability, not core functionality — degrade instead of failing startup.
+		log.Error("Failed to initialize OpenTelemetry, continuing without it", "error", otelErr)
+	} else if otelSDK != nil {
+		log.Info("OpenTelemetry initialized",
+			"endpoint", cfg.OTEL.Endpoint,
+			"protocol", cfg.OTEL.Protocol,
+			"logs_enabled", cfg.OTEL.LogsEnabled,
+			"traces_enabled", cfg.OTEL.TracesEnabled,
+			"metrics_enabled", otelSDK.MetricsEnabled(),
+		)
+	}
 
 	config.PrintConfig(log, cfg)
 
@@ -119,7 +151,10 @@ func main() {
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
-	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
+	// Record metrics whenever any sink consumes them — the pull /metrics
+	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
+	// endpoint and the push pipeline are wired up separately below.
+	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
 
 	// ==================== Initialize Model Pricing ====================
 	if cfg.Server.ModelPricesLink != "" {
@@ -230,9 +265,36 @@ func main() {
 		log.Info("Prometheus metrics enabled", "path", "/metrics")
 	}
 
+	var rootHandler http.Handler = mux
+	if otelSDK.TracesEnabled() {
+		// Server spans for every API request; health/readiness probes and
+		// metrics scrapes are excluded to avoid trace noise.
+		otelOpts := []otelhttp.Option{
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				switch r.URL.Path {
+				case cfg.Monitoring.HealthCheckPath, "/health/readiness", "/metrics":
+					return false
+				}
+				return true
+			}),
+			otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
+				return r.Method + " " + r.URL.Path
+			}),
+		}
+		// When the incoming traceparent is not trusted (no trusted hop such as a
+		// LiteLLM proxy in front), override the handler's propagator with a no-op
+		// extractor so client-supplied trace context is ignored and every request
+		// starts a fresh root span. Outgoing propagation to upstreams still uses
+		// the global propagator via the HTTP client transport and is unaffected.
+		if !cfg.OTEL.TrustIncomingTraceparent {
+			otelOpts = append(otelOpts, otelhttp.WithPropagators(propagation.NewCompositeTextMapPropagator()))
+		}
+		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router", otelOpts...)
+	}
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      mux,
+		Handler:      rootHandler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
@@ -315,6 +377,12 @@ func main() {
 	}
 
 	log.Info("Server shutdown complete")
+
+	// Flush pending OTEL spans and log records last so the shutdown logs above
+	// are exported too.
+	if err := otelSDK.Shutdown(context.Background()); err != nil {
+		slog.Error("OpenTelemetry shutdown error", "error", err)
+	}
 }
 
 // ==================== Helper Functions ====================
@@ -405,12 +473,21 @@ func initializeModelManager(
 				rpm := modelManager.GetModelRPMForCredential(model.ID, cred.Name)
 				tpm := modelManager.GetModelTPMForCredential(model.ID, cred.Name)
 				rateLimiter.AddModelWithTPM(cred.Name, model.ID, rpm, tpm)
+				weight := balancer.EffectiveWeight(modelManager.GetModelWeightForCredential(model.ID, cred.Name), cred.Weight)
 				log.Debug("Initialized model rate limiters",
 					"credential", cred.Name,
 					"model", model.ID,
 					"rpm", rpm,
 					"tpm", tpm,
+					"weight", weight,
 				)
+				if weight != 1 {
+					log.Info("Weighted routing configured",
+						"credential", cred.Name,
+						"model", model.ID,
+						"weight", weight,
+					)
+				}
 			}
 		}
 	}
@@ -712,7 +789,7 @@ func startMetricsUpdater(
 	wg *sync.WaitGroup,
 	updateMutex *sync.Mutex,
 ) {
-	if !cfg.Monitoring.PrometheusEnabled {
+	if !cfg.MetricsCollectionEnabled() {
 		return
 	}
 

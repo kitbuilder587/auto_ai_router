@@ -384,7 +384,7 @@ class TestThinkingStreaming:
 
 
 # ---------------------------------------------------------------------------
-# Nullable JSON schema — from debug_nullable_vsellm.txt
+# Nullable JSON schema debug fixture
 # ---------------------------------------------------------------------------
 
 _PERSON_ANYOF_SCHEMA = {
@@ -494,7 +494,7 @@ _ENUM_PROMPT = (
 class TestNullableJsonSchema:
     """Nullable fields in JSON schema — critical correctness tests.
 
-    From debug_nullable_vsellm.txt:
+    From nullable JSON schema debug fixture:
     - anyOf [{type:string}, {type:null}] → model returns proper JSON null
     - nullable:true (deprecated) → model may return "null" string instead of null
     """

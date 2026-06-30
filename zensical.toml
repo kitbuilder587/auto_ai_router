@@ -23,6 +23,7 @@ nav = [
   ]},
   { "Monitoring" = [
     { "Prometheus" = "monitoring/prometheus.md" },
+    { "OpenTelemetry" = "monitoring/otel.md" },
     { "Health Endpoints" = "monitoring/health.md" },
     { "Router Chain Trace" = "monitoring/trace.md" },
     { "Grafana" = "monitoring/grafana.md" },

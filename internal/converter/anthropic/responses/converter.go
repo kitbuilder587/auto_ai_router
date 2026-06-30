@@ -5,14 +5,17 @@ package anthropicresponses
 
 import (
 	"io"
-	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
 func init() {
 	responses.RegisterProviderResponses(config.ProviderTypeAnthropic, func(mode responses.ResponsesRequestMode) responses.ProviderResponses {
+		return &AnthropicResponses{mode: mode}
+	})
+	responses.RegisterProviderResponses(config.ProviderTypeCometAPI, func(mode responses.ResponsesRequestMode) responses.ProviderResponses {
 		return &AnthropicResponses{mode: mode}
 	})
 }
@@ -57,6 +60,5 @@ func (a *AnthropicResponses) StreamTo(
 
 // BuildURL constructs the Anthropic Messages API endpoint URL.
 func (a *AnthropicResponses) BuildURL(cred *config.CredentialConfig) string {
-	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-	return baseURL + "/v1/messages"
+	return converterutil.BuildVersionedURL(cred.BaseURL, "/v1/messages")
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ const (
 	ProviderTypeVertexAI  ProviderType = "vertex-ai"
 	ProviderTypeGemini    ProviderType = "gemini"
 	ProviderTypeAnthropic ProviderType = "anthropic"
+	ProviderTypeCometAPI  ProviderType = "cometapi"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
@@ -30,13 +32,29 @@ const (
 // ModelModeImageGeneration marks models that must use the image generation endpoint.
 const ModelModeImageGeneration = "image_generation"
 
+// LogValue implements slog.LogValuer so structured log backends (e.g. the
+// OTEL bridge) serialize ProviderType as a plain string instead of an
+// unhandled custom type.
+func (p ProviderType) LogValue() slog.Value {
+	return slog.StringValue(string(p))
+}
+
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeBedrock, ProviderTypeProxy:
 		return true
 	}
 	return false
+}
+
+func normalizeProviderType(raw string) ProviderType {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "comet-api", "comet_api":
+		return ProviderTypeCometAPI
+	default:
+		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
+	}
 }
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
@@ -46,6 +64,7 @@ type ModelRPMConfig struct {
 	Mode       string `yaml:"mode,omitempty"`
 	RPM        int    `yaml:"rpm"`
 	TPM        int    `yaml:"tpm"`
+	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
 	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
@@ -54,6 +73,55 @@ type ModelRPMConfig struct {
 	// nil (omitted in config) = auto-detect: true for codex models, false otherwise.
 	// Explicit true/false overrides the auto-detection.
 	PassthroughResponses *bool `yaml:"passthrough_responses,omitempty"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
+func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Name                 string `yaml:"name"`
+		Model                string `yaml:"model,omitempty"`
+		Mode                 string `yaml:"mode,omitempty"`
+		RPM                  string `yaml:"rpm"`
+		TPM                  string `yaml:"tpm"`
+		Weight               string `yaml:"weight"`
+		Credential           string `yaml:"credential,omitempty"`
+		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	m.Name = resolveEnvString(temp.Name)
+	m.Model = resolveEnvString(temp.Model)
+	m.Mode = resolveEnvString(temp.Mode)
+	m.Credential = resolveEnvString(temp.Credential)
+	m.PassthroughResponses = nil
+
+	var err error
+	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+	if m.TPM, err = parseField(temp.TPM, 0, strconv.Atoi, "tpm for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+	if m.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+
+	if temp.PassthroughResponses != "" {
+		resolved := resolveEnvString(temp.PassthroughResponses)
+		if resolved != "" {
+			passthroughResponses, err := strconv.ParseBool(resolved)
+			if err != nil {
+				return fmt.Errorf("invalid passthrough_responses for model '%s': %w", m.Name, err)
+			}
+			m.PassthroughResponses = &passthroughResponses
+		}
+	}
+
+	return nil
 }
 
 type Config struct {
@@ -65,6 +133,7 @@ type Config struct {
 	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 	Redis       RedisConfig        `yaml:"redis,omitempty"`
+	OTEL        OTELConfig         `yaml:"otel,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -90,6 +159,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		ModelAlias     map[string]string      `yaml:"model_alias,omitempty"`
 		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
 		Redis          RedisConfig            `yaml:"redis,omitempty"`
+		OTEL           OTELConfig             `yaml:"otel,omitempty"`
 		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -107,6 +177,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.ModelAlias = raw.ModelAlias
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
+	c.OTEL = raw.OTEL
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -338,6 +409,7 @@ type ServerConfig struct {
 	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
 	RequestTimeout             time.Duration `yaml:"request_timeout"`
 	LoggingLevel               string        `yaml:"logging_level"`
+	StdoutLogsEnabled          bool          `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
 	MasterKey                  string        `yaml:"master_key"`
 	DefaultModelsRPM           int           `yaml:"default_models_rpm"`
 	MaxIdleConns               int           `yaml:"max_idle_conns"`
@@ -354,6 +426,7 @@ type ServerConfig struct {
 	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ShutdownDelay              time.Duration `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	DrainUpstreamOnAbort       bool          `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ProxyHealthTimeout         time.Duration `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -379,6 +452,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
 		RequestTimeout             string `yaml:"request_timeout"`
 		LoggingLevel               string `yaml:"logging_level"`
+		StdoutLogsEnabled          string `yaml:"stdout_logs_enabled"`
 		MasterKey                  string `yaml:"master_key"`
 		DefaultModelsRPM           string `yaml:"default_models_rpm"`
 		MaxIdleConns               string `yaml:"max_idle_conns"`
@@ -394,6 +468,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
 		ShutdownDelay              string `yaml:"shutdown_delay"`
 		DrainUpstreamOnAbort       string `yaml:"drain_upstream_on_abort"`
+		ProxyHealthTimeout         string `yaml:"proxy_health_timeout"`
 	}
 
 	var temp tempConfig
@@ -455,11 +530,17 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.SessionStickyAutoCacheCtrl, err = parseField(temp.SessionStickyAutoCacheCtrl, true, strconv.ParseBool, "session_sticky_auto_cache_control"); err != nil {
 		return err
 	}
+	if s.StdoutLogsEnabled, err = parseField(temp.StdoutLogsEnabled, true, strconv.ParseBool, "stdout_logs_enabled"); err != nil {
+		return err
+	}
 
 	if s.ShutdownDelay, err = parseField(temp.ShutdownDelay, 5*time.Second, time.ParseDuration, "shutdown_delay"); err != nil {
 		return err
 	}
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
+		return err
+	}
+	if s.ProxyHealthTimeout, err = parseField(temp.ProxyHealthTimeout, 15*time.Second, time.ParseDuration, "proxy_health_timeout"); err != nil {
 		return err
 	}
 
@@ -472,12 +553,14 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name    string       `yaml:"name"`
-	Type    ProviderType `yaml:"type"`
-	APIKey  string       `yaml:"api_key"`
-	BaseURL string       `yaml:"base_url"`
-	RPM     int          `yaml:"rpm"`
-	TPM     int          `yaml:"tpm"`
+	Name     string       `yaml:"name"`
+	Type     ProviderType `yaml:"type"`
+	APIKey   string       `yaml:"api_key"`
+	BaseURL  string       `yaml:"base_url"`
+	AuthType string       `yaml:"auth_type,omitempty"`
+	RPM      int          `yaml:"rpm"`
+	TPM      int          `yaml:"tpm"`
+	Weight   int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -500,8 +583,10 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		Type            string           `yaml:"type"`
 		APIKey          string           `yaml:"api_key"`
 		BaseURL         string           `yaml:"base_url"`
+		AuthType        string           `yaml:"auth_type,omitempty"`
 		RPM             string           `yaml:"rpm"`
 		TPM             string           `yaml:"tpm"`
+		Weight          string           `yaml:"weight"`
 		ProjectID       string           `yaml:"project_id,omitempty"`
 		Location        string           `yaml:"location,omitempty"`
 		CredentialsFile string           `yaml:"credentials_file,omitempty"`
@@ -517,9 +602,10 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Resolve string fields
 	c.Name = resolveEnvString(temp.Name)
-	c.Type = ProviderType(resolveEnvString(temp.Type))
+	c.Type = normalizeProviderType(resolveEnvString(temp.Type))
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
+	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
 
 	// Resolve Vertex AI specific fields
 	c.ProjectID = resolveEnvString(temp.ProjectID)
@@ -533,6 +619,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.TPM, err = parseField(temp.TPM, -1, strconv.Atoi, "tpm for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 
@@ -591,6 +680,136 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+}
+
+// OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
+// When Enabled=false (default) no OTEL SDK components are initialized and the
+// router behaves exactly as before (pretty stdout logs, no tracing).
+type OTELConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Endpoint is the OTLP collector endpoint.
+	// For grpc protocol: "host:port" (e.g. "localhost:4317").
+	// For http protocol: "host:port" or full URL (e.g. "http://localhost:4318").
+	Endpoint string `yaml:"endpoint"`
+
+	// Protocol selects the OTLP transport: "grpc" (default) or "http" (http/protobuf).
+	Protocol string `yaml:"protocol"`
+
+	// Insecure disables TLS for the exporter connection (default: true,
+	// matching the typical in-cluster collector setup).
+	Insecure bool `yaml:"insecure"`
+
+	// ServiceName is reported as service.name resource attribute (default: "auto-ai-router").
+	ServiceName string `yaml:"service_name"`
+
+	// Headers are added to every OTLP export request (e.g. auth tokens).
+	// Values support os.environ/VAR_NAME resolution.
+	Headers map[string]string `yaml:"headers,omitempty"`
+
+	// LogsEnabled ships slog records via OTLP in addition to stdout (default: true).
+	LogsEnabled bool `yaml:"logs_enabled"`
+
+	// TracesEnabled creates server/client spans and propagates trace context
+	// to upstream providers and chained routers (default: true).
+	TracesEnabled bool `yaml:"traces_enabled"`
+
+	// MetricExportInterval is the period between OTLP metric pushes (default: 60s).
+	// OTLP metric export is driven by monitoring.prometheus_enabled (the metrics
+	// master switch) — when OTEL is enabled and metrics are being collected, the
+	// Prometheus registry is bridged to the collector and pushed on this interval.
+	MetricExportInterval time.Duration `yaml:"metric_export_interval"`
+
+	// TraceSampleRatio is the head sampling ratio in [0.0, 1.0] (default: 1.0).
+	// The sampler is parent-based, so sampled upstream decisions are respected.
+	TraceSampleRatio float64 `yaml:"trace_sample_ratio"`
+
+	// TrustIncomingTraceparent controls whether the server adopts an incoming
+	// W3C traceparent header and parents its span under it (default: true).
+	// Enable when a trusted hop (e.g. a LiteLLM proxy with
+	// forward_traceparent_to_llm_provider) sits in front, so the router's spans
+	// nest inside that caller's trace. Disable for standalone or public-facing
+	// deployments to ignore client-supplied trace context and start a fresh root
+	// span per request. Outgoing traceparent propagation to upstreams is
+	// unaffected either way.
+	TrustIncomingTraceparent bool `yaml:"trust_incoming_traceparent"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for OTELConfig with env variable support
+func (o *OTELConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled                  string            `yaml:"enabled"`
+		Endpoint                 string            `yaml:"endpoint"`
+		Protocol                 string            `yaml:"protocol"`
+		Insecure                 string            `yaml:"insecure"`
+		ServiceName              string            `yaml:"service_name"`
+		Headers                  map[string]string `yaml:"headers,omitempty"`
+		LogsEnabled              string            `yaml:"logs_enabled"`
+		TracesEnabled            string            `yaml:"traces_enabled"`
+		MetricExportInterval     string            `yaml:"metric_export_interval"`
+		TraceSampleRatio         string            `yaml:"trace_sample_ratio"`
+		TrustIncomingTraceparent string            `yaml:"trust_incoming_traceparent"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	var err error
+	if o.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "otel.enabled"); err != nil {
+		return err
+	}
+	if o.Insecure, err = parseField(temp.Insecure, true, strconv.ParseBool, "otel.insecure"); err != nil {
+		return err
+	}
+	if o.LogsEnabled, err = parseField(temp.LogsEnabled, true, strconv.ParseBool, "otel.logs_enabled"); err != nil {
+		return err
+	}
+	if o.TracesEnabled, err = parseField(temp.TracesEnabled, true, strconv.ParseBool, "otel.traces_enabled"); err != nil {
+		return err
+	}
+	if o.MetricExportInterval, err = parseField(temp.MetricExportInterval, 60*time.Second, time.ParseDuration, "otel.metric_export_interval"); err != nil {
+		return err
+	}
+	parseFloat := func(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
+	if o.TraceSampleRatio, err = parseField(temp.TraceSampleRatio, 1.0, parseFloat, "otel.trace_sample_ratio"); err != nil {
+		return err
+	}
+	if o.TrustIncomingTraceparent, err = parseField(temp.TrustIncomingTraceparent, true, strconv.ParseBool, "otel.trust_incoming_traceparent"); err != nil {
+		return err
+	}
+
+	o.Endpoint = resolveEnvString(temp.Endpoint)
+	o.Protocol = strings.ToLower(resolveEnvString(temp.Protocol))
+	o.ServiceName = resolveEnvString(temp.ServiceName)
+
+	if len(temp.Headers) > 0 {
+		o.Headers = make(map[string]string, len(temp.Headers))
+		for k, v := range temp.Headers {
+			o.Headers[k] = resolveEnvString(v)
+		}
+	}
+
+	o.applyDefaults()
+	return nil
+}
+
+// applyDefaults fills in default values for empty OTEL config fields.
+func (o *OTELConfig) applyDefaults() {
+	if o.Protocol == "" {
+		o.Protocol = "grpc"
+	}
+	if o.ServiceName == "" {
+		o.ServiceName = "auto-ai-router"
+	}
+	if o.Endpoint == "" {
+		if o.Protocol == "grpc" {
+			o.Endpoint = "localhost:4317"
+		} else {
+			o.Endpoint = "localhost:4318"
+		}
+	}
 }
 
 // UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
@@ -768,6 +987,10 @@ func Load(path string) (*Config, error) {
 		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
 	}
 
+	if !hasMappingKey(&root, "otel") {
+		cfg.OTEL = defaultOTELConfig()
+	}
+
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
 	cfg.Monitoring.HealthCheckPath = "/health"
@@ -878,6 +1101,29 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		LogBatchSize:          100,
 		LogFlushInterval:      5 * time.Second,
 	}
+}
+
+// MetricsCollectionEnabled reports whether request/token metrics should be
+// recorded into the Prometheus registry. Collection is decoupled from how the
+// metrics leave the process: it is needed both for the pull-based /metrics
+// endpoint (monitoring.prometheus_enabled) and for OTLP push (otel.enabled),
+// which bridges the same registry. Either sink alone is enough to require it.
+func (c *Config) MetricsCollectionEnabled() bool {
+	return c.Monitoring.PrometheusEnabled || c.OTEL.Enabled
+}
+
+func defaultOTELConfig() OTELConfig {
+	cfg := OTELConfig{
+		Enabled:                  false,
+		Insecure:                 true,
+		LogsEnabled:              true,
+		TracesEnabled:            true,
+		MetricExportInterval:     60 * time.Second,
+		TraceSampleRatio:         1.0,
+		TrustIncomingTraceparent: true,
+	}
+	cfg.applyDefaults()
+	return cfg
 }
 
 func hasMappingKey(node *yaml.Node, key string) bool {
@@ -995,7 +1241,10 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+		}
+		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
+			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
 		}
 
 		// Validate by provider type
@@ -1065,12 +1314,35 @@ func (c *Config) Validate() error {
 		if cred.TPM < -1 {
 			return fmt.Errorf("credential %s: invalid tpm: %d (must be -1 or 0 for unlimited, or positive number)", cred.Name, cred.TPM)
 		}
+		// Weight: 0 means default (1), positive means a higher share. Negative is invalid.
+		if cred.Weight < 0 {
+			return fmt.Errorf("credential %s: invalid weight: %d (must be 0 for default or positive number)", cred.Name, cred.Weight)
+		}
+	}
+
+	for _, model := range c.Models {
+		if model.Weight < 0 {
+			return fmt.Errorf("model %s: invalid weight: %d (must be 0 for default or positive number)", model.Name, model.Weight)
+		}
 	}
 
 	// Validate Redis config
 	if c.Redis.Enabled {
 		if len(c.Redis.InitAddresses) == 0 {
 			return fmt.Errorf("redis.addresses is required when redis is enabled")
+		}
+	}
+
+	// Validate OTEL config
+	if c.OTEL.Enabled {
+		if c.OTEL.Protocol != "grpc" && c.OTEL.Protocol != "http" {
+			return fmt.Errorf("otel.protocol must be 'grpc' or 'http', got: %s", c.OTEL.Protocol)
+		}
+		if c.OTEL.Endpoint == "" {
+			return fmt.Errorf("otel.endpoint is required when otel is enabled")
+		}
+		if c.OTEL.TraceSampleRatio < 0 || c.OTEL.TraceSampleRatio > 1 {
+			return fmt.Errorf("otel.trace_sample_ratio must be in [0.0, 1.0], got: %f", c.OTEL.TraceSampleRatio)
 		}
 	}
 

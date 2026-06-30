@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -38,19 +39,40 @@ func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceR
 		return trace
 	}
 
+	var proxyCreds []config.CredentialConfig
 	for _, cred := range p.balancer.GetCredentialsSnapshot() {
-		if cred.Type != config.ProviderTypeProxy {
-			continue
+		if cred.Type == config.ProviderTypeProxy {
+			proxyCreds = append(proxyCreds, cred)
 		}
-		c := cred // copy for use in map key
-		upstream, err := p.fetchUpstreamTrace(ctx, &c, depth-1)
-		if trace.Upstreams == nil {
-			trace.Upstreams = make(map[string]*httputil.ProxyTraceResponse)
+	}
+
+	if len(proxyCreds) > 0 {
+		type result struct {
+			name     string
+			upstream *httputil.ProxyTraceResponse
+			err      error
 		}
-		if err != nil {
-			trace.Upstreams[cred.Name] = &httputil.ProxyTraceResponse{FetchError: err.Error()}
-		} else {
-			trace.Upstreams[cred.Name] = upstream
+		results := make(chan result, len(proxyCreds))
+
+		var wg sync.WaitGroup
+		for _, cred := range proxyCreds {
+			wg.Add(1)
+			go func(c config.CredentialConfig) {
+				defer wg.Done()
+				upstream, err := p.fetchUpstreamTrace(ctx, &c, depth-1)
+				results <- result{name: c.Name, upstream: upstream, err: err}
+			}(cred)
+		}
+		wg.Wait()
+		close(results)
+
+		trace.Upstreams = make(map[string]*httputil.ProxyTraceResponse, len(proxyCreds))
+		for r := range results {
+			if r.err != nil {
+				trace.Upstreams[r.name] = &httputil.ProxyTraceResponse{FetchError: r.err.Error()}
+			} else {
+				trace.Upstreams[r.name] = r.upstream
+			}
 		}
 	}
 
@@ -60,7 +82,7 @@ func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceR
 func (p *Proxy) fetchUpstreamTrace(ctx context.Context, cred *config.CredentialConfig, depth int) (*httputil.ProxyTraceResponse, error) {
 	var result httputil.ProxyTraceResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, fmt.Sprintf("/trace?depth=%d", depth), p.logger, &result); err != nil {
-		p.logger.Debug("upstream /trace unavailable, falling back to /health", "credential", cred.Name, "error", err)
+		p.logger.DebugContext(ctx, "upstream /trace unavailable, falling back to /health", "credential", cred.Name, "error", err)
 		return p.fetchUpstreamHealth(ctx, cred)
 	}
 	return &result, nil
@@ -97,7 +119,7 @@ func (p *Proxy) HandleTrace(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(trace); err != nil {
-		p.logger.Error("Failed to encode trace response", "error", err)
+		p.logger.ErrorContext(r.Context(), "Failed to encode trace response", "error", err)
 	}
 }
 

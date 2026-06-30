@@ -92,6 +92,7 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 	if tc, oc := mapThinkingConfig(thinkingParam, req.ReasoningEffort, anthropicReq.Model); tc != nil {
 		anthropicReq.Thinking = tc
 		anthropicReq.OutputConfig = oc
+		anthropicReq.MaxTokens = EnsureMaxTokensForThinking(anthropicReq.MaxTokens, tc)
 		if oc != nil {
 			// effort-based adaptive thinking requires the effort beta header
 			anthropicReq.AnthropicBeta = appendBetaUnique(anthropicReq.AnthropicBeta, "effort-2025-11-24")
