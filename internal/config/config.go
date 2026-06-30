@@ -32,6 +32,9 @@ const (
 // ModelModeImageGeneration marks models that must use the image generation endpoint.
 const ModelModeImageGeneration = "image_generation"
 
+// ModelModeEmbedding marks models that must use the embeddings endpoint.
+const ModelModeEmbedding = "embedding"
+
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
 // OTEL bridge) serialize ProviderType as a plain string instead of an
 // unhandled custom type.

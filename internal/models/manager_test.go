@@ -46,10 +46,13 @@ func TestGetModelMode_WithStaticModels(t *testing.T) {
 
 	manager := New(logger, 50, []config.ModelRPMConfig{
 		{Name: "google/gemini-3-pro-image-preview", Model: "gemini-3-pro-image-preview", Mode: "IMAGE_GENERATION"},
+		{Name: "openai/text-embedding-3-small", Model: "text-embedding-3-small", Mode: "EMBEDDING"},
 	})
 
 	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("google/gemini-3-pro-image-preview"))
 	assert.Equal(t, config.ModelModeImageGeneration, manager.GetModelMode("gemini-3-pro-image-preview"))
+	assert.Equal(t, config.ModelModeEmbedding, manager.GetModelMode("openai/text-embedding-3-small"))
+	assert.Equal(t, config.ModelModeEmbedding, manager.GetModelMode("text-embedding-3-small"))
 	assert.Empty(t, manager.GetModelMode("google/gemini-2.5-pro"))
 }
 

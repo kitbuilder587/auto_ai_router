@@ -387,12 +387,13 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		realModelID = realName
 	}
 
-	if p.isImageGenerationModel(modelID, realModelID) && r.URL.Path == "/v1/chat/completions" {
-		message := fmt.Sprintf("Model %s must be called via /v1/images/generations", modelID)
-		p.logger.Warn("Rejected image generation model on chat completions endpoint",
+	if expectedEndpoint, mode, ok := p.requiredEndpointForModel(modelID, realModelID, r.URL.Path); ok {
+		message := fmt.Sprintf("Model %s must be called via %s", modelID, expectedEndpoint)
+		p.logger.Warn("Rejected model on incompatible endpoint",
 			"error_code", http.StatusBadRequest,
 			"model", modelID,
 			"real_model", realModelID,
+			"mode", mode,
 			"path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
@@ -406,14 +407,35 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	return body, modelID, realModelID, streaming, true
 }
 
-func (p *Proxy) isImageGenerationModel(modelID, realModelID string) bool {
+func (p *Proxy) requiredEndpointForModel(modelID, realModelID, path string) (string, string, bool) {
+	mode := p.modelMode(modelID, realModelID)
+	switch mode {
+	case config.ModelModeImageGeneration:
+		if path == "/v1/images/generations" || path == "/v1/images/edits" {
+			return "", "", false
+		}
+		return "/v1/images/generations", mode, true
+	case config.ModelModeEmbedding:
+		if path == "/v1/embeddings" {
+			return "", "", false
+		}
+		return "/v1/embeddings", mode, true
+	default:
+		return "", "", false
+	}
+}
+
+func (p *Proxy) modelMode(modelID, realModelID string) string {
 	if p.modelManager == nil {
-		return false
+		return ""
 	}
-	if p.modelManager.GetModelMode(modelID) == config.ModelModeImageGeneration {
-		return true
+	if mode := p.modelManager.GetModelMode(modelID); mode != "" {
+		return mode
 	}
-	return realModelID != modelID && p.modelManager.GetModelMode(realModelID) == config.ModelModeImageGeneration
+	if realModelID != modelID {
+		return p.modelManager.GetModelMode(realModelID)
+	}
+	return ""
 }
 
 func (p *Proxy) selectCredentialForModel(
