@@ -46,7 +46,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			if r.logger != nil {
-				r.logger.Error("Panic in HTTP handler",
+				r.logger.ErrorContext(req.Context(), "Panic in HTTP handler",
 					"error_code", http.StatusInternalServerError,
 					"panic", rec,
 					"method", req.Method,
@@ -160,7 +160,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			// Don't fail the response on a logging error, but surface it —
 			// a silently broken errors-log file hides every subsequent error.
 			if err := logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody); err != nil && r.logger != nil {
-				r.logger.Warn("Failed to write error log file",
+				r.logger.WarnContext(req.Context(), "Failed to write error log file",
 					"path", r.monitoringConfig.ErrorsLogPath, "error", err)
 			}
 		}
@@ -187,7 +187,7 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 
 	if err := json.NewEncoder(w).Encode(modelsResp); err != nil {
 		if r.logger != nil {
-			r.logger.Error("Failed to encode models response",
+			r.logger.ErrorContext(req.Context(), "Failed to encode models response",
 				"endpoint", "/v1/models",
 				"error", err.Error(),
 			)

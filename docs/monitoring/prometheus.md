@@ -9,15 +9,18 @@ monitoring:
 
 Metrics are available at `/metrics`.
 
+The same metrics can also be **pushed** to an OTLP collector instead of (or in addition to) being scraped — see [OpenTelemetry](otel.md).
+
 ## Available Metrics
 
-| Metric                                     | Type      | Description                            |
-| ------------------------------------------ | --------- | -------------------------------------- |
-| `auto_ai_router_credential_rpm_current`    | Gauge     | Current RPM usage per credential       |
-| `auto_ai_router_credential_tpm_current`    | Gauge     | Current TPM usage per credential       |
-| `auto_ai_router_credential_banned`         | Gauge     | Ban status per credential (1 = banned) |
-| `auto_ai_router_requests_total`            | Counter   | Total requests processed               |
-| `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution           |
+| Metric                                     | Type      | Description                                                |
+| ------------------------------------------ | --------- | ---------------------------------------------------------- |
+| `auto_ai_router_credential_rpm_current`    | Gauge     | Current RPM usage per credential                           |
+| `auto_ai_router_credential_tpm_current`    | Gauge     | Current TPM usage per credential                           |
+| `auto_ai_router_credential_banned`         | Gauge     | Ban status per credential (1 = banned)                     |
+| `auto_ai_router_requests_total`            | Counter   | Total requests processed                                   |
+| `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution                               |
+| `auto_ai_router_aborted_requests_total`    | Counter   | Client-aborted requests by credential, model, and endpoint |
 
 ## Proxy Credential Exclusion
 

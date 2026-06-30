@@ -30,6 +30,7 @@ func TestConvertToolCallsToGenaiParts_NestedFormat(t *testing.T) {
 	fc := parts[0].FunctionCall
 	if fc == nil {
 		t.Fatalf("expected FunctionCall, got nil")
+		return
 	}
 	if fc.Name != "get_weather" {
 		t.Fatalf("expected name = %q, got %q", "get_weather", fc.Name)
@@ -58,6 +59,7 @@ func TestConvertToolCallsToGenaiParts_FlatFormat(t *testing.T) {
 	fc := parts[0].FunctionCall
 	if fc == nil {
 		t.Fatalf("expected FunctionCall, got nil")
+		return
 	}
 	if fc.Name != "calculate" {
 		t.Fatalf("expected name = %q, got %q", "calculate", fc.Name)
@@ -93,6 +95,7 @@ func TestConvertToolCallsToGenaiParts_FlatOverridesNested(t *testing.T) {
 	fc := parts[0].FunctionCall
 	if fc == nil {
 		t.Fatalf("expected FunctionCall, got nil")
+		return
 	}
 	// Flat name should override nested name
 	if fc.Name != "flat_name" {
@@ -157,6 +160,7 @@ func TestConvertToolCallsToGenaiParts_InvalidArguments(t *testing.T) {
 	fc := parts[0].FunctionCall
 	if fc == nil {
 		t.Fatalf("expected FunctionCall, got nil")
+		return
 	}
 	if fc.Name != "broken_fn" {
 		t.Fatalf("expected name = %q, got %q", "broken_fn", fc.Name)
@@ -186,6 +190,7 @@ func TestConvertToolCallsToGenaiParts_ThoughtSignatureFallback(t *testing.T) {
 	// Should have fallback ThoughtSignature
 	if parts[0].ThoughtSignature == nil {
 		t.Fatalf("expected ThoughtSignature fallback, got nil")
+		return
 	}
 	if string(parts[0].ThoughtSignature) != "skip_thought_signature_validator" {
 		t.Fatalf("expected dummy ThoughtSignature, got %q", string(parts[0].ThoughtSignature))
@@ -297,8 +302,13 @@ func TestMapToolChoice(t *testing.T) {
 
 	// "none" -> NONE
 	tc := mapToolChoice("none")
-	if tc == nil || tc.FunctionCallingConfig == nil {
+	if tc == nil {
 		t.Fatalf("expected ToolConfig for 'none'")
+		return
+	}
+	if tc.FunctionCallingConfig == nil {
+		t.Fatalf("expected FunctionCallingConfig for 'none'")
+		return
 	}
 	if tc.FunctionCallingConfig.Mode != "NONE" {
 		t.Fatalf("expected mode NONE, got %q", tc.FunctionCallingConfig.Mode)
@@ -306,14 +316,30 @@ func TestMapToolChoice(t *testing.T) {
 
 	// "auto" -> AUTO
 	tc = mapToolChoice("auto")
-	if tc == nil || tc.FunctionCallingConfig.Mode != "AUTO" {
-		t.Fatalf("expected mode AUTO for 'auto'")
+	if tc == nil {
+		t.Fatalf("expected ToolConfig for 'auto'")
+		return
+	}
+	if tc.FunctionCallingConfig == nil {
+		t.Fatalf("expected FunctionCallingConfig for 'auto'")
+		return
+	}
+	if tc.FunctionCallingConfig.Mode != "AUTO" {
+		t.Fatalf("expected mode AUTO for 'auto', got %q", tc.FunctionCallingConfig.Mode)
 	}
 
 	// "required" -> ANY
 	tc = mapToolChoice("required")
-	if tc == nil || tc.FunctionCallingConfig.Mode != "ANY" {
-		t.Fatalf("expected mode ANY for 'required'")
+	if tc == nil {
+		t.Fatalf("expected ToolConfig for 'required'")
+		return
+	}
+	if tc.FunctionCallingConfig == nil {
+		t.Fatalf("expected FunctionCallingConfig for 'required'")
+		return
+	}
+	if tc.FunctionCallingConfig.Mode != "ANY" {
+		t.Fatalf("expected mode ANY for 'required', got %q", tc.FunctionCallingConfig.Mode)
 	}
 
 	// dict with function name -> ANY + allowedFunctionNames
@@ -323,8 +349,16 @@ func TestMapToolChoice(t *testing.T) {
 			"name": "specific_func",
 		},
 	})
-	if tc == nil || tc.FunctionCallingConfig.Mode != "ANY" {
-		t.Fatalf("expected mode ANY for dict tool_choice")
+	if tc == nil {
+		t.Fatalf("expected ToolConfig for dict tool_choice")
+		return
+	}
+	if tc.FunctionCallingConfig == nil {
+		t.Fatalf("expected FunctionCallingConfig for dict tool_choice")
+		return
+	}
+	if tc.FunctionCallingConfig.Mode != "ANY" {
+		t.Fatalf("expected mode ANY for dict tool_choice, got %q", tc.FunctionCallingConfig.Mode)
 	}
 	if len(tc.FunctionCallingConfig.AllowedFunctionNames) != 1 || tc.FunctionCallingConfig.AllowedFunctionNames[0] != "specific_func" {
 		t.Fatalf("expected allowedFunctionNames = [specific_func], got %v", tc.FunctionCallingConfig.AllowedFunctionNames)

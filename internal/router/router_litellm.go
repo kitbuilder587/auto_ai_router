@@ -18,7 +18,7 @@ func (r *Router) handleLitellm(w http.ResponseWriter, req *http.Request) bool {
 		w.WriteHeader(http.StatusOK)
 
 		if _, err := w.Write([]byte(`{"server_root_path":"/","proxy_base_url":null,"auto_redirect_to_sso":false,"admin_ui_disabled":false}`)); err != nil {
-			r.logger.Error("Failed to write litellm-ui-config response", "error", err)
+			r.logger.ErrorContext(req.Context(), "Failed to write litellm-ui-config response", "error", err)
 		}
 		return true
 	case "/v2/login":
@@ -39,7 +39,7 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 
 	var loginReq users.LoginRequest
 	if err := json.NewDecoder(req.Body).Decode(&loginReq); err != nil {
-		r.logger.Error("Failed to decode login request", "error", err)
+		r.logger.ErrorContext(req.Context(), "Failed to decode login request", "error", err)
 		proxy.WriteErrorBadRequest(w, "invalid JSON")
 		return
 	}
@@ -52,11 +52,11 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	result, err := users.AuthenticateUser(req.Context(), loginReq, masterKey, pool)
 	if err != nil {
 		if err == users.ErrInvalidCredentials {
-			r.logger.Warn("Login failed: invalid credentials", "username", loginReq.Username)
+			r.logger.WarnContext(req.Context(), "Login failed: invalid credentials", "username", loginReq.Username)
 			proxy.WriteErrorUnauthorized(w, "invalid credentials")
 			return
 		}
-		r.logger.Error("Login error", "error", err)
+		r.logger.ErrorContext(req.Context(), "Login error", "error", err)
 		proxy.WriteErrorInternal(w, "Internal Server Error")
 		return
 	}
@@ -73,7 +73,7 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 
 	sessionJWT, err := users.GenerateSessionJWT(sessionClaims, masterKey)
 	if err != nil {
-		r.logger.Error("Failed to generate session JWT", "error", err)
+		r.logger.ErrorContext(req.Context(), "Failed to generate session JWT", "error", err)
 		proxy.WriteErrorInternal(w, "Internal Server Error")
 		return
 	}
@@ -102,13 +102,13 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		MaxAge: maxAge,
 	})
 
-	r.logger.Info("Login successful", "username", loginReq.Username, "role", result.UserRole)
+	r.logger.InfoContext(req.Context(), "Login successful", "username", loginReq.Username, "role", result.UserRole)
 
 	// Response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
 	if _, err := w.Write([]byte(`{"redirect_url":"/ui/?login=success"}`)); err != nil {
-		r.logger.Error("Failed to write login response", "error", err)
+		r.logger.ErrorContext(req.Context(), "Failed to write login response", "error", err)
 	}
 }

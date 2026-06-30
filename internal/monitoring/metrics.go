@@ -26,6 +26,14 @@ var (
 		[]string{"credential", "endpoint"},
 	)
 
+	AbortedRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_aborted_requests_total",
+			Help: "Total number of requests aborted by the client while the response was being written",
+		},
+		[]string{"credential", "model", "endpoint"},
+	)
+
 	CredentialRPMCurrent = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_credential_rpm_current",
@@ -189,6 +197,13 @@ func (m *Metrics) RecordRequest(credential, endpoint, model string, statusCode i
 	if statusCode != 200 {
 		CredentialErrorsTotal.WithLabelValues(credential).Inc()
 	}
+}
+
+func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {
+	if !m.isEnabled() {
+		return
+	}
+	AbortedRequestsTotal.WithLabelValues(credential, model, endpoint).Inc()
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {

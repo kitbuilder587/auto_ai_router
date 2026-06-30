@@ -82,7 +82,7 @@ func (p *Proxy) orchestrateRequest(
 			apiKeyHash := litellmdb.HashToken(logCtx.Token)
 			entry, loadErr := p.responseStore.GetEntry(r.Context(), meta.PreviousResponseID, apiKeyHash)
 			if loadErr != nil {
-				p.logger.Warn("Could not load previous_response_id, proceeding without history",
+				p.logger.WarnContext(r.Context(), "Could not load previous_response_id, proceeding without history",
 					"id", meta.PreviousResponseID, "error", loadErr)
 			} else {
 				prevEntry = entry
@@ -105,7 +105,7 @@ func (p *Proxy) orchestrateRequest(
 	// updated for them; proxyBody already holds the alias and is left unchanged.
 	if cred.Type != config.ProviderTypeProxy {
 		if credRealName, hasCredReal := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); hasCredReal && credRealName != realModelID {
-			p.logger.Debug("Re-resolved real model name for credential",
+			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
 				"alias", modelID,
 				"old_real", realModelID,
 				"new_real", credRealName,
@@ -119,12 +119,12 @@ func (p *Proxy) orchestrateRequest(
 	// Auto-inject Anthropic prompt-caching markers when a session is active.
 	// This maximises cache hit rate when session-sticky routing keeps traffic on one credential.
 	if p.stickyAutoCacheCtrl &&
-		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeBedrock) &&
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeBedrock) &&
 		(logCtx.SessionID != "" || preferredCredentialName != "") {
 		body = anthropicconv.InjectCacheControl(body)
 	}
 
-	p.logger.Debug("Responses API detection",
+	p.logger.DebugContext(r.Context(), "Responses API detection",
 		"is_responses_api", isResponsesAPI,
 		"provider", cred.Type,
 		"model", modelID,
@@ -142,12 +142,12 @@ func (p *Proxy) orchestrateRequest(
 			}
 			newBody, prependErr := responses.PrependHistoryToInput(body, accInput, prevEntry.ResponseJSON.Output)
 			if prependErr != nil {
-				p.logger.Warn("Failed to prepend previous response history, ignoring",
+				p.logger.WarnContext(r.Context(), "Failed to prepend previous response history, ignoring",
 					"id", responsesMetadata.PreviousResponseID, "error", prependErr)
 			} else {
 				body = newBody
 				prevEntryHandled = true
-				p.logger.Debug("Prepended previous response history to input",
+				p.logger.DebugContext(r.Context(), "Prepended previous response history to input",
 					"previous_response_id", responsesMetadata.PreviousResponseID,
 					"output_items", len(prevEntry.ResponseJSON.Output),
 					"credential", preferredCredentialName,
@@ -169,7 +169,7 @@ func (p *Proxy) orchestrateRequest(
 			body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
 			proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
 			passthroughResponses = true
-			p.logger.Debug("Native Responses API passthrough",
+			p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 				"model", modelID, "provider", cred.Type, "streaming", streaming)
 
 		case responses.HasNativeResponsesForModel(cred.Type, realModelID):
@@ -177,14 +177,14 @@ func (p *Proxy) orchestrateRequest(
 			// Keep body in Responses API format — it will be converted by
 			// ProviderResponses.RequestFrom() in proxy.go.
 			nativeResponses = true
-			p.logger.Debug("Native Responses converter path",
+			p.logger.DebugContext(r.Context(), "Native Responses converter path",
 				"model", modelID, "provider", cred.Type, "streaming", streaming)
 
 		default:
 			// Fallback: convert to Chat Completions format so all providers work uniformly.
 			chatBody, convErr := responses.RequestToChat(body)
 			if convErr != nil {
-				p.logger.Error("Failed to convert Responses API request",
+				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request",
 					"error_code", http.StatusBadRequest,
 					"credential", cred.Name, "provider", string(cred.Type),
 					"model", modelID, "error", convErr,
@@ -210,7 +210,7 @@ func (p *Proxy) orchestrateRequest(
 			// Rewrite URL path from /v1/responses to /v1/chat/completions
 			// so passthrough providers (OpenAI, Proxy) send to the correct endpoint.
 			r.URL.Path = strings.Replace(r.URL.Path, "/responses", "/chat/completions", 1)
-			p.logger.Debug("Converted Responses API request to Chat Completions format",
+			p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",
 				"model", modelID, "streaming", streaming)
 		}
 	}
@@ -267,7 +267,7 @@ func (p *Proxy) authenticateRequest(
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		// Client-side error (bad request from the caller), not a service failure
-		p.logger.Warn("Missing Authorization header",
+		p.logger.WarnContext(r.Context(), "Missing Authorization header",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
@@ -279,7 +279,7 @@ func (p *Proxy) authenticateRequest(
 	token := strings.TrimPrefix(authHeader, "Bearer ")
 	logCtx.Token = token
 	if token == authHeader {
-		p.logger.Warn("Invalid Authorization header format",
+		p.logger.WarnContext(r.Context(), "Invalid Authorization header format",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
@@ -300,21 +300,21 @@ func (p *Proxy) authenticateRequest(
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = http.StatusUnauthorized
 
-			if p.handleLiteLLMAuthError(w, err, token) {
+			if p.handleLiteLLMAuthError(r.Context(), w, err, token) {
 				logCtx.ErrorMsg = "LiteLLM auth validation failed"
 			} else {
 				logCtx.ErrorMsg = "LiteLLM DB unavailable"
 			}
 			return false
 		} else if tokenInfo != nil {
-			p.logger.Debug("Token validated via LiteLLM DB",
+			p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
 				"user_id", tokenInfo.UserID,
 				"team_id", tokenInfo.TeamID,
 			)
 		}
 		return true
 	} else {
-		p.logger.Warn("Invalid master key",
+		p.logger.WarnContext(r.Context(), "Invalid master key",
 			"error_code", http.StatusUnauthorized,
 			"provided_key_prefix", security.MaskAPIKey(token))
 		WriteErrorUnauthorized(w, "Invalid master key")
@@ -332,7 +332,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		// Client-side transport problem while sending the body
-		p.logger.Warn("Failed to read request body",
+		p.logger.WarnContext(r.Context(), "Failed to read request body",
 			"error_code", http.StatusBadRequest, "error", err)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
@@ -341,10 +341,10 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	if closeErr := r.Body.Close(); closeErr != nil {
-		p.logger.Warn("Failed to close request body", "error", closeErr)
+		p.logger.WarnContext(r.Context(), "Failed to close request body", "error", closeErr)
 	}
 	if int64(len(body)) > maxBodyBytes {
-		p.logger.Warn("Request body exceeds max size",
+		p.logger.WarnContext(r.Context(), "Request body exceeds max size",
 			"error_code", http.StatusRequestEntityTooLarge,
 			"max_body_size_mb", p.maxBodySizeMB,
 			"actual_size_bytes", len(body),
@@ -361,7 +361,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	logCtx.SessionID = sessionID
 
 	if modelID == "" {
-		p.logger.Warn("Model not specified in request body",
+		p.logger.WarnContext(r.Context(), "Model not specified in request body",
 			"error_code", http.StatusBadRequest, "path", r.URL.Path)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
@@ -372,7 +372,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 
 	// Resolve model_alias entries (changes modelID to real name; credential lookup uses real name)
 	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
-		p.logger.Debug("Resolved model alias", "alias", modelID, "resolved", resolved)
+		p.logger.DebugContext(r.Context(), "Resolved model alias", "alias", modelID, "resolved", resolved)
 		body = openai.ReplaceModelInBody(body, modelID, resolved)
 		modelID = resolved
 		logCtx.ModelID = modelID
@@ -382,7 +382,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// for rate limiting and credential lookup.
 	realModelID := modelID
 	if realName, hasReal := p.modelManager.GetRealModelName(modelID); hasReal {
-		p.logger.Debug("Resolved model real name", "alias", modelID, "real", realName)
+		p.logger.DebugContext(r.Context(), "Resolved model real name", "alias", modelID, "real", realName)
 		body = openai.ReplaceModelInBody(body, modelID, realName)
 		realModelID = realName
 	}
@@ -402,14 +402,14 @@ func (p *Proxy) selectCredentialForModel(
 	if preferredCredentialName != "" {
 		cred, err := p.balancer.NextSpecific(preferredCredentialName, modelID)
 		if err == nil {
-			p.logger.Debug("Responses API sticky routing: using credential from previous_response_id",
+			p.logger.DebugContext(logCtx.Context(), "Responses API sticky routing: using credential from previous_response_id",
 				"credential", cred.Name,
 				"model", modelID,
 			)
 			return cred, true
 		}
 
-		p.logger.Debug("Responses API sticky routing: previous_response credential unavailable, falling back to standard selection",
+		p.logger.DebugContext(logCtx.Context(), "Responses API sticky routing: previous_response credential unavailable, falling back to standard selection",
 			"credential", preferredCredentialName,
 			"model", modelID,
 			"error", err,
@@ -420,7 +420,7 @@ func (p *Proxy) selectCredentialForModel(
 		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
 			cred, err := p.balancer.NextSpecific(credName, modelID)
 			if err == nil {
-				p.logger.Debug("Session-sticky routing: using cached credential",
+				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
 					"session_id", sessionID,
 					"credential", cred.Name,
 					"model", modelID,
@@ -428,7 +428,7 @@ func (p *Proxy) selectCredentialForModel(
 				return cred, true
 			}
 
-			p.logger.Debug("Session-sticky routing: cached credential unavailable, falling back to standard selection",
+			p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: cached credential unavailable, falling back to standard selection",
 				"session_id", sessionID,
 				"credential", credName,
 				"model", modelID,
@@ -456,7 +456,7 @@ func (p *Proxy) selectCredentialForModel(
 		errorMsg = fmt.Sprintf("No credentials available for model %s", modelID)
 	}
 
-	p.logger.Error("No credentials available (regular and fallback)",
+	p.logger.ErrorContext(logCtx.Context(), "No credentials available (regular and fallback)",
 		"error_code", errCode,
 		"model", modelID,
 		"primary_error", err,
@@ -473,7 +473,7 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-		p.logger.Warn("Failed to queue error log for no credentials",
+		p.logger.WarnContext(logCtx.Context(), "Failed to queue error log for no credentials",
 			"error", err,
 			"request_id", logCtx.RequestID,
 		)

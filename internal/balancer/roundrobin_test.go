@@ -14,8 +14,9 @@ import (
 // MockModelChecker implements ModelChecker interface for testing
 type MockModelChecker struct {
 	enabled            bool
-	credentialModels   map[string][]string // credential -> models
-	modelToCredentials map[string][]string // model -> credentials
+	credentialModels   map[string][]string       // credential -> models
+	modelToCredentials map[string][]string       // model -> credentials
+	modelWeights       map[string]map[string]int // model -> credential -> weight
 }
 
 func NewMockModelChecker(enabled bool) *MockModelChecker {
@@ -23,6 +24,7 @@ func NewMockModelChecker(enabled bool) *MockModelChecker {
 		enabled:            enabled,
 		credentialModels:   make(map[string][]string),
 		modelToCredentials: make(map[string][]string),
+		modelWeights:       make(map[string]map[string]int),
 	}
 }
 
@@ -51,6 +53,20 @@ func (m *MockModelChecker) GetCredentialsForModel(modelID string) []string {
 	return m.modelToCredentials[modelID]
 }
 
+func (m *MockModelChecker) GetModelWeightForCredential(modelID, credentialName string) int {
+	if creds, ok := m.modelWeights[modelID]; ok {
+		return creds[credentialName]
+	}
+	return 0
+}
+
+func (m *MockModelChecker) SetModelWeight(modelID, credentialName string, weight int) {
+	if m.modelWeights[modelID] == nil {
+		m.modelWeights[modelID] = make(map[string]int)
+	}
+	m.modelWeights[modelID][credentialName] = weight
+}
+
 func (m *MockModelChecker) IsEnabled() bool {
 	return m.enabled
 }
@@ -73,7 +89,7 @@ func TestNew(t *testing.T) {
 
 	assert.NotNil(t, bal)
 	assert.Len(t, bal.credentials, 2)
-	assert.Equal(t, 0, bal.current)
+	assert.Empty(t, bal.swrr)
 }
 
 func TestNextForModel_WithModelFilter(t *testing.T) {
@@ -1335,4 +1351,31 @@ func TestUpdateDBCredentials(t *testing.T) {
 	// DB credentials should be registered in the rate limiter with TPM defaulting to -1 when 0.
 	assert.True(t, bal.rateLimiter.AllowTokens("db-1"), "TPM=0 should be treated as unlimited")
 	assert.True(t, bal.rateLimiter.AllowTokens("db-2"))
+}
+
+func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	staticCreds := []config.CredentialConfig{
+		{Name: "yaml-1", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1, Weight: 2},
+		{Name: "yaml-2", APIKey: "key2", BaseURL: "http://test2.com", RPM: -1, Weight: 1},
+	}
+	bal := New(staticCreds, f2b, rl)
+
+	_, err := bal.NextForModel("")
+	require.NoError(t, err)
+
+	state := bal.swrr[schedKey{}]
+	require.NotNil(t, state)
+	beforeYAML1 := state.currentOf("yaml-1")
+	beforeYAML2 := state.currentOf("yaml-2")
+
+	bal.UpdateDBCredentials([]config.CredentialConfig{
+		{Name: "db-1", APIKey: "dbkey1", BaseURL: "http://db1.com", RPM: -1},
+	})
+
+	assert.Same(t, state, bal.swrr[schedKey{}], "DB sync should not reset existing SWRR cycles")
+	assert.Equal(t, beforeYAML1, state.currentOf("yaml-1"))
+	assert.Equal(t, beforeYAML2, state.currentOf("yaml-2"))
 }

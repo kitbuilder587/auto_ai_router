@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
@@ -47,6 +48,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			BaseURL:    cleanBaseURL(cred.BaseURL),
 			IsFallback: cred.IsFallback,
 			IsBanned:   isBanned,
+			Weight:     balancer.EffectiveWeight(0, cred.Weight),
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
 			LimitRPM:   limitRPM,
@@ -61,15 +63,18 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// This includes duplicates when same model is available from different credentials
 	allTrackedModels := p.rateLimiter.GetAllModelPairs()
 	for _, pair := range allTrackedModels {
-		modelKey := pair.Credential + ":" + pair.Model
-		modelsInfo[modelKey] = httputil.ModelHealthStats{
-			Credential: pair.Credential,
-			Model:      pair.Model,
-			IsBanned:   p.balancer.IsBanned(pair.Credential, pair.Model),
-			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
-			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
-			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),
-			LimitTPM:   p.rateLimiter.GetModelLimitTPM(pair.Credential, pair.Model),
+		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model)
+	}
+
+	if p.modelManager != nil {
+		for _, cred := range creds {
+			for _, model := range p.modelManager.GetModelsForCredential(cred.Name) {
+				modelKey := cred.Name + ":" + model.ID
+				if _, ok := modelsInfo[modelKey]; ok {
+					continue
+				}
+				p.addModelHealthStats(modelsInfo, creds, cred.Name, model.ID)
+			}
 		}
 	}
 
@@ -136,6 +141,39 @@ func cleanBaseURL(raw string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return strings.TrimRight(u.String(), "/")
+}
+
+func (p *Proxy) addModelHealthStats(
+	modelsInfo map[string]httputil.ModelHealthStats,
+	creds []config.CredentialConfig,
+	credentialName string,
+	modelID string,
+) {
+	modelKey := credentialName + ":" + modelID
+	credWeight := credentialWeight(creds, credentialName)
+	modelWeight := 0
+	if p.modelManager != nil {
+		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
+	}
+	modelsInfo[modelKey] = httputil.ModelHealthStats{
+		Credential: credentialName,
+		Model:      modelID,
+		IsBanned:   p.balancer.IsBanned(credentialName, modelID),
+		Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
+		CurrentRPM: p.rateLimiter.GetCurrentModelRPM(credentialName, modelID),
+		CurrentTPM: p.rateLimiter.GetCurrentModelTPM(credentialName, modelID),
+		LimitRPM:   p.rateLimiter.GetModelLimitRPM(credentialName, modelID),
+		LimitTPM:   p.rateLimiter.GetModelLimitTPM(credentialName, modelID),
+	}
+}
+
+func credentialWeight(creds []config.CredentialConfig, credentialName string) int {
+	for _, cred := range creds {
+		if cred.Name == credentialName {
+			return cred.Weight
+		}
+	}
+	return 0
 }
 
 // VisualHealthCheck serves the static health dashboard HTML.

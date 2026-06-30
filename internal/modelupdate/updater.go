@@ -93,7 +93,27 @@ func UpdateAllProxyCredentials(
 
 		// Update rate limiter and model manager with fetched models
 		addedCount := 0
+		modelIDs := make([]string, 0, len(result.models))
+		modelIDSet := make(map[string]bool, len(result.models))
+		for _, model := range result.models {
+			if model.ID == "" || modelIDSet[model.ID] {
+				continue
+			}
+			modelIDSet[model.ID] = true
+			modelIDs = append(modelIDs, model.ID)
+		}
+
 		updateMutex.Lock()
+		modelManager.ReplaceModelsForCredential(result.credential.Name, modelIDs)
+		for _, pair := range rateLimiter.GetAllModelPairs() {
+			if pair.Credential != result.credential.Name || modelIDSet[pair.Model] {
+				continue
+			}
+			if modelManager.HasModel(pair.Credential, pair.Model) {
+				continue
+			}
+			rateLimiter.RemoveModel(pair.Credential, pair.Model)
+		}
 		for _, model := range result.models {
 			// Get default RPM/TPM from model manager
 			modelRPM := modelManager.GetModelRPMForCredential(model.ID, result.credential.Name)
@@ -101,11 +121,6 @@ func UpdateAllProxyCredentials(
 
 			// AddModelWithTPM handles duplicates internally (overwrites existing)
 			rateLimiter.AddModelWithTPM(result.credential.Name, model.ID, modelRPM, modelTPM)
-
-			// Register model in manager so HasModel() returns true for this credential.
-			// Without this the balancer's model checker always rejects proxy credentials
-			// because modelToCredentials is only populated at startup via GetAllModels().
-			modelManager.AddModel(result.credential.Name, model.ID)
 			addedCount++
 		}
 		updateMutex.Unlock()

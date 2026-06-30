@@ -9,6 +9,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	openaiconv "github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 )
@@ -111,8 +112,8 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 				c.inputTexts = texts
 			}
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
-		case config.ProviderTypeAnthropic:
-			return nil, errors.New("anthropic does not support embeddings")
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+			return nil, errors.New(string(c.providerType) + " does not support embeddings")
 		case config.ProviderTypeBedrock:
 			return nil, errors.New("bedrock does not support embeddings")
 		default:
@@ -123,10 +124,10 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
-	case config.ProviderTypeAnthropic:
-		// Anthropic does not support image generation
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+		// Anthropic-compatible providers do not support image generation
 		if c.mode.IsImageGeneration {
-			return nil, errors.New("anthropic does not support image generation")
+			return nil, errors.New(string(c.providerType) + " does not support image generation")
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID)
 	case config.ProviderTypeBedrock:
@@ -191,7 +192,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 			return vertex.VertexImageToOpenAI(body)
 		}
 		return vertex.VertexToOpenAI(body, c.mode.responseModel())
-	case config.ProviderTypeAnthropic:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
 		return anthropic.AnthropicToOpenAI(body, c.mode.responseModel())
 	case config.ProviderTypeBedrock:
 		if isAnthropicBedrockModel(c.mode.ModelID) {
@@ -213,7 +214,7 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.responseModel(), writer)
-	case config.ProviderTypeAnthropic:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
 		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.responseModel(), writer)
 	case config.ProviderTypeBedrock:
 		// Bedrock uses AWS Event Stream binary framing instead of SSE.
@@ -272,9 +273,8 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 			return vertex.BuildGeminiImageURL(cred, c.mode.ModelID)
 		}
 		return vertex.BuildGeminiURL(cred, c.mode.ModelID, c.mode.IsStreaming)
-	case config.ProviderTypeAnthropic:
-		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-		return baseURL + "/v1/messages"
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+		return converterutil.BuildVersionedURL(cred.BaseURL, "/v1/messages")
 	case config.ProviderTypeBedrock:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
 		if c.mode.IsStreaming {
@@ -341,9 +341,10 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens,omitempty"`
-				AudioTokens  int `json:"audio_tokens,omitempty"`
-				TextTokens   int `json:"text_tokens,omitempty"`
+				CachedTokens        int `json:"cached_tokens,omitempty"`
+				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+				AudioTokens         int `json:"audio_tokens,omitempty"`
+				TextTokens          int `json:"text_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -390,6 +391,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	if cachedTokens == 0 {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
+	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
 	if audioIn == 0 {
 		audioIn = resp.Usage.InputTokensDetails.AudioTokens
@@ -424,6 +426,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		PromptTokens:             promptTokens,
 		CompletionTokens:         completionTokens,
 		CachedInputTokens:        cachedTokens,
+		CacheCreationTokens:      cacheCreationTokens,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              resp.Usage.InputTokensDetails.ImageTokens,
 		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,

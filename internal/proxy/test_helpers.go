@@ -283,6 +283,7 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 			"remote_cred_1": {
 				Type:       "openai",
 				IsFallback: false,
+				Weight:     3,
 				LimitRPM:   100,
 				LimitTPM:   1000,
 				CurrentRPM: 25,
@@ -291,6 +292,7 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 			"remote_cred_2": {
 				Type:       "openai",
 				IsFallback: false,
+				Weight:     2,
 				LimitRPM:   200,
 				LimitTPM:   2000,
 				CurrentRPM: 20,
@@ -301,6 +303,7 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 			"gpt4_cred1": {
 				Credential: "remote_cred_1",
 				Model:      "gpt-4",
+				Weight:     5,
 				LimitRPM:   50,
 				LimitTPM:   500,
 				CurrentRPM: 10,
@@ -309,6 +312,7 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 			"gpt4_cred2": {
 				Credential: "remote_cred_2",
 				Model:      "gpt-4",
+				Weight:     7,
 				LimitRPM:   100,
 				LimitTPM:   1000,
 				CurrentRPM: 15,

@@ -11,7 +11,7 @@ import (
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string) {
 	if resp == nil {
 		return
 	}
@@ -21,7 +21,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	acceptedEncodings := ParseAcceptEncoding(acceptEncoding)
 	targetEncoding := SelectBestEncoding(acceptedEncodings)
 
-	p.logger.Debug("Proxy response encoding decision",
+	p.logger.DebugContext(clientReq.Context(), "Proxy response encoding decision",
 		"accept_encoding_header", acceptEncoding,
 		"target_encoding", targetEncoding,
 		"body_size", len(resp.Body),
@@ -34,13 +34,13 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if targetEncoding != "identity" && len(resp.Body) > 0 {
 		compressedBody, usedEncoding, err := CompressBody(resp.Body, targetEncoding)
 		if err != nil {
-			p.logger.Warn("Failed to compress response body",
+			p.logger.WarnContext(clientReq.Context(), "Failed to compress response body",
 				"encoding", targetEncoding,
 				"error", err,
 			)
 			// Continue with uncompressed body on error
 		} else {
-			p.logger.Debug("Response body compressed",
+			p.logger.DebugContext(clientReq.Context(), "Response body compressed",
 				"encoding", usedEncoding,
 				"original_size", len(resp.Body),
 				"compressed_size", len(compressedBody),
@@ -75,9 +75,10 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(responseBody); err != nil {
 		if isClientDisconnectError(err) {
-			p.logger.Debug("Client disconnected during proxy response write", "error", err)
+			p.logger.DebugContext(clientReq.Context(), "Client disconnected during proxy response write", "error", err)
+			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		} else {
-			p.logger.Error("Failed to write proxy response body", "error", err)
+			p.logger.ErrorContext(clientReq.Context(), "Failed to write proxy response body", "error", err)
 		}
 	}
 }
@@ -90,13 +91,15 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	resp *ProxyResponse,
 	clientReq *http.Request,
 	credName string,
+	modelID string,
+	tokenizerModelID string,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
 	}
 	defer func() {
 		if closeErr := resp.StreamBody.Close(); closeErr != nil {
-			p.logger.Warn("Failed to close proxy streaming response body", "error", closeErr)
+			p.logger.WarnContext(clientReq.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 		}
 	}()
 
@@ -119,37 +122,56 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	var completionChars int
+	completion := newCompletionTokenAccumulator(tokenizerModelID)
 	onChunk := func(chunk []byte) {
 		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
 			lastUsage = usage
 		}
-		completionChars += extractCompletionDeltaChars(chunk)
+		completion.AddChunk(chunk)
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {
 		if lastUsage != nil {
 			return lastUsage
 		}
-		if completionChars > 0 {
-			return &converter.TokenUsage{CompletionTokens: (completionChars + 3) / 4}
+		if tokens := completion.TokenCount(); tokens > 0 {
+			return &converter.TokenUsage{CompletionTokens: tokens}
 		}
 		return nil
 	}
 
 	if _, ok := w.(http.Flusher); ok {
-		err := p.streamToClient(w, resp.StreamBody, credName, onChunk, nil)
+		err := p.streamToClient(
+			clientReq.Context(),
+			w,
+			resp.StreamBody,
+			credName,
+			modelID,
+			endpointFromRequest(clientReq),
+			onChunk,
+			nil,
+		)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
 			drainCtx, cancel := context.WithTimeout(context.Background(), streamDrainTimeout)
 			defer cancel()
-			p.drainUpstream(drainCtx, resp.StreamBody, onChunk, credName)
+
+			p.drainUpstream(
+				drainCtx,
+				resp.StreamBody,
+				onChunk,
+				credName,
+			)
 		}
+
 		return buildFallbackUsage(), err
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
 	if _, err := io.Copy(w, resp.StreamBody); err != nil {
+		if isClientDisconnectError(err) {
+			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
+		}
 		return buildFallbackUsage(), err
 	}
 	return buildFallbackUsage(), nil

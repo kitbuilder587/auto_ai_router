@@ -8,6 +8,7 @@ Auto AI Router supports multiple LLM providers. Each provider type has its own a
 | ----------------------------- | ----------- | ------------------------------------------------------------------ | ------------------------ |
 | [OpenAI](openai.md)           | `openai`    | `api_key`, `base_url`                                              | API Key                  |
 | [Anthropic](anthropic.md)     | `anthropic` | `api_key`, `base_url`                                              | API Key                  |
+| [Comet API](cometapi.md)      | `cometapi`  | `api_key`, `base_url`                                              | API Key                  |
 | [AWS Bedrock](bedrock.md)     | `bedrock`   | `api_key`, `base_url`                                              | Bearer Token             |
 | [Vertex AI](vertex.md)        | `vertex-ai` | `project_id`, `location`, `credentials_file` or `credentials_json` | OAuth2 / Service Account |
 | [Gemini AI Studio](gemini.md) | `gemini`    | `api_key`, `base_url`                                              | API Key                  |
@@ -17,9 +18,10 @@ Auto AI Router supports multiple LLM providers. Each provider type has its own a
 
 All credential types share these fields:
 
-| Field         | Type   | Description                                     |
-| ------------- | ------ | ----------------------------------------------- |
-| `name`        | string | Unique identifier for this credential           |
-| `rpm`         | int    | Requests per minute limit (-1 = unlimited)      |
-| `tpm`         | int    | Tokens per minute limit (-1 = unlimited)        |
-| `is_fallback` | bool   | Use only when primary credentials are exhausted |
+| Field         | Type   | Description                                      |
+| ------------- | ------ | ------------------------------------------------ |
+| `name`        | string | Unique identifier for this credential            |
+| `rpm`         | int    | Requests per minute limit (-1 = unlimited)       |
+| `tpm`         | int    | Tokens per minute limit (-1 = unlimited)         |
+| `auth_type`   | string | Optional auth override (`bearer` or `x-api-key`) |
+| `is_fallback` | bool   | Use only when primary credentials are exhausted  |

@@ -88,6 +88,25 @@ func TestRecordRequest_MultipleCredentials(t *testing.T) {
 	assert.Greater(t, count, 0)
 }
 
+func TestRecordAbortedRequest_Enabled(t *testing.T) {
+	AbortedRequestsTotal.Reset()
+
+	m := New(true)
+	m.RecordAbortedRequest("cred1", "/v1/chat/completions", "gpt-4o")
+	m.RecordAbortedRequest("cred1", "/v1/chat/completions", "gpt-4o")
+
+	assert.Equal(t, 2.0, testutil.ToFloat64(AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))
+}
+
+func TestRecordAbortedRequest_Disabled(t *testing.T) {
+	AbortedRequestsTotal.Reset()
+
+	m := New(false)
+	m.RecordAbortedRequest("cred1", "/v1/chat/completions", "gpt-4o")
+
+	assert.Equal(t, 0.0, testutil.ToFloat64(AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))
+}
+
 func TestUpdateCredentialRPM(t *testing.T) {
 	CredentialRPMCurrent.Reset()
 
@@ -417,6 +436,7 @@ func TestMetrics_AllPrometheusRegistration(t *testing.T) {
 	metrics := []prometheus.Collector{
 		RequestsTotal,
 		RequestDuration,
+		AbortedRequestsTotal,
 		CredentialRPMCurrent,
 		CredentialTPMCurrent,
 		CredentialBanned,

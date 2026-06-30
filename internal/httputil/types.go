@@ -16,6 +16,7 @@ type CredentialHealthStats struct {
 	BaseURL           string      `json:"base_url,omitempty"`
 	IsFallback        bool        `json:"is_fallback"`
 	IsBanned          bool        `json:"is_banned"`
+	Weight            int         `json:"weight"`
 	CurrentRPM        int         `json:"current_rpm"`
 	CurrentTPM        int         `json:"current_tpm"`
 	LimitRPM          int         `json:"limit_rpm"`
@@ -28,9 +29,22 @@ type ModelHealthStats struct {
 	Credential      string      `json:"credential"`
 	Model           string      `json:"model"`
 	IsBanned        bool        `json:"is_banned"`
+	Weight          int         `json:"weight"`
 	CurrentRPM      int         `json:"current_rpm"`
 	CurrentTPM      int         `json:"current_tpm"`
 	LimitRPM        int         `json:"limit_rpm"`
 	LimitTPM        int         `json:"limit_tpm"`
 	ErrorCodeCounts map[int]int `json:"error_code_counts,omitempty"` // error code -> count when banned
+}
+
+// EffectiveHealthWeight resolves the health weight fallback chain:
+// model-level override, then credential default, then 1.
+func EffectiveHealthWeight(modelStats ModelHealthStats, credStats CredentialHealthStats) int {
+	if modelStats.Weight > 0 {
+		return modelStats.Weight
+	}
+	if credStats.Weight > 0 {
+		return credStats.Weight
+	}
+	return 1
 }

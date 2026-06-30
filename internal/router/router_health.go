@@ -22,7 +22,7 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 
 	if err := json.NewEncoder(w).Encode(status); err != nil {
 		if r.logger != nil {
-			r.logger.Error("Failed to encode health response",
+			r.logger.ErrorContext(req.Context(), "Failed to encode health response",
 				"endpoint", "/health",
 				"error", err.Error(),
 			)
@@ -69,7 +69,7 @@ func (r *Router) handleReadiness(w http.ResponseWriter, req *http.Request) {
 
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		if r.logger != nil {
-			r.logger.Error("Failed to encode readiness response",
+			r.logger.ErrorContext(req.Context(), "Failed to encode readiness response",
 				"endpoint", "/health/readiness",
 				"error", err.Error(),
 			)

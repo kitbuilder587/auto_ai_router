@@ -9,6 +9,7 @@ server:
   max_idle_conns: 200  # Maximum idle connections (default: 200)
   max_idle_conns_per_host: 20  # Maximum idle connections per host (default: 20)
   logging_level: info  # Options: info, debug, error (default: info)
+  stdout_logs_enabled: true  # Write logs to stdout (default: true); set false to ship logs only via OTEL
   master_key: "sk-your-master-key-here"  # Required: Master key for authentication
   default_models_rpm: -1  # Default RPM limit for models (-1 for unlimited, default: -1)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
@@ -28,6 +29,21 @@ monitoring:
   log_errors: false
   errors_log_path: "logs/logs.jsonl"
 
+# OpenTelemetry export (logs + distributed traces), disabled by default
+otel:
+  enabled: false
+  endpoint: "localhost:4317"  # OTLP collector: host:port for grpc, host:port or URL for http (defaults: 4317 grpc / 4318 http)
+  protocol: "grpc"  # grpc | http (http/protobuf)
+  insecure: true  # Disable TLS for the exporter connection (default: true)
+  service_name: "auto-ai-router"  # Reported as service.name resource attribute
+  logs_enabled: true  # Ship slog records via OTLP in addition to stdout
+  traces_enabled: true  # Server/client spans + traceparent propagation to providers and chained routers
+  metric_export_interval: 60s  # OTLP metric push interval. When otel.enabled is true, metrics are always pushed via OTLP (bridged from the Prometheus registry), independently of the pull-based /metrics endpoint (which is gated by monitoring.prometheus_enabled).
+  trace_sample_ratio: 1.0  # Head sampling ratio [0.0-1.0], parent-based
+  trust_incoming_traceparent: true  # Adopt the caller's traceparent so spans nest under it (e.g. a LiteLLM proxy with forward_traceparent_to_llm_provider: true). Set false for standalone/public-facing setups to ignore client trace context and start a fresh root span.
+  # headers:  # Optional headers for OTLP requests (supports os.environ/VAR_NAME)
+  #   Authorization: "os.environ/OTEL_AUTH_HEADER"
+
 credentials:
   # Direct provider credentials
   - name: "openai_main"
@@ -36,6 +52,7 @@ credentials:
     base_url: "https://api.openai.com"
     rpm: 100
     tpm: 50000
+    weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md
 
   - name: "vertex_ai"
     type: "vertex-ai"
@@ -49,6 +66,23 @@ credentials:
     type: "gemini"
     api_key: "os.environ/GEMINI_API_KEY"
     base_url: "https://generativelanguage.googleapis.com"
+    rpm: 60
+    tpm: -1
+
+  # Comet API using the Anthropic-compatible Messages API
+  - name: "comet_anthropic"
+    type: "cometapi"
+    api_key: "os.environ/COMET_API_KEY"
+    base_url: "https://api.cometapi.com/v1"
+    rpm: 60
+    tpm: -1
+
+  # CheapGPT / AIProductiv using the Anthropic-compatible Messages API
+  - name: "cheapgpt_anthropic"
+    type: "anthropic"
+    api_key: "os.environ/CHEAPGPT_API_KEY"
+    auth_type: "bearer"
+    base_url: "https://api.aiproductiv.ru/v1"
     rpm: 60
     tpm: -1
 
@@ -67,10 +101,123 @@ models:
     credential: openai_main
     rpm: 100
     tpm: 50000
+    weight: 200  # Optional: per-model weight override (falls back to credential weight, then 1)
   - name: "gemini-2.5-pro"
     credential: vertex_ai
     rpm: 100
     tpm: 50000
+
+  # Comet API Claude aliases for public model names.
+  - name: "anthropic/claude-haiku-4.5"
+    model: "claude-haiku-4-5-20251001"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-haiku-4.5"
+    model: "claude-haiku-4-5-20251001"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-haiku-4-5-20251001"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.1"
+    model: "claude-opus-4-1-20250805"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4.1"
+    model: "claude-opus-4-1-20250805"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-1-20250805"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.5"
+    model: "claude-opus-4-5-20251101"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4.5"
+    model: "claude-opus-4-5-20251101"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-5-20251101"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.6"
+    model: "claude-opus-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-opus-4.7"
+    model: "claude-opus-4-7"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-opus-4-7"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-sonnet-4"
+    model: "claude-sonnet-4-20250514"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4"
+    model: "claude-sonnet-4-20250514"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-sonnet-4.5"
+    model: "claude-sonnet-4-5-20250929"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4.5"
+    model: "claude-sonnet-4-5-20250929"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4-5-20250929"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4-5"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "anthropic/claude-sonnet-4.6"
+    model: "claude-sonnet-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+  - name: "claude-sonnet-4-6"
+    credential: comet_anthropic
+    rpm: 60
+    tpm: -1
+
+  - name: "cheapgpt/claude-sonnet-4.5"
+    model: "claude-sonnet-4-5"
+    credential: cheapgpt_anthropic
+    rpm: 60
+    tpm: -1
 
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
@@ -81,4 +82,61 @@ func DecodeBase64(encoded string) []byte {
 		return nil
 	}
 	return decoded
+}
+
+// BuildVersionedURL joins a provider base URL and API path without duplicating
+// a leading version segment such as /v1 when the base URL already includes it.
+func BuildVersionedURL(baseURL, apiPath string) string {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	if apiPath == "" {
+		return baseURL
+	}
+	if apiPath[0] != '/' {
+		apiPath = "/" + apiPath
+	}
+
+	if baseVersion := versionSuffix(baseURL); baseVersion != "" {
+		if pathVersion := versionPrefix(apiPath); pathVersion == baseVersion {
+			apiPath = strings.TrimPrefix(apiPath, pathVersion)
+			if apiPath == "" {
+				return baseURL
+			}
+		}
+	}
+
+	return baseURL + apiPath
+}
+
+func versionSuffix(baseURL string) string {
+	idx := strings.LastIndex(baseURL, "/")
+	if idx < 0 {
+		return ""
+	}
+	return versionSegment(baseURL[idx:])
+}
+
+func versionPrefix(path string) string {
+	if len(path) < 3 || path[0] != '/' {
+		return ""
+	}
+	i := 2
+	for i < len(path) && path[i] >= '0' && path[i] <= '9' {
+		i++
+	}
+	if i == 2 || (i < len(path) && path[i] != '/') {
+		return ""
+	}
+	return versionSegment(path[:i])
+}
+
+func versionSegment(segment string) string {
+	if len(segment) < 3 || segment[0] != '/' || segment[1] != 'v' {
+		return ""
+	}
+	for _, c := range segment[2:] {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return segment
 }

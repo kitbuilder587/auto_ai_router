@@ -83,6 +83,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"write_timeout", cfg.Server.WriteTimeout.String(),
 		"idle_timeout", cfg.Server.IdleTimeout.String(),
 		"logging_level", cfg.Server.LoggingLevel,
+		"stdout_logs_enabled", cfg.Server.StdoutLogsEnabled,
 		"master_key", "***REDACTED***",
 		"default_models_rpm", rpmToString(cfg.Server.DefaultModelsRPM),
 		"max_idle_conns", cfg.Server.MaxIdleConns,
@@ -120,6 +121,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"name":        cred.Name,
 			"type":        cred.Type,
 			"base_url":    cred.BaseURL,
+			"auth_type":   cred.AuthType,
 			"rpm":         rpmToString(cred.RPM),
 			"tpm":         tpmToString(cred.TPM),
 			"is_fallback": cred.IsFallback,
@@ -186,6 +188,21 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		logger.Info("litellm_db", "status", "DISABLED")
 	}
 
+	// OTEL config
+	if cfg.OTEL.Enabled {
+		logger.Info("otel (ENABLED)",
+			"endpoint", cfg.OTEL.Endpoint,
+			"protocol", cfg.OTEL.Protocol,
+			"insecure", cfg.OTEL.Insecure,
+			"service_name", cfg.OTEL.ServiceName,
+			"logs_enabled", cfg.OTEL.LogsEnabled,
+			"traces_enabled", cfg.OTEL.TracesEnabled,
+			"trace_sample_ratio", cfg.OTEL.TraceSampleRatio,
+		)
+	} else {
+		logger.Info("otel", "status", "DISABLED")
+	}
+
 	logger.Info("=== Configuration Ready ===")
 }
 
@@ -218,7 +235,7 @@ func banDurationToString(d time.Duration) string {
 func convertMapToArgs(m map[string]any) []any {
 	// Define preferred order of keys
 	keyOrder := []string{
-		"name", "type", "base_url", "api_key", "project_id", "location",
+		"name", "type", "base_url", "auth_type", "api_key", "project_id", "location",
 		"credentials_file", "credentials_json", "rpm", "tpm", "is_fallback",
 	}
 

@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -372,6 +374,51 @@ func TestHandleTrace_DepthParam_Missing(t *testing.T) {
 // ============================================================================
 // HandleVisualTrace HTTP handler tests
 // ============================================================================
+
+// TestTraceCheck_MultipleUpstreams_Parallel verifies that multiple proxy credentials
+// are fetched concurrently. Each upstream introduces a 100ms delay; with sequential
+// fetching 3 upstreams would take ≥300ms, but parallel fetching finishes in ~100ms.
+func TestTraceCheck_MultipleUpstreams_Parallel(t *testing.T) {
+	const upstreamDelay = 100 * time.Millisecond
+	const numUpstreams = 3
+
+	makeSlowUpstream := func(routerID string) *httptest.Server {
+		return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(upstreamDelay)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(httputil.ProxyTraceResponse{RouterID: routerID, Status: "healthy"})
+		}))
+	}
+
+	servers := make([]*httptest.Server, numUpstreams)
+	creds := make([]config.CredentialConfig, numUpstreams)
+	for i := range servers {
+		routerID := fmt.Sprintf("upstream-%d", i)
+		servers[i] = makeSlowUpstream(routerID)
+		defer servers[i].Close()
+		creds[i] = proxyCredential(fmt.Sprintf("up-%d", i), servers[i].URL)
+	}
+
+	prx := buildTraceProxy("router-parallel", creds...)
+
+	start := time.Now()
+	result := prx.TraceCheck(context.Background(), 1)
+	elapsed := time.Since(start)
+
+	// Sequential would take ≥ numUpstreams * upstreamDelay; parallel takes ~upstreamDelay.
+	maxParallelDuration := upstreamDelay * 2 // generous upper bound
+	assert.Less(t, elapsed, maxParallelDuration,
+		"trace of %d upstreams each taking %v must finish faster than sequential (%v total, got %v)",
+		numUpstreams, upstreamDelay, time.Duration(numUpstreams)*upstreamDelay, elapsed)
+
+	require.NotNil(t, result.Upstreams)
+	assert.Len(t, result.Upstreams, numUpstreams, "all upstreams must appear in result")
+	for i := range creds {
+		key := fmt.Sprintf("up-%d", i)
+		assert.Contains(t, result.Upstreams, key)
+		assert.Empty(t, result.Upstreams[key].FetchError)
+	}
+}
 
 // TestHandleVisualTrace_HTML verifies that HandleVisualTrace responds with HTTP 200,
 // Content-Type text/html, and a non-empty body.

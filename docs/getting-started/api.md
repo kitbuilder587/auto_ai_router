@@ -48,7 +48,7 @@ print(response.choices[0].message.content)
 
 ## Responses API
 
-The router supports the [OpenAI Responses API](../advanced/responses.md) with native provider integration for Anthropic, Vertex AI, and AWS Bedrock.
+The router supports the [OpenAI Responses API](../advanced/responses.md) with native provider integration for Anthropic, Comet API, Vertex AI, and AWS Bedrock.
 
 ```bash
 curl -X POST http://localhost:8080/v1/responses \

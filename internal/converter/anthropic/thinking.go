@@ -2,6 +2,8 @@ package anthropic
 
 import "strings"
 
+const minTextTokensWithThinking = 1024
+
 // mapThinkingConfig maps OpenAI thinking / reasoning_effort parameters to an Anthropic
 // ThinkingConfig (and optional OutputConfig for Claude 4+ adaptive thinking).
 //
@@ -78,6 +80,19 @@ func appendBetaUnique(slice []string, s string) []string {
 // that only have an effort string and model name, without a raw thinking param.
 func MapThinkingConfigFromEffort(effort, modelName string) (*AnthropicThinking, *AnthropicOutputConfig) {
 	return mapThinkingConfig(nil, effort, modelName)
+}
+
+// EnsureMaxTokensForThinking raises max_tokens when legacy thinking uses a
+// budget_tokens value. Anthropic requires max_tokens to be greater than the
+// thinking budget; otherwise the provider rejects the request before generation.
+func EnsureMaxTokensForThinking(maxTokens int, thinking *AnthropicThinking) int {
+	if thinking == nil || thinking.Type != "enabled" || thinking.BudgetTokens <= 0 {
+		return maxTokens
+	}
+	if maxTokens > thinking.BudgetTokens {
+		return maxTokens
+	}
+	return thinking.BudgetTokens + minTextTokensWithThinking
 }
 
 // isAdaptiveThinkingModel reports whether the model uses the Claude 4+ adaptive thinking API
