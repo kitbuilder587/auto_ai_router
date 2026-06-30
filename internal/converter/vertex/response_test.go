@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -44,6 +45,65 @@ func TestConvertVertexUsageMetadata_WithThoughtsTokens(t *testing.T) {
 	}
 	if usage.CompletionTokensDetails.ReasoningTokens != 200 {
 		t.Fatalf("expected ReasoningTokens = 200, got %d", usage.CompletionTokensDetails.ReasoningTokens)
+	}
+}
+
+func TestVertexToOpenAI_ImageUsesChatImageURLShape(t *testing.T) {
+	vertexResp := genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Parts: []*genai.Part{
+						{Text: "created"},
+						{InlineData: &genai.Blob{Data: []byte("img"), MIMEType: "image/png"}},
+					},
+				},
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     12,
+			CandidatesTokenCount: 1183,
+			ThoughtsTokenCount:   12,
+		},
+	}
+
+	vertexBytes, err := json.Marshal(vertexResp)
+	if err != nil {
+		t.Fatalf("marshal vertex response: %v", err)
+	}
+
+	resultBytes, err := VertexToOpenAI(vertexBytes, "gemini-3-pro-image-preview")
+	if err != nil {
+		t.Fatalf("VertexToOpenAI error: %v", err)
+	}
+
+	var openAIResp openai.OpenAIResponse
+	if err := json.Unmarshal(resultBytes, &openAIResp); err != nil {
+		t.Fatalf("unmarshal OpenAI response: %v", err)
+	}
+
+	if len(openAIResp.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(openAIResp.Choices))
+	}
+	images := openAIResp.Choices[0].Message.Images
+	if len(images) != 1 {
+		t.Fatalf("expected 1 image, got %d", len(images))
+	}
+	image := images[0]
+	if image.Type != "image_url" {
+		t.Fatalf("expected image type image_url, got %q", image.Type)
+	}
+	if image.Index == nil || *image.Index != 0 {
+		t.Fatalf("expected image index 0, got %v", image.Index)
+	}
+	if image.ImageURL == nil || image.ImageURL.URL != "data:image/png;base64,aW1n" {
+		t.Fatalf("unexpected image_url: %+v", image.ImageURL)
+	}
+	if image.B64JSON != "" {
+		t.Fatalf("chat images must not use b64_json, got %q", image.B64JSON)
+	}
+	if strings.Contains(string(resultBytes), `"b64_json"`) {
+		t.Fatalf("chat response must not contain b64_json: %s", string(resultBytes))
 	}
 }
 
