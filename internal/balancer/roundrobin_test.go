@@ -1016,6 +1016,23 @@ func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
 	assert.Equal(t, "openai-b", cred.Name)
 }
 
+func TestNextRetryForModelExcluding_FallbackPrioritySkipsFallbackCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, FallbackPriority: 10},
+		{Name: "reserve", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://b.com", RPM: 100, IsFallback: true, FallbackPriority: 20},
+		{Name: "primary-b", Type: config.ProviderTypeBedrock, APIKey: "key3", BaseURL: "http://c.com", RPM: 100, FallbackPriority: 30},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"primary-a": true})
+	require.NoError(t, err)
+	assert.Equal(t, "primary-b", cred.Name)
+}
+
 func TestNextForModelExcluding_WithModelChecker(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()

@@ -110,8 +110,9 @@ stays within the same provider type: if an OpenAI credential returns `429` or `5
 tries another OpenAI credential for the same model.
 
 Set `fallback_priority` when the retry order must be explicit and may cross provider types.
-Lower numbers are tried first. The field is not tied to `is_fallback: true`: it can be set on
-regular primary credentials as well as reserve credentials.
+Lower numbers are tried first after the initially selected credential returns a retryable error.
+The field is applied to regular primary credentials; `is_fallback: true` credentials stay reserved
+for the fallback phase.
 
 ```yaml
 credentials:
@@ -143,8 +144,8 @@ has a credential-specific real model mapping, the router re-resolves the model b
 the retry request, so an Anthropic model alias can safely move to a Bedrock grant credential.
 
 If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved.
-Fallback proxy credentials (`is_fallback: true`) are still used only by the proxy-chain fallback
-mechanism. See [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
+Fallback credentials (`is_fallback: true`) are still used only by the fallback mechanism.
+See [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
 
 ## Proxy Chain Fallback
 

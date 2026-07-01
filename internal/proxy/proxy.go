@@ -851,6 +851,28 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					"model", modelID, "attempt", attempt, "error", err)
 				break
 			}
+			nextReq, prepErr := p.prepareRequestForCredential(
+				r,
+				prepared.baseBody,
+				prepared.baseProxyBody,
+				modelID,
+				prepared.baseRealModelID,
+				prepared.basePath,
+				streaming,
+				nextCred,
+				prepared.isResponsesAPI,
+				prepared.responsesPrevHandled,
+				prepared.stickyCacheEligible,
+			)
+			if prepErr != nil {
+				p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
+					"credential", nextCred.Name,
+					"provider", string(nextCred.Type),
+					"model", modelID,
+					"attempt", attempt,
+					"error", prepErr)
+				break
+			}
 
 			// Only reset after we know there is a credential to retry with.
 			if closeBody != nil {
@@ -863,7 +885,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			cred = nextCred
 			triedCreds[cred.Name] = true
 			logCtx.Credential = cred
-			body, realModelID = p.rebindBodyForCredential(r, body, modelID, realModelID, cred)
+			body = nextReq.body
+			proxyBody = nextReq.proxyBody
+			realModelID = nextReq.realModelID
+			r.URL.Path = nextReq.path
+			prepared.body = nextReq.body
+			prepared.proxyBody = nextReq.proxyBody
+			prepared.realModelID = nextReq.realModelID
+			prepared.convertedResp = nextReq.convertedResp
+			prepared.passthroughResponses = nextReq.passthroughResponses
+			prepared.nativeResponses = nextReq.nativeResponses
 			logCtx.RealModelID = realModelID
 
 			p.logger.InfoContext(r.Context(), "Retrying with next credential",
@@ -890,6 +921,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				IsStreaming:    streaming,
 			}
 			provResponses = responses.NewProviderResponses(cred.Type, mode)
+			if provResponses == nil {
+				p.logger.ErrorContext(r.Context(), "Native Responses converter unavailable",
+					"error_code", http.StatusInternalServerError,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID,
+					"request_id", logCtx.RequestID)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusInternalServerError
+				logCtx.ErrorMsg = "Native Responses converter unavailable"
+				logCtx.TargetURL = cred.BaseURL
+				WriteErrorInternal(w, "Failed to convert request")
+				return
+			}
 			var convErr error
 			requestBody, _, convErr = provResponses.RequestFrom(body)
 			if convErr != nil {

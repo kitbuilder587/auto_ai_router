@@ -24,15 +24,31 @@ type orchestratedRequest struct {
 	request              *http.Request
 	body                 []byte // body with realModelID substituted (for non-proxy providers)
 	proxyBody            []byte // body with original modelID alias (for proxy forwarding)
+	baseBody             []byte
+	baseProxyBody        []byte
 	modelID              string // alias name (for rate limiting, credential lookup, logging)
 	realModelID          string // real model name sent to provider (equals modelID if no alias configured)
+	baseRealModelID      string
+	basePath             string
 	streaming            bool
 	cred                 *config.CredentialConfig
 	isResponsesAPI       bool
 	convertedResp        bool
-	passthroughResponses bool                         // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
-	nativeResponses      bool                         // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
+	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
+	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
+	responsesPrevHandled bool
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
+	stickyCacheEligible  bool
+}
+
+type credentialPreparedRequest struct {
+	body                 []byte
+	proxyBody            []byte
+	realModelID          string
+	path                 string
+	convertedResp        bool
+	passthroughResponses bool
+	nativeResponses      bool
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -62,15 +78,17 @@ func (p *Proxy) orchestrateRequest(
 	if modelID != realModelID {
 		proxyBody = openai.ReplaceModelInBody(body, realModelID, modelID)
 	}
+	baseBody := append([]byte(nil), body...)
+	baseProxyBody := append([]byte(nil), proxyBody...)
+	baseRealModelID := realModelID
+	basePath := r.URL.Path
 
 	// Detect Responses API requests and select credential before conversion.
 	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
 
-	convertedResp := false
-	passthroughResponses := false
-	nativeResponses := false
 	var responsesMetadata *responses.ResponsesMetadata
 	var prevEntry *responsestore.StoredEntry
+	prevEntryHandled := false
 	preferredCredentialName := ""
 
 	if isResponsesAPI {
@@ -96,15 +114,119 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
-	// Re-resolve the real model name for the selected credential.
-	// This handles configs where the same alias (e.g. "claude-haiku-4.5") maps to a
-	// different provider-specific real name on each credential
-	// (e.g. "global.anthropic.claude-haiku-4-5-20251001-v1:0" on Bedrock vs
-	// "anthropic/claude-haiku-4.5" on OpenRouter).
-	// Proxy credentials handle their own model routing using the alias, so body is not
-	// updated for them; proxyBody already holds the alias and is left unchanged.
-	if cred.Type != config.ProviderTypeProxy {
-		if credRealName, hasCredReal := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); hasCredReal && credRealName != realModelID {
+	p.logger.DebugContext(r.Context(), "Responses API detection",
+		"is_responses_api", isResponsesAPI,
+		"provider", cred.Type,
+		"model", modelID,
+		"streaming", streaming,
+		"url_path", r.URL.Path)
+
+	if isResponsesAPI {
+		// Handle previous_response_id: load the previous entry and prepend its
+		// accumulated input + output so the model sees the full conversation history.
+		if responsesMetadata.PreviousResponseID != "" && prevEntry != nil && prevEntry.ResponseJSON != nil {
+			var accInput json.RawMessage
+			if prevEntry.AccumulatedInput != nil {
+				accInput = prevEntry.AccumulatedInput
+			}
+			newBody, prependErr := responses.PrependHistoryToInput(baseBody, accInput, prevEntry.ResponseJSON.Output)
+			if prependErr != nil {
+				p.logger.WarnContext(r.Context(), "Failed to prepend previous response history, ignoring",
+					"id", responsesMetadata.PreviousResponseID, "error", prependErr)
+			} else {
+				baseBody = newBody
+				prevEntryHandled = true
+				baseProxyBody = baseBody
+				if modelID != baseRealModelID {
+					baseProxyBody = openai.ReplaceModelInBody(baseBody, baseRealModelID, modelID)
+				}
+				p.logger.DebugContext(r.Context(), "Prepended previous response history to input",
+					"previous_response_id", responsesMetadata.PreviousResponseID,
+					"output_items", len(prevEntry.ResponseJSON.Output),
+					"credential", preferredCredentialName,
+				)
+			}
+		}
+
+		// Capture the full accumulated input (history + current) for storage.
+		// This must happen after any history prepending but before RequestToChat removes "input".
+		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
+	}
+
+	stickyCacheEligible := logCtx.SessionID != "" || preferredCredentialName != ""
+	credentialReq, prepErr := p.prepareRequestForCredential(
+		r,
+		baseBody,
+		baseProxyBody,
+		modelID,
+		baseRealModelID,
+		basePath,
+		streaming,
+		cred,
+		isResponsesAPI,
+		prevEntryHandled,
+		stickyCacheEligible,
+	)
+	if prepErr != nil {
+		p.logger.ErrorContext(r.Context(), "Failed to prepare request for credential",
+			"error_code", http.StatusBadRequest,
+			"credential", cred.Name, "provider", string(cred.Type),
+			"model", modelID, "error", prepErr,
+			"request_id", logCtx.RequestID)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = "Failed to convert Responses API request: " + prepErr.Error()
+		WriteErrorBadRequest(w, "Failed to convert Responses API request")
+		return nil, false
+	}
+	body = credentialReq.body
+	proxyBody = credentialReq.proxyBody
+	realModelID = credentialReq.realModelID
+	r.URL.Path = credentialReq.path
+
+	logCtx.Credential = cred
+	r = markCredentialAsTried(r, cred.Name)
+
+	return &orchestratedRequest{
+		request:              r,
+		body:                 body,
+		proxyBody:            proxyBody,
+		baseBody:             baseBody,
+		baseProxyBody:        baseProxyBody,
+		modelID:              modelID,
+		realModelID:          realModelID,
+		baseRealModelID:      baseRealModelID,
+		basePath:             basePath,
+		streaming:            streaming,
+		cred:                 cred,
+		isResponsesAPI:       isResponsesAPI,
+		convertedResp:        credentialReq.convertedResp,
+		passthroughResponses: credentialReq.passthroughResponses,
+		nativeResponses:      credentialReq.nativeResponses,
+		responsesPrevHandled: prevEntryHandled,
+		responsesMetadata:    responsesMetadata,
+		stickyCacheEligible:  stickyCacheEligible,
+	}, true
+}
+
+func (p *Proxy) prepareRequestForCredential(
+	r *http.Request,
+	baseBody []byte,
+	baseProxyBody []byte,
+	modelID string,
+	baseRealModelID string,
+	basePath string,
+	streaming bool,
+	cred *config.CredentialConfig,
+	isResponsesAPI bool,
+	prevEntryHandled bool,
+	stickyCacheEligible bool,
+) (credentialPreparedRequest, error) {
+	body := baseBody
+	proxyBody := baseProxyBody
+	realModelID := baseRealModelID
+	if cred.Type != config.ProviderTypeProxy && p.modelManager != nil {
+		if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok && credRealName != realModelID {
 			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
 				"alias", modelID,
 				"old_real", realModelID,
@@ -116,122 +238,57 @@ func (p *Proxy) orchestrateRequest(
 		}
 	}
 
-	// Auto-inject Anthropic prompt-caching markers when a session is active.
-	// This maximises cache hit rate when session-sticky routing keeps traffic on one credential.
 	if p.stickyAutoCacheCtrl &&
-		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeBedrock) &&
-		(logCtx.SessionID != "" || preferredCredentialName != "") {
+		stickyCacheEligible &&
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeBedrock) {
 		body = anthropicconv.InjectCacheControl(body)
 	}
 
-	p.logger.DebugContext(r.Context(), "Responses API detection",
-		"is_responses_api", isResponsesAPI,
-		"provider", cred.Type,
-		"model", modelID,
-		"streaming", streaming,
-		"url_path", r.URL.Path)
-
-	if isResponsesAPI {
-		// Handle previous_response_id: load the previous entry and prepend its
-		// accumulated input + output so the model sees the full conversation history.
-		prevEntryHandled := false
-		if responsesMetadata.PreviousResponseID != "" && prevEntry != nil && prevEntry.ResponseJSON != nil {
-			var accInput json.RawMessage
-			if prevEntry.AccumulatedInput != nil {
-				accInput = prevEntry.AccumulatedInput
-			}
-			newBody, prependErr := responses.PrependHistoryToInput(body, accInput, prevEntry.ResponseJSON.Output)
-			if prependErr != nil {
-				p.logger.WarnContext(r.Context(), "Failed to prepend previous response history, ignoring",
-					"id", responsesMetadata.PreviousResponseID, "error", prependErr)
-			} else {
-				body = newBody
-				prevEntryHandled = true
-				p.logger.DebugContext(r.Context(), "Prepended previous response history to input",
-					"previous_response_id", responsesMetadata.PreviousResponseID,
-					"output_items", len(prevEntry.ResponseJSON.Output),
-					"credential", preferredCredentialName,
-				)
-			}
-		}
-
-		// Capture the full accumulated input (history + current) for storage.
-		// This must happen after any history prepending but before RequestToChat removes "input".
-		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(body)
-
-		switch {
-		case p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
-			// Passthrough: forward to the provider's native /v1/responses endpoint.
-			// Default for OpenAI credentials; can be overridden per-model via
-			// passthrough_responses: true/false in the models[] config section.
-			// PrepareCodexPassthrough strips proxy-internal fields and normalises the
-			// body to match what OpenAI's Responses API actually accepts.
-			body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
-			proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
-			passthroughResponses = true
-			p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
-				"model", modelID, "provider", cred.Type, "streaming", streaming)
-
-		case responses.HasNativeResponsesForModel(cred.Type, realModelID):
-			// Provider has a native Responses converter (Vertex AI, Anthropic).
-			// Keep body in Responses API format — it will be converted by
-			// ProviderResponses.RequestFrom() in proxy.go.
-			nativeResponses = true
-			p.logger.DebugContext(r.Context(), "Native Responses converter path",
-				"model", modelID, "provider", cred.Type, "streaming", streaming)
-
-		default:
-			// Fallback: convert to Chat Completions format so all providers work uniformly.
-			chatBody, convErr := responses.RequestToChat(body)
-			if convErr != nil {
-				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request",
-					"error_code", http.StatusBadRequest,
-					"credential", cred.Name, "provider", string(cred.Type),
-					"model", modelID, "error", convErr,
-					"request_id", logCtx.RequestID)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = http.StatusBadRequest
-				logCtx.ErrorMsg = "Failed to convert Responses API request: " + convErr.Error()
-				WriteErrorBadRequest(w, "Failed to convert Responses API request")
-				return nil, false
-			}
-			// Re-apply model-specific parameter transformations now that the body is
-			// in Chat Completions format.  RequestToChat maps max_output_tokens →
-			// max_tokens; for reasoning models (o1/o3/o4/gpt-5) ReplaceBodyParam
-			// renames max_tokens → max_completion_tokens and strips unsupported params.
-			body = openai.ReplaceBodyParam(realModelID, chatBody)
-			convertedResp = true
-			// For streaming: inject stream_options.include_usage since extractMetadataFromBody
-			// skipped it for Responses API (the original body had "input" not "messages").
-			// Now that we've converted to Chat Completions format, providers need this.
-			if streaming {
-				body = injectStreamOptions(body)
-			}
-			// Rewrite URL path from /v1/responses to /v1/chat/completions
-			// so passthrough providers (OpenAI, Proxy) send to the correct endpoint.
-			r.URL.Path = strings.Replace(r.URL.Path, "/responses", "/chat/completions", 1)
-			p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",
-				"model", modelID, "streaming", streaming)
-		}
+	req := credentialPreparedRequest{
+		body:        body,
+		proxyBody:   proxyBody,
+		realModelID: realModelID,
+		path:        basePath,
+	}
+	if !isResponsesAPI {
+		req.body = openai.ReplaceBodyParam(realModelID, body)
+		req.proxyBody = openai.ReplaceBodyParam(realModelID, proxyBody)
+		return req, nil
 	}
 
-	logCtx.Credential = cred
-	r = markCredentialAsTried(r, cred.Name)
+	switch {
+	case p.modelManager != nil && p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
+		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
+		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
+		req.passthroughResponses = true
+		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
+			"model", modelID, "provider", cred.Type, "streaming", streaming)
+	case responses.HasNativeResponsesForModel(cred.Type, realModelID):
+		req.nativeResponses = true
+		p.logger.DebugContext(r.Context(), "Native Responses converter path",
+			"model", modelID, "provider", cred.Type, "streaming", streaming)
+	default:
+		chatBody, err := responses.RequestToChat(body)
+		if err != nil {
+			return req, err
+		}
+		proxyChatBody, err := responses.RequestToChat(proxyBody)
+		if err != nil {
+			return req, err
+		}
+		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.proxyBody = openai.ReplaceBodyParam(realModelID, proxyChatBody)
+		req.convertedResp = true
+		if streaming {
+			req.body = injectStreamOptions(req.body)
+			req.proxyBody = injectStreamOptions(req.proxyBody)
+		}
+		req.path = strings.Replace(basePath, "/responses", "/chat/completions", 1)
+		p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",
+			"model", modelID, "streaming", streaming)
+	}
 
-	return &orchestratedRequest{
-		request:              r,
-		body:                 body,
-		proxyBody:            proxyBody,
-		modelID:              modelID,
-		realModelID:          realModelID,
-		streaming:            streaming,
-		cred:                 cred,
-		isResponsesAPI:       isResponsesAPI,
-		convertedResp:        convertedResp,
-		passthroughResponses: passthroughResponses,
-		nativeResponses:      nativeResponses,
-		responsesMetadata:    responsesMetadata,
-	}, true
+	return req, nil
 }
 
 func initializeRetryTrackingContext(r *http.Request) *http.Request {
@@ -387,8 +444,6 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		realModelID = realName
 	}
 
-	body = openai.ReplaceBodyParam(realModelID, body)
-
 	return body, modelID, realModelID, streaming, true
 }
 
@@ -482,34 +537,4 @@ func (p *Proxy) selectCredentialForModel(
 
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
-}
-
-func (p *Proxy) rebindBodyForCredential(
-	r *http.Request,
-	body []byte,
-	modelID string,
-	currentRealModelID string,
-	cred *config.CredentialConfig,
-) ([]byte, string) {
-	if cred == nil || cred.Type == config.ProviderTypeProxy || p.modelManager == nil {
-		return body, currentRealModelID
-	}
-
-	nextRealModelID := modelID
-	if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok {
-		nextRealModelID = credRealName
-	}
-	if nextRealModelID == currentRealModelID {
-		return body, currentRealModelID
-	}
-
-	p.logger.DebugContext(r.Context(), "Re-resolved real model name for retry credential",
-		"alias", modelID,
-		"old_real", currentRealModelID,
-		"new_real", nextRealModelID,
-		"credential", cred.Name,
-	)
-	body = openai.ReplaceModelInBody(body, currentRealModelID, nextRealModelID)
-	body = openai.ReplaceBodyParam(nextRealModelID, body)
-	return body, nextRealModelID
 }

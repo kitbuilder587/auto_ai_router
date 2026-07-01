@@ -342,7 +342,7 @@ func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if current.Type == config.ProviderTypeProxy || current.FallbackPriority <= 0 {
+	if current.Type == config.ProviderTypeProxy || current.IsFallback || current.FallbackPriority <= 0 {
 		return r.NextSameTypeForModelExcluding(modelID, current.Type, exclude)
 	}
 	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude)
@@ -360,6 +360,10 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 		}
 		if cred.Type == config.ProviderTypeProxy {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
+			continue
+		}
+		if cred.IsFallback {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
 		if cred.FallbackPriority <= 0 || cred.FallbackPriority < minPriority {
