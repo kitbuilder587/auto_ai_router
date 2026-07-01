@@ -17,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
@@ -290,6 +291,13 @@ func (p *Proxy) authenticateRequest(
 
 	if token == p.masterKey {
 		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
+		logCtx.RequestScopes = scopes.All()
+		return true
+	}
+
+	if apiKey, ok := p.apiKeys[token]; ok {
+		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(token), KeyName: apiKey.name, KeyAlias: apiKey.name, UserID: apiKey.name}
+		logCtx.RequestScopes = apiKey.scopes
 		return true
 	}
 
@@ -312,6 +320,7 @@ func (p *Proxy) authenticateRequest(
 				"team_id", tokenInfo.TeamID,
 			)
 		}
+		logCtx.RequestScopes = p.scopesFromTokenInfo(tokenInfo)
 		return true
 	} else {
 		p.logger.WarnContext(r.Context(), "Invalid master key",
@@ -321,6 +330,93 @@ func (p *Proxy) authenticateRequest(
 	}
 
 	return false
+}
+
+func (p *Proxy) ResolveRequestScopes(r *http.Request) scopes.Set {
+	token, ok := extractBearerToken(r.Header.Get("Authorization"))
+	if !ok {
+		return scopes.Empty()
+	}
+	if token == p.masterKey {
+		return scopes.All()
+	}
+	if apiKey, ok := p.apiKeys[token]; ok {
+		return apiKey.scopes
+	}
+	if p.isLiteLLMHealthy() {
+		tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
+		if err == nil {
+			return p.scopesFromTokenInfo(tokenInfo)
+		}
+	}
+	return scopes.Empty()
+}
+
+func extractBearerToken(authHeader string) (string, bool) {
+	if authHeader == "" {
+		return "", false
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == authHeader || token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+func (p *Proxy) scopesFromTokenInfo(tokenInfo *models.TokenInfo) scopes.Set {
+	if tokenInfo == nil {
+		return scopes.All()
+	}
+	if tokenInfo.KeyName == "litellm-master-key" || tokenInfo.UserID == "litellm-master-key" {
+		return scopes.All()
+	}
+
+	values := make([]string, 0, 8)
+	values = append(values,
+		tokenInfo.KeyAlias,
+		tokenInfo.KeyName,
+		tokenInfo.TeamAlias,
+		tokenInfo.TeamID,
+		tokenInfo.UserAlias,
+		tokenInfo.UserID,
+	)
+	values = append(values, scopeValuesFromMetadata(tokenInfo.Metadata)...)
+
+	requestScopes := scopes.From(values)
+	if requestScopes.IsEmpty() {
+		return scopes.All()
+	}
+	return requestScopes
+}
+
+func scopeValuesFromMetadata(metadata map[string]interface{}) []string {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	values := make([]string, 0)
+	for _, key := range []string{"scopes", "scope", "client", "client_name", "tenant"} {
+		values = appendMetadataScopeValues(values, metadata[key])
+	}
+	return values
+}
+
+func appendMetadataScopeValues(values []string, raw interface{}) []string {
+	switch v := raw.(type) {
+	case nil:
+		return values
+	case string:
+		return append(values, v)
+	case []string:
+		return append(values, v...)
+	case []interface{}:
+		for _, item := range v {
+			values = appendMetadataScopeValues(values, item)
+		}
+	default:
+		return values
+	}
+	return values
 }
 
 func (p *Proxy) readRequestBodyAndSelectModel(
@@ -400,7 +496,7 @@ func (p *Proxy) selectCredentialForModel(
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
 	if preferredCredentialName != "" {
-		cred, err := p.balancer.NextSpecific(preferredCredentialName, modelID)
+		cred, err := p.balancer.NextSpecificWithScopes(preferredCredentialName, modelID, logCtx.RequestScopes)
 		if err == nil {
 			p.logger.DebugContext(logCtx.Context(), "Responses API sticky routing: using credential from previous_response_id",
 				"credential", cred.Name,
@@ -418,7 +514,7 @@ func (p *Proxy) selectCredentialForModel(
 
 	if sessionID != "" && p.sessionStore != nil {
 		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
-			cred, err := p.balancer.NextSpecific(credName, modelID)
+			cred, err := p.balancer.NextSpecificWithScopes(credName, modelID, logCtx.RequestScopes)
 			if err == nil {
 				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
 					"session_id", sessionID,
@@ -437,13 +533,13 @@ func (p *Proxy) selectCredentialForModel(
 		}
 	}
 
-	cred, err := p.balancer.NextForModel(modelID)
+	cred, err := p.balancer.NextForModelWithScopes(modelID, logCtx.RequestScopes)
 	if err == nil {
 		return cred, true
 	}
 
 	fallbackErr := error(nil)
-	cred, fallbackErr = p.balancer.NextFallbackForModel(modelID)
+	cred, fallbackErr = p.balancer.NextFallbackForModelWithScopes(modelID, logCtx.RequestScopes)
 	if fallbackErr == nil {
 		return cred, true
 	}

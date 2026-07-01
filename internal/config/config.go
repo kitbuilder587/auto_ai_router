@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 	"gopkg.in/yaml.v3"
 )
 
@@ -398,29 +399,54 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type ServerConfig struct {
-	Port                       int           `yaml:"port"`
-	MaxBodySizeMB              int           `yaml:"max_body_size_mb"`
-	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
-	RequestTimeout             time.Duration `yaml:"request_timeout"`
-	LoggingLevel               string        `yaml:"logging_level"`
-	StdoutLogsEnabled          bool          `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
-	MasterKey                  string        `yaml:"master_key"`
-	DefaultModelsRPM           int           `yaml:"default_models_rpm"`
-	MaxIdleConns               int           `yaml:"max_idle_conns"`
-	MaxIdleConnsPerHost        int           `yaml:"max_idle_conns_per_host"`
-	IdleConnTimeout            time.Duration `yaml:"idle_conn_timeout"`
-	ReadTimeout                time.Duration `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
-	WriteTimeout               time.Duration `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
-	IdleTimeout                time.Duration `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
-	MaxProviderRetries         int           `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
-	MaxFallbackAttempts        int           `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
-	SessionStickyEnabled       bool          `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
-	SessionStickyTTL           int           `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
-	SessionStickyAutoCacheCtrl bool          `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
-	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
-	ShutdownDelay              time.Duration `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
-	DrainUpstreamOnAbort       bool          `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
-	ProxyHealthTimeout         time.Duration `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	Port                       int            `yaml:"port"`
+	MaxBodySizeMB              int            `yaml:"max_body_size_mb"`
+	ResponseBodyMultiplier     int            `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	RequestTimeout             time.Duration  `yaml:"request_timeout"`
+	LoggingLevel               string         `yaml:"logging_level"`
+	StdoutLogsEnabled          bool           `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
+	MasterKey                  string         `yaml:"master_key"`
+	DefaultModelsRPM           int            `yaml:"default_models_rpm"`
+	MaxIdleConns               int            `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost        int            `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout            time.Duration  `yaml:"idle_conn_timeout"`
+	ReadTimeout                time.Duration  `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
+	WriteTimeout               time.Duration  `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
+	IdleTimeout                time.Duration  `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
+	MaxProviderRetries         int            `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
+	MaxFallbackAttempts        int            `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
+	SessionStickyEnabled       bool           `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
+	SessionStickyTTL           int            `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
+	SessionStickyAutoCacheCtrl bool           `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
+	ModelPricesLink            string         `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	ShutdownDelay              time.Duration  `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
+	DrainUpstreamOnAbort       bool           `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ProxyHealthTimeout         time.Duration  `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	APIKeys                    []APIKeyConfig `yaml:"api_keys,omitempty"`
+}
+
+type APIKeyConfig struct {
+	Name   string   `yaml:"name"`
+	Key    string   `yaml:"key"`
+	Scopes []string `yaml:"scopes,omitempty"`
+}
+
+func (k *APIKeyConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Name   string   `yaml:"name"`
+		Key    string   `yaml:"key"`
+		Scopes []string `yaml:"scopes,omitempty"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	k.Name = resolveEnvString(temp.Name)
+	k.Key = resolveEnvString(temp.Key)
+	k.Scopes = resolveScopeList(temp.Scopes)
+	return nil
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -441,28 +467,29 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port                       string `yaml:"port"`
-		MaxBodySizeMB              string `yaml:"max_body_size_mb"`
-		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
-		RequestTimeout             string `yaml:"request_timeout"`
-		LoggingLevel               string `yaml:"logging_level"`
-		StdoutLogsEnabled          string `yaml:"stdout_logs_enabled"`
-		MasterKey                  string `yaml:"master_key"`
-		DefaultModelsRPM           string `yaml:"default_models_rpm"`
-		MaxIdleConns               string `yaml:"max_idle_conns"`
-		MaxIdleConnsPerHost        string `yaml:"max_idle_conns_per_host"`
-		IdleConnTimeout            string `yaml:"idle_conn_timeout"`
-		WriteTimeout               string `yaml:"write_timeout"`
-		IdleTimeout                string `yaml:"idle_timeout"`
-		MaxProviderRetries         string `yaml:"max_provider_retries"`
-		MaxFallbackAttempts        string `yaml:"max_fallback_attempts"`
-		SessionStickyEnabled       string `yaml:"session_sticky_enabled"`
-		SessionStickyTTL           string `yaml:"session_sticky_ttl_minutes"`
-		SessionStickyAutoCacheCtrl string `yaml:"session_sticky_auto_cache_control"`
-		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
-		ShutdownDelay              string `yaml:"shutdown_delay"`
-		DrainUpstreamOnAbort       string `yaml:"drain_upstream_on_abort"`
-		ProxyHealthTimeout         string `yaml:"proxy_health_timeout"`
+		Port                       string         `yaml:"port"`
+		MaxBodySizeMB              string         `yaml:"max_body_size_mb"`
+		ResponseBodyMultiplier     string         `yaml:"response_body_multiplier"`
+		RequestTimeout             string         `yaml:"request_timeout"`
+		LoggingLevel               string         `yaml:"logging_level"`
+		StdoutLogsEnabled          string         `yaml:"stdout_logs_enabled"`
+		MasterKey                  string         `yaml:"master_key"`
+		DefaultModelsRPM           string         `yaml:"default_models_rpm"`
+		MaxIdleConns               string         `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost        string         `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout            string         `yaml:"idle_conn_timeout"`
+		WriteTimeout               string         `yaml:"write_timeout"`
+		IdleTimeout                string         `yaml:"idle_timeout"`
+		MaxProviderRetries         string         `yaml:"max_provider_retries"`
+		MaxFallbackAttempts        string         `yaml:"max_fallback_attempts"`
+		SessionStickyEnabled       string         `yaml:"session_sticky_enabled"`
+		SessionStickyTTL           string         `yaml:"session_sticky_ttl_minutes"`
+		SessionStickyAutoCacheCtrl string         `yaml:"session_sticky_auto_cache_control"`
+		ModelPricesLink            string         `yaml:"model_prices_link,omitempty"`
+		ShutdownDelay              string         `yaml:"shutdown_delay"`
+		DrainUpstreamOnAbort       string         `yaml:"drain_upstream_on_abort"`
+		ProxyHealthTimeout         string         `yaml:"proxy_health_timeout"`
+		APIKeys                    []APIKeyConfig `yaml:"api_keys,omitempty"`
 	}
 
 	var temp tempConfig
@@ -542,6 +569,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
 	s.MasterKey = resolveEnvString(temp.MasterKey)
 	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
+	s.APIKeys = temp.APIKeys
 
 	return nil
 }
@@ -555,6 +583,7 @@ type CredentialConfig struct {
 	RPM      int          `yaml:"rpm"`
 	TPM      int          `yaml:"tpm"`
 	Weight   int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	Scopes   []string     `yaml:"scopes,omitempty"`
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -581,6 +610,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		RPM             string           `yaml:"rpm"`
 		TPM             string           `yaml:"tpm"`
 		Weight          string           `yaml:"weight"`
+		Scopes          []string         `yaml:"scopes,omitempty"`
 		ProjectID       string           `yaml:"project_id,omitempty"`
 		Location        string           `yaml:"location,omitempty"`
 		CredentialsFile string           `yaml:"credentials_file,omitempty"`
@@ -618,6 +648,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
+	c.Scopes = resolveScopeList(temp.Scopes)
 
 	// Resolve and parse boolean field
 	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
@@ -1140,9 +1171,14 @@ func hasMappingKey(node *yaml.Node, key string) bool {
 
 // Normalize cleans up configuration values
 func (c *Config) Normalize() {
+	for i := range c.Server.APIKeys {
+		c.Server.APIKeys[i].Scopes = scopes.NormalizeList(c.Server.APIKeys[i].Scopes)
+	}
+
 	// Remove /v1 suffix from base_url to avoid duplication
 	for i := range c.Credentials {
 		c.Credentials[i].BaseURL = strings.TrimSuffix(c.Credentials[i].BaseURL, "/v1")
+		c.Credentials[i].Scopes = scopes.NormalizeList(c.Credentials[i].Scopes)
 	}
 }
 
@@ -1177,6 +1213,15 @@ func (c *Config) Validate() error {
 	// Validate master_key
 	if c.Server.MasterKey == "" {
 		return fmt.Errorf("master_key is required")
+	}
+
+	for i, apiKey := range c.Server.APIKeys {
+		if apiKey.Name == "" {
+			return fmt.Errorf("server.api_keys[%d]: name is required", i)
+		}
+		if apiKey.Key == "" {
+			return fmt.Errorf("server.api_keys[%d]: key is required", i)
+		}
 	}
 
 	// Validate and normalize default_models_rpm

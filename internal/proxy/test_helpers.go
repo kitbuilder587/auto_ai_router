@@ -104,6 +104,7 @@ type TestProxyConfig struct {
 	MaxProviderRetries   int
 	MaxFallbackAttempts  int
 	DrainUpstreamOnAbort bool
+	APIKeys              []config.APIKeyConfig
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -207,6 +208,11 @@ func (b *TestProxyBuilder) WithMasterKey(key string) *TestProxyBuilder {
 	return b
 }
 
+func (b *TestProxyBuilder) WithAPIKeys(keys ...config.APIKeyConfig) *TestProxyBuilder {
+	b.config.APIKeys = keys
+	return b
+}
+
 // WithRequestTimeout sets the request timeout.
 func (b *TestProxyBuilder) WithRequestTimeout(timeout time.Duration) *TestProxyBuilder {
 	b.config.RequestTimeout = timeout
@@ -265,6 +271,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		MaxProviderRetries:   b.config.MaxProviderRetries,
 		MaxFallbackAttempts:  b.config.MaxFallbackAttempts,
 		DrainUpstreamOnAbort: b.config.DrainUpstreamOnAbort,
+		APIKeys:              b.config.APIKeys,
 	})
 }
 

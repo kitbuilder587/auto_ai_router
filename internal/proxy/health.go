@@ -6,14 +6,27 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	modelpkg "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 )
 
 func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
-	creds := p.balancer.GetCredentialsSnapshot()
+	return p.healthCheckForScopes(scopes.All(), true)
+}
+
+func (p *Proxy) HealthCheckForScopes(requestScopes scopes.Set) (bool, *httputil.ProxyHealthResponse) {
+	return p.healthCheckForScopes(requestScopes, false)
+}
+
+func (p *Proxy) healthCheckForScopes(requestScopes scopes.Set, useGlobalBannedCount bool) (bool, *httputil.ProxyHealthResponse) {
+	creds := p.balancer.GetCredentialsSnapshotWithScopes(requestScopes)
 	totalCreds := len(creds)
-	availableCreds := p.balancer.GetAvailableCount()
-	bannedCreds := p.balancer.GetBannedCount()
+	availableCreds := p.balancer.GetAvailableCountWithScopes(requestScopes)
+	bannedCreds := p.balancer.GetBannedCountWithScopes(requestScopes)
+	if useGlobalBannedCount {
+		bannedCreds = p.balancer.GetBannedCount()
+	}
 
 	healthy := availableCreds > 0
 
@@ -22,7 +35,10 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	if creds == nil {
 		creds = []config.CredentialConfig{}
 	}
+	visibleCreds := make(map[string]bool, len(creds))
 	for _, cred := range creds {
+		visibleCreds[cred.Name] = true
+
 		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
 		// For other credentials, use config values
 		limitRPM := cred.RPM
@@ -46,6 +62,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			IsFallback: cred.IsFallback,
 			IsBanned:   isBanned,
 			Weight:     balancer.EffectiveWeight(0, cred.Weight),
+			Scopes:     cred.Scopes,
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
 			LimitRPM:   limitRPM,
@@ -60,6 +77,9 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// This includes duplicates when same model is available from different credentials
 	allTrackedModels := p.rateLimiter.GetAllModelPairs()
 	for _, pair := range allTrackedModels {
+		if !visibleCreds[pair.Credential] {
+			continue
+		}
 		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model)
 	}
 
@@ -80,6 +100,9 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// credentialErrorCounts accumulates error counts per credential across all its banned models
 	credentialErrorCounts := make(map[string]map[int]int)
 	for _, bp := range bannedPairs {
+		if !visibleCreds[bp.Credential] {
+			continue
+		}
 		modelKey := bp.Credential + ":" + bp.Model
 		if ms, ok := modelsInfo[modelKey]; ok {
 			if len(bp.ErrorCodeCounts) > 0 {
@@ -123,6 +146,22 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	}
 
 	return healthy, status
+}
+
+func (p *Proxy) ModelsForScopes(requestScopes scopes.Set, includeAccessGroups bool) modelpkg.ModelsResponse {
+	if p.modelManager == nil {
+		return modelpkg.ModelsResponse{Object: "list", Data: []modelpkg.Model{}}
+	}
+	if requestScopes.IsAll() {
+		if includeAccessGroups {
+			return p.modelManager.GetAllModelsWithAccessGroups()
+		}
+		return p.modelManager.GetAllModels()
+	}
+	return p.modelManager.GetModelsForCredentials(
+		p.balancer.GetCredentialsSnapshotWithScopes(requestScopes),
+		includeAccessGroups,
+	)
 }
 
 func (p *Proxy) addModelHealthStats(

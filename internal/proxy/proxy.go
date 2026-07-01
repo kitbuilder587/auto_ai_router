@@ -28,6 +28,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 	"go.opentelemetry.io/otel/attribute"
@@ -84,6 +85,7 @@ type RequestLogContext struct {
 	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
+	RequestScopes        scopes.Set               // Visibility scopes resolved from the authenticated client key
 }
 
 // HealthChecker provides cached database health status
@@ -119,6 +121,12 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	APIKeys                    []config.APIKeyConfig
+}
+
+type configuredAPIKey struct {
+	name   string
+	scopes scopes.Set
 }
 
 type Proxy struct {
@@ -145,6 +153,7 @@ type Proxy struct {
 	drainUpstreamOnAbort bool                       // Keep reading upstream after client disconnect to get real usage chunk
 	version              string
 	commit               string
+	apiKeys              map[string]configuredAPIKey
 }
 
 func New(cfg *Config) *Proxy {
@@ -184,6 +193,18 @@ func New(cfg *Config) *Proxy {
 		sessionStore = NewSessionStore(ttl)
 	}
 
+	apiKeys := make(map[string]configuredAPIKey, len(cfg.APIKeys))
+	for _, apiKey := range cfg.APIKeys {
+		if apiKey.Key == "" {
+			continue
+		}
+		requestScopes := scopes.From(apiKey.Scopes)
+		if requestScopes.IsEmpty() {
+			requestScopes = scopes.All()
+		}
+		apiKeys[apiKey.Key] = configuredAPIKey{name: apiKey.Name, scopes: requestScopes}
+	}
+
 	return &Proxy{
 		routerID:             routerID,
 		balancer:             cfg.Balancer,
@@ -208,6 +229,7 @@ func New(cfg *Config) *Proxy {
 		client:               httputil.NewHTTPClient(httpClientCfg),
 		version:              cfg.Version,
 		commit:               cfg.Commit,
+		apiKeys:              apiKeys,
 	}
 }
 
@@ -510,7 +532,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, config.ProviderTypeProxy, triedCreds)
+				nextCred, err := p.balancer.NextSameTypeForModelExcludingWithScopes(modelID, config.ProviderTypeProxy, triedCreds, logCtx.RequestScopes)
 				if err != nil {
 					p.logger.DebugContext(r.Context(), "No more same-type proxy credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
@@ -846,7 +868,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
+			nextCred, err := p.balancer.NextSameTypeForModelExcludingWithScopes(modelID, initialCredType, triedCreds, logCtx.RequestScopes)
 			if err != nil {
 				p.logger.DebugContext(r.Context(), "No more same-type credentials for retry",
 					"model", modelID, "attempt", attempt, "error", err)

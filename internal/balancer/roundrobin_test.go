@@ -7,6 +7,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -969,6 +970,51 @@ func TestNextForModelExcluding_SkipsFallback(t *testing.T) {
 	cred, err := bal.NextForModelExcluding("", exclude)
 	require.NoError(t, err)
 	assert.Equal(t, "cred2", cred.Name)
+}
+
+func TestNextForModelWithScopes_FiltersCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, Scopes: []string{"avito"}},
+		{Name: "cometapi", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, Scopes: []string{"vsellm"}},
+		{Name: "grant", Type: config.ProviderTypeBedrock, APIKey: "key3", BaseURL: "http://grant.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cheapgpt", "claude")
+	mc.AddModel("cometapi", "claude")
+	mc.AddModel("grant", "claude")
+	bal.SetModelChecker(mc)
+
+	cred, err := bal.NextForModelWithScopes("claude", scopes.From([]string{"vsellm"}))
+	require.NoError(t, err)
+	assert.Equal(t, "cometapi", cred.Name)
+
+	cred, err = bal.NextSpecificWithScopes("cheapgpt", "claude", scopes.From([]string{"avito"}))
+	require.NoError(t, err)
+	assert.Equal(t, "cheapgpt", cred.Name)
+
+	cred, err = bal.NextSpecificWithScopes("cometapi", "claude", scopes.From([]string{"avito"}))
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+	assert.Nil(t, cred)
+}
+
+func TestGetCredentialsSnapshotWithScopes_IncludesUnscoped(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "vsellm-only", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, Scopes: []string{"vsellm"}},
+		{Name: "shared", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://b.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+	snapshot := bal.GetCredentialsSnapshotWithScopes(scopes.From([]string{"avito"}))
+	require.Len(t, snapshot, 1)
+	assert.Equal(t, "shared", snapshot[0].Name)
 }
 
 func TestNextForModelExcluding_WithModelChecker(t *testing.T) {

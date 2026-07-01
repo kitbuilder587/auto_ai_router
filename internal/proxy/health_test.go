@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
@@ -60,6 +61,45 @@ func TestHealthCheck_NoCredentials(t *testing.T) {
 	assert.Equal(t, 0, status.TotalCredentials)
 	assert.Equal(t, 0, status.CredentialsAvailable)
 	assert.Equal(t, 0, status.CredentialsBanned)
+}
+
+func TestHealthCheckForScopes_FiltersCredentialsAndModels(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	creds := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, Scopes: []string{"avito"}},
+		{Name: "cometapi", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, Scopes: []string{"vsellm"}},
+		{Name: "grant", Type: config.ProviderTypeBedrock, APIKey: "key3", BaseURL: "http://grant.com", RPM: 100},
+	}
+	modelsConfig := []config.ModelRPMConfig{
+		{Name: "claude", Credential: "cheapgpt"},
+		{Name: "claude", Credential: "cometapi"},
+		{Name: "grant-only", Credential: "grant"},
+	}
+	mm := models.New(logger, 50, modelsConfig)
+	mm.LoadModelsFromConfig(creds)
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(creds...).
+		Build()
+	prx.modelManager = mm
+	prx.balancer.SetModelChecker(mm)
+
+	healthy, status := prx.HealthCheckForScopes(scopes.From([]string{"vsellm"}))
+	assert.True(t, healthy)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Contains(t, status.Credentials, "cometapi")
+	assert.Contains(t, status.Credentials, "grant")
+	assert.NotContains(t, status.Credentials, "cheapgpt")
+	assert.Contains(t, status.Models, "cometapi:claude")
+	assert.Contains(t, status.Models, "grant:grant-only")
+	assert.NotContains(t, status.Models, "cheapgpt:claude")
+
+	modelsResp := prx.ModelsForScopes(scopes.From([]string{"vsellm"}), false)
+	modelIDs := make([]string, 0, len(modelsResp.Data))
+	for _, model := range modelsResp.Data {
+		modelIDs = append(modelIDs, model.ID)
+	}
+	assert.ElementsMatch(t, []string{"claude", "grant-only"}, modelIDs)
 }
 
 func TestHealthCheck_CredentialsInfo(t *testing.T) {

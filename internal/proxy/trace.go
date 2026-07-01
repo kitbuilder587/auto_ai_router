@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 )
 
 const defaultTraceDepth = 25
@@ -19,7 +20,11 @@ const defaultTraceDepth = 25
 // TraceCheck builds a recursive trace of this router and all reachable downstream proxy routers.
 // depth controls how many hops to follow (0 = local only).
 func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceResponse {
-	_, health := p.HealthCheck()
+	return p.TraceCheckForScopes(ctx, depth, scopes.All())
+}
+
+func (p *Proxy) TraceCheckForScopes(ctx context.Context, depth int, requestScopes scopes.Set) *httputil.ProxyTraceResponse {
+	_, health := p.HealthCheckForScopes(requestScopes)
 
 	status := "healthy"
 	if health.CredentialsAvailable == 0 {
@@ -40,7 +45,7 @@ func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceR
 	}
 
 	var proxyCreds []config.CredentialConfig
-	for _, cred := range p.balancer.GetCredentialsSnapshot() {
+	for _, cred := range p.balancer.GetCredentialsSnapshotWithScopes(requestScopes) {
 		if cred.Type == config.ProviderTypeProxy {
 			proxyCreds = append(proxyCreds, cred)
 		}
@@ -115,7 +120,7 @@ func (p *Proxy) HandleTrace(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	trace := p.TraceCheck(ctx, depth)
+	trace := p.TraceCheckForScopes(ctx, depth, p.ResolveRequestScopes(r))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(trace); err != nil {

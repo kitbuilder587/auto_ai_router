@@ -9,7 +9,7 @@ import (
 )
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
-	healthy, status := r.proxy.HealthCheck()
+	healthy, status := r.proxy.HealthCheckForScopes(r.proxy.ResolveRequestScopes(req))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Router-Version", r.proxy.GetVersion())

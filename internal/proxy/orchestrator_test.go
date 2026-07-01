@@ -119,3 +119,24 @@ func TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAIWhenPassthroughDisabl
 	_, hasMessages := raw["messages"]
 	require.True(t, hasMessages, "messages should be present after conversion")
 }
+
+func TestOrchestrateRequest_StaticAPIKeyScopesCredentialSelection(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.local", RPM: 100, Scopes: []string{"avito"}},
+			config.CredentialConfig{Name: "cometapi", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://cometapi.local", RPM: 100, Scopes: []string{"vsellm"}},
+		).
+		WithAPIKeys(config.APIKeyConfig{Name: "vsellm", Key: "sk-vsellm", Scopes: []string{"vsellm"}}).
+		Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"claude","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer sk-vsellm")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{}
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+	require.Equal(t, "cometapi", prepared.cred.Name)
+	require.Equal(t, []string{"vsellm"}, logCtx.RequestScopes.Values())
+}

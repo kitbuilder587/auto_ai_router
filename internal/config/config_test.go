@@ -779,6 +779,76 @@ func TestConfig_ValidateFallback_AllowsFallbackOnAnyType(t *testing.T) {
 	assert.NoError(t, err, "is_fallback should be allowed on any credential type")
 }
 
+func TestConfig_UnmarshalYAML_Scopes(t *testing.T) {
+	t.Setenv("TEST_API_KEY", "sk-vsellm")
+	t.Setenv("TEST_SCOPES", "vsellm,avito")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "test-key"
+  request_timeout: 30s
+  api_keys:
+    - name: "vsellm"
+      key: "os.environ/TEST_API_KEY"
+      scopes: [os.environ/TEST_SCOPES]
+
+credentials:
+  - name: "cheapgpt"
+    type: "anthropic"
+    api_key: "key"
+    base_url: "http://cheapgpt.com"
+    rpm: 100
+    scopes: [VSELLM, avito]
+  - name: "cometapi"
+    type: "anthropic"
+    api_key: "key2"
+    base_url: "http://cometapi.com"
+    rpm: 100
+    scopes: [vsellm]
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [429]
+`
+
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Server.APIKeys, 1)
+	assert.Equal(t, "sk-vsellm", cfg.Server.APIKeys[0].Key)
+	assert.Equal(t, []string{"avito", "vsellm"}, cfg.Server.APIKeys[0].Scopes)
+	assert.Equal(t, []string{"avito", "vsellm"}, cfg.Credentials[0].Scopes)
+	assert.Equal(t, []string{"vsellm"}, cfg.Credentials[1].Scopes)
+}
+
+func TestConfig_ValidateAPIKeys(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+			APIKeys:        []APIKeyConfig{{Name: "vsellm"}},
+		},
+		Credentials: []CredentialConfig{
+			{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.api_keys[0]: key is required")
+}
+
 func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

@@ -171,13 +171,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	var modelsResp models.ModelsResponse
-	if r.modelManager != nil {
+	if r.proxy != nil {
 		includeGroups := strings.EqualFold(req.URL.Query().Get("include_model_access_groups"), "true")
-		if includeGroups {
-			modelsResp = r.modelManager.GetAllModelsWithAccessGroups()
-		} else {
-			modelsResp = r.modelManager.GetAllModels()
-		}
+		modelsResp = r.proxy.ModelsForScopes(r.proxy.ResolveRequestScopes(req), includeGroups)
+	} else if r.modelManager != nil {
+		modelsResp = r.modelManager.GetAllModels()
 	} else {
 		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}
 	}

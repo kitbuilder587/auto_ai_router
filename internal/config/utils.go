@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/scopes"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
@@ -26,6 +27,14 @@ func resolveEnvString(value string) string {
 		return ""
 	}
 	return value
+}
+
+func resolveScopeList(values []string) []string {
+	resolved := make([]string, 0, len(values))
+	for _, value := range values {
+		resolved = append(resolved, resolveEnvString(value))
+	}
+	return scopes.NormalizeList(resolved)
 }
 
 // parseFunc is a function type that parses a string value into the desired type
@@ -94,6 +103,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"max_fallback_attempts", cfg.Server.MaxFallbackAttempts,
 		"session_sticky_enabled", cfg.Server.SessionStickyEnabled,
 		"session_sticky_ttl_minutes", cfg.Server.SessionStickyTTL,
+		"api_keys", len(cfg.Server.APIKeys),
 	)
 
 	// Monitoring config
@@ -125,6 +135,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"rpm":         rpmToString(cred.RPM),
 			"tpm":         tpmToString(cred.TPM),
 			"is_fallback": cred.IsFallback,
+			"scopes":      strings.Join(cred.Scopes, ","),
 		}
 
 		// Add Vertex AI specific fields if present

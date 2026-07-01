@@ -109,6 +109,7 @@ litellm_db:
 | `max_idle_conns_per_host`  | int      | 20      | Maximum idle connections per host                            |
 | `logging_level`            | string   | info    | Logging level: `info`, `debug`, `error`                      |
 | `master_key`               | string   | —       | **Required.** Master key for client authentication           |
+| `api_keys`                 | []key    | —       | Optional static API keys with visibility scopes              |
 | `default_models_rpm`       | int      | -1      | Default RPM limit for models (-1 = unlimited)                |
 | `model_prices_link`        | string   | —       | URL or file path to model prices JSON                        |
 | `proxy_health_timeout`     | duration | 15s     | Timeout for fetching `/health` from remote proxy credentials |
@@ -160,6 +161,7 @@ Common fields for all credentials:
 | `type`        | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `proxy` |
 | `rpm`         | int    | Requests per minute limit (-1 = unlimited)                                                  |
 | `tpm`         | int    | Tokens per minute limit (-1 = unlimited)                                                    |
+| `scopes`      | []string | Optional client scopes allowed to see and use this credential; empty means all clients     |
 | `is_fallback` | bool   | Use as fallback when primary credentials are exhausted                                      |
 
 ## Models

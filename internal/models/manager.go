@@ -1369,6 +1369,42 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	return result
 }
 
+func (m *Manager) GetModelsForCredentials(credentials []config.CredentialConfig, includeAccessGroups bool) ModelsResponse {
+	seen := make(map[string]bool)
+	result := make([]Model, 0)
+
+	for _, cred := range credentials {
+		prefix, ok := providerTypeLiteLLMPrefix[cred.Type]
+		if !ok {
+			prefix = string(cred.Type)
+		}
+
+		for _, model := range m.GetModelsForCredential(cred.Name) {
+			out := model
+			if includeAccessGroups {
+				out.ID = prefix + "/" + model.ID
+				out.OwnedBy = prefix
+			}
+			if out.Object == "" {
+				out.Object = "model"
+			}
+			if out.Created == 0 {
+				out.Created = converterutil.GetCurrentTimestamp()
+			}
+			if out.OwnedBy == "" {
+				out.OwnedBy = "system"
+			}
+			if seen[out.ID] {
+				continue
+			}
+			seen[out.ID] = true
+			result = append(result, out)
+		}
+	}
+
+	return ModelsResponse{Object: "list", Data: result}
+}
+
 // GetRemoteModels fetches models from a remote proxy credential with caching.
 // Deprecated: use GetRemoteModelsWithError to handle upstream fetch errors explicitly.
 func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
