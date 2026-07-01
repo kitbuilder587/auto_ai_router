@@ -119,3 +119,26 @@ func TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAIWhenPassthroughDisabl
 	_, hasMessages := raw["messages"]
 	require.True(t, hasMessages, "messages should be present after conversion")
 }
+
+func TestRebindBodyForCredential_UsesCredentialSpecificRealModel(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	cheap := config.CredentialConfig{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://cheapgpt.local", RPM: 100}
+	grant := config.CredentialConfig{Name: "grant", Type: config.ProviderTypeBedrock, APIKey: "key2", BaseURL: "http://grant.local", RPM: 100}
+	mm := models.New(logger, 50, []config.ModelRPMConfig{
+		{Name: "claude", Model: "anthropic/claude-sonnet", Credential: cheap.Name},
+		{Name: "claude", Model: "global.anthropic.claude-sonnet-v1:0", Credential: grant.Name},
+	})
+	mm.LoadModelsFromConfig([]config.CredentialConfig{cheap, grant})
+
+	builder := NewTestProxyBuilder().WithCredentials(cheap, grant)
+	builder.config.ModelManager = mm
+	prx := builder.Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"anthropic/claude-sonnet","messages":[]}`)
+
+	nextBody, nextRealModel := prx.rebindBodyForCredential(req, body, "claude", "anthropic/claude-sonnet", &grant)
+
+	require.Equal(t, "global.anthropic.claude-sonnet-v1:0", nextRealModel)
+	require.Contains(t, string(nextBody), `"model":"global.anthropic.claude-sonnet-v1:0"`)
+}

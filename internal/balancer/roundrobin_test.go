@@ -971,6 +971,51 @@ func TestNextForModelExcluding_SkipsFallback(t *testing.T) {
 	assert.Equal(t, "cred2", cred.Name)
 }
 
+func TestNextRetryForModelExcluding_FallbackPriorityOrder(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
+		{Name: "grant", Type: config.ProviderTypeBedrock, APIKey: "key2", BaseURL: "http://grant.com", RPM: 100, FallbackPriority: 30, Weight: 100},
+		{Name: "cometapi", Type: config.ProviderTypeAnthropic, APIKey: "key3", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
+	}
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cheapgpt", "claude")
+	mc.AddModel("cometapi", "claude")
+	mc.AddModel("grant", "claude")
+	bal.SetModelChecker(mc)
+
+	tried := map[string]bool{"cheapgpt": true}
+	cred, err := bal.NextRetryForModelExcluding("claude", &credentials[0], tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cometapi", cred.Name)
+
+	tried["cometapi"] = true
+	cred, err = bal.NextRetryForModelExcluding("claude", cred, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "grant", cred.Name)
+}
+
+func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100},
+		{Name: "anthropic-a", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://b.com", RPM: 100},
+		{Name: "openai-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://c.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"openai-a": true})
+	require.NoError(t, err)
+	assert.Equal(t, "openai-b", cred.Name)
+}
+
 func TestNextForModelExcluding_WithModelChecker(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()

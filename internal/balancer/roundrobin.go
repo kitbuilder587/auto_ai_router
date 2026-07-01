@@ -26,6 +26,11 @@ var (
 	ErrRateLimitExceeded      = errors.New("rate limit exceeded")
 )
 
+type candidateEntry struct {
+	absIdx int
+	cred   *config.CredentialConfig
+}
+
 type RoundRobin struct {
 	mu              sync.RWMutex
 	credentials     []config.CredentialConfig
@@ -192,10 +197,6 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 	defer r.mu.Unlock()
 
 	// Phase 1: Build candidate list using only structural (time-stable) filters.
-	type candidateEntry struct {
-		absIdx int
-		cred   *config.CredentialConfig
-	}
 	var candidates []candidateEntry
 
 	for i := range r.credentials {
@@ -335,6 +336,107 @@ func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType conf
 		return r.nextExcluding(modelID, false, true, "", exclude)
 	}
 	return r.nextExcluding(modelID, false, false, credType, exclude)
+}
+
+func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.CredentialConfig, exclude map[string]bool) (*config.CredentialConfig, error) {
+	if current == nil {
+		return nil, ErrNoCredentialsAvailable
+	}
+	if current.Type == config.ProviderTypeProxy || current.FallbackPriority <= 0 {
+		return r.NextSameTypeForModelExcluding(modelID, current.Type, exclude)
+	}
+	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude)
+}
+
+func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool) (*config.CredentialConfig, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	candidates := make([]candidateEntry, 0, len(r.credentials))
+	for i := range r.credentials {
+		cred := &r.credentials[i]
+		if len(exclude) > 0 && exclude[cred.Name] {
+			continue
+		}
+		if cred.Type == config.ProviderTypeProxy {
+			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
+			continue
+		}
+		if cred.FallbackPriority <= 0 || cred.FallbackPriority < minPriority {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+			continue
+		}
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+			if !r.modelChecker.HasModel(cred.Name, modelID) {
+				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
+				continue
+			}
+		}
+		candidates = append(candidates, candidateEntry{absIdx: i, cred: cred})
+	}
+
+	if len(candidates) == 0 {
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	live := make([]candidateEntry, 0, len(candidates))
+	rateLimitHit := false
+	for _, c := range candidates {
+		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			continue
+		}
+		if !r.canPassRateLimits(c.cred.Name, modelID) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
+			rateLimitHit = true
+			continue
+		}
+		live = append(live, c)
+	}
+	if len(live) == 0 {
+		if rateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	selectedPriority := live[0].cred.FallbackPriority
+	for _, c := range live[1:] {
+		if c.cred.FallbackPriority < selectedPriority {
+			selectedPriority = c.cred.FallbackPriority
+		}
+	}
+
+	bucket := make([]candidateEntry, 0, len(live))
+	liveWeights := make(map[string]int, len(live))
+	for _, c := range live {
+		if c.cred.FallbackPriority != selectedPriority {
+			continue
+		}
+		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
+		bucket = append(bucket, c)
+	}
+
+	state := r.swrrStateFor(r.schedKeyFor(modelID, false, false, "", true))
+	total := state.advance(liveWeights)
+	sort.SliceStable(bucket, func(i, j int) bool {
+		return state.currentOf(bucket[i].cred.Name) > state.currentOf(bucket[j].cred.Name)
+	})
+
+	for _, c := range bucket {
+		if !r.rateLimiter.TryAllowAll(c.cred.Name, modelID) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
+			rateLimitHit = true
+			continue
+		}
+		state.commit(c.cred.Name, total)
+		return c.cred, nil
+	}
+
+	if rateLimitHit {
+		return nil, ErrRateLimitExceeded
+	}
+	return nil, ErrNoCredentialsAvailable
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {

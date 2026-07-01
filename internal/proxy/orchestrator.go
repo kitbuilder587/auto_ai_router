@@ -483,3 +483,33 @@ func (p *Proxy) selectCredentialForModel(
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }
+
+func (p *Proxy) rebindBodyForCredential(
+	r *http.Request,
+	body []byte,
+	modelID string,
+	currentRealModelID string,
+	cred *config.CredentialConfig,
+) ([]byte, string) {
+	if cred == nil || cred.Type == config.ProviderTypeProxy || p.modelManager == nil {
+		return body, currentRealModelID
+	}
+
+	nextRealModelID := modelID
+	if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok {
+		nextRealModelID = credRealName
+	}
+	if nextRealModelID == currentRealModelID {
+		return body, currentRealModelID
+	}
+
+	p.logger.DebugContext(r.Context(), "Re-resolved real model name for retry credential",
+		"alias", modelID,
+		"old_real", currentRealModelID,
+		"new_real", nextRealModelID,
+		"credential", cred.Name,
+	)
+	body = openai.ReplaceModelInBody(body, currentRealModelID, nextRealModelID)
+	body = openai.ReplaceBodyParam(nextRealModelID, body)
+	return body, nextRealModelID
+}

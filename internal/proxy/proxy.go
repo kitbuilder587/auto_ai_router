@@ -820,14 +820,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// === Direct provider path with same-type credential retry ===
+	// === Direct provider path with credential retry ===
 
 	// Track embeddings requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 
-	// Retry loop: try same-type credentials on provider errors (429/5xx/auth)
+	// Retry loop: try same-type credentials by default, or fallback_priority tiers when configured.
 	triedCreds := GetTried(r.Context())
-	initialCredType := cred.Type
 	var (
 		resp            *http.Response
 		responseBody    []byte
@@ -846,9 +845,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
+			nextCred, err := p.balancer.NextRetryForModelExcluding(modelID, cred, triedCreds)
 			if err != nil {
-				p.logger.DebugContext(r.Context(), "No more same-type credentials for retry",
+				p.logger.DebugContext(r.Context(), "No more retry credentials available",
 					"model", modelID, "attempt", attempt, "error", err)
 				break
 			}
@@ -864,8 +863,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			cred = nextCred
 			triedCreds[cred.Name] = true
 			logCtx.Credential = cred
+			body, realModelID = p.rebindBodyForCredential(r, body, modelID, realModelID, cred)
+			logCtx.RealModelID = realModelID
 
-			p.logger.InfoContext(r.Context(), "Retrying with next same-type credential",
+			p.logger.InfoContext(r.Context(), "Retrying with next credential",
 				"credential", cred.Name, "model", modelID,
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 				"retry_reason", retryReason)
@@ -1148,7 +1149,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			fallbackStatus = resp.StatusCode
 		}
 
-		p.logger.InfoContext(r.Context(), "All same-type credentials exhausted, attempting fallback proxy",
+		p.logger.InfoContext(r.Context(), "All retry credentials exhausted, attempting fallback proxy",
 			"credential", cred.Name, "model", modelID,
 			"last_status", fallbackStatus, "reason", retryReason)
 		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
