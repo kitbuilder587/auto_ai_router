@@ -116,32 +116,33 @@ for the fallback phase.
 
 ```yaml
 credentials:
-  - name: "cheapgpt"
+  - name: "primary-anthropic"
     type: "anthropic"
-    api_key: "os.environ/CHEAPGPT_KEY"
-    base_url: "https://cheapgpt.example.com"
+    api_key: "os.environ/PRIMARY_ANTHROPIC_KEY"
+    base_url: "https://anthropic-primary.example.com"
     rpm: 400
     fallback_priority: 10
 
-  - name: "cometapi"
+  - name: "backup-anthropic"
     type: "anthropic"
-    api_key: "os.environ/COMETAPI_KEY"
-    base_url: "https://api.cometapi.com"
+    api_key: "os.environ/BACKUP_ANTHROPIC_KEY"
+    base_url: "https://anthropic-backup.example.com"
     rpm: 500
     fallback_priority: 20
 
-  - name: "grant"
+  - name: "bedrock-reserve"
     type: "bedrock"
-    api_key: "os.environ/GRANT_KEY"
-    base_url: "https://grant.example.com"
+    api_key: "os.environ/BEDROCK_RESERVE_KEY"
+    base_url: "https://bedrock-reserve.example.com"
     rpm: 1000
     fallback_priority: 30
 ```
 
-With this configuration, if `cheapgpt` returns a retryable error for `claude`, the router tries
-`cometapi` next. If `cometapi` is also unavailable, it tries `grant`. When the next credential
-has a credential-specific real model mapping, the router re-resolves the model before sending
-the retry request, so an Anthropic model alias can safely move to a Bedrock grant credential.
+With this configuration, if `primary-anthropic` returns a retryable error for `claude`, the router
+tries `backup-anthropic` next. If `backup-anthropic` is also unavailable, it tries
+`bedrock-reserve`. When the next credential has a credential-specific real model mapping, the
+router re-resolves the model before sending the retry request, so an Anthropic model alias can
+safely move to a Bedrock credential.
 
 If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved.
 Fallback credentials (`is_fallback: true`) are still used only by the fallback mechanism.
