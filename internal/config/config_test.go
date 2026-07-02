@@ -781,13 +781,15 @@ func TestConfig_ValidateFallback_AllowsFallbackOnAnyType(t *testing.T) {
 
 func TestConfig_ValidateFallbackPriority(t *testing.T) {
 	tests := []struct {
-		name     string
-		priority int
-		wantErr  bool
+		name       string
+		priority   int
+		isFallback bool
+		wantErr    bool
 	}{
 		{name: "unset", priority: 0, wantErr: false},
 		{name: "positive", priority: 10, wantErr: false},
 		{name: "negative", priority: -1, wantErr: true},
+		{name: "fallback with priority", priority: 10, isFallback: true, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -800,7 +802,7 @@ func TestConfig_ValidateFallbackPriority(t *testing.T) {
 					RequestTimeout: 30 * time.Second,
 				},
 				Credentials: []CredentialConfig{
-					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, FallbackPriority: tt.priority},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, IsFallback: tt.isFallback, FallbackPriority: tt.priority},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}

@@ -1317,6 +1317,9 @@ func (c *Config) Validate() error {
 		if cred.FallbackPriority < 0 {
 			return fmt.Errorf("credential %s: invalid fallback_priority: %d (must be >= 0)", cred.Name, cred.FallbackPriority)
 		}
+		if cred.IsFallback && cred.FallbackPriority > 0 {
+			return fmt.Errorf("credential %s: invalid fallback_priority: fallback credentials cannot set fallback_priority", cred.Name)
+		}
 	}
 
 	for _, model := range c.Models {

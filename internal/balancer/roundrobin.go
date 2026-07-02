@@ -242,13 +242,12 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	// Phase 2: Smooth weighted round-robin over candidates that are available now.
-	// Banned/rate-limited credentials are dropped here (not in Phase 1) so they don't
-	// accumulate weight while down — otherwise a high-weight provider would burst on recovery.
-	// With equal weights this degenerates to the historical round-robin sequence.
-	state := r.swrrStateFor(r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude)))
+	key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude))
+	live, rateLimitHit := r.liveCandidates(modelID, candidates)
+	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+}
 
-	liveWeights := make(map[string]int, len(candidates))
+func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry) ([]candidateEntry, bool) {
 	live := make([]candidateEntry, 0, len(candidates))
 	rateLimitHit := false
 	for _, c := range candidates {
@@ -261,9 +260,12 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 			rateLimitHit = true
 			continue
 		}
-		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
 		live = append(live, c)
 	}
+	return live, rateLimitHit
+}
+
+func (r *RoundRobin) selectWeightedLiveCandidate(modelID string, live []candidateEntry, key schedKey, rateLimitHit bool) (*config.CredentialConfig, error) {
 	if len(live) == 0 {
 		if rateLimitHit {
 			return nil, ErrRateLimitExceeded
@@ -271,6 +273,15 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
+	// Smooth weighted round-robin over candidates that are available now.
+	// Banned/rate-limited credentials are dropped before this point so they don't
+	// accumulate weight while down — otherwise a high-weight provider would burst on recovery.
+	// With equal weights this degenerates to the historical round-robin sequence.
+	state := r.swrrStateFor(key)
+	liveWeights := make(map[string]int, len(live))
+	for _, c := range live {
+		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
+	}
 	total := state.advance(liveWeights)
 
 	// Order by running counter (desc); ties keep the structural candidate order so that
@@ -383,20 +394,7 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	live := make([]candidateEntry, 0, len(candidates))
-	rateLimitHit := false
-	for _, c := range candidates {
-		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
-			continue
-		}
-		if !r.canPassRateLimits(c.cred.Name, modelID) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
-			rateLimitHit = true
-			continue
-		}
-		live = append(live, c)
-	}
+	live, rateLimitHit := r.liveCandidates(modelID, candidates)
 	if len(live) == 0 {
 		if rateLimitHit {
 			return nil, ErrRateLimitExceeded
@@ -412,35 +410,16 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 	}
 
 	bucket := make([]candidateEntry, 0, len(live))
-	liveWeights := make(map[string]int, len(live))
 	for _, c := range live {
 		if c.cred.FallbackPriority != selectedPriority {
 			continue
 		}
-		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
 		bucket = append(bucket, c)
 	}
 
-	state := r.swrrStateFor(r.schedKeyFor(modelID, false, false, "", true))
-	total := state.advance(liveWeights)
-	sort.SliceStable(bucket, func(i, j int) bool {
-		return state.currentOf(bucket[i].cred.Name) > state.currentOf(bucket[j].cred.Name)
-	})
-
-	for _, c := range bucket {
-		if !r.rateLimiter.TryAllowAll(c.cred.Name, modelID) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
-			rateLimitHit = true
-			continue
-		}
-		state.commit(c.cred.Name, total)
-		return c.cred, nil
-	}
-
-	if rateLimitHit {
-		return nil, ErrRateLimitExceeded
-	}
-	return nil, ErrNoCredentialsAvailable
+	key := r.schedKeyFor(modelID, false, false, "", true)
+	key.priority = selectedPriority
+	return r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {

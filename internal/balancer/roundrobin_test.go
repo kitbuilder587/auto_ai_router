@@ -1033,6 +1033,39 @@ func TestNextRetryForModelExcluding_FallbackPrioritySkipsFallbackCredentials(t *
 	assert.Equal(t, "primary-b", cred.Name)
 }
 
+func TestNextRetryForModelExcluding_UsesSeparateSWRRStatePerPriority(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, FallbackPriority: 10},
+		{Name: "tier-20-a", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://b.com", RPM: 100, FallbackPriority: 20, Weight: 2},
+		{Name: "tier-20-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://c.com", RPM: 100, FallbackPriority: 20},
+		{Name: "tier-30-a", Type: config.ProviderTypeBedrock, APIKey: "key4", BaseURL: "http://d.com", RPM: 100, FallbackPriority: 30, Weight: 3},
+		{Name: "tier-30-b", Type: config.ProviderTypeBedrock, APIKey: "key5", BaseURL: "http://e.com", RPM: 100, FallbackPriority: 30},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	_, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"primary-a": true})
+	require.NoError(t, err)
+	_, err = bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{
+		"primary-a": true,
+		"tier-20-a": true,
+		"tier-20-b": true,
+	})
+	require.NoError(t, err)
+
+	priorities := make(map[int]bool)
+	for key := range bal.swrr {
+		if key.priority > 0 {
+			priorities[key.priority] = true
+		}
+	}
+	assert.True(t, priorities[20])
+	assert.True(t, priorities[30])
+}
+
 func TestNextForModelExcluding_WithModelChecker(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()

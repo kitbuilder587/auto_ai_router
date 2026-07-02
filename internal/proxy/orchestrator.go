@@ -24,6 +24,7 @@ type orchestratedRequest struct {
 	request              *http.Request
 	body                 []byte // body with realModelID substituted (for non-proxy providers)
 	proxyBody            []byte // body with original modelID alias (for proxy forwarding)
+	proxyPath            string
 	baseBody             []byte
 	baseProxyBody        []byte
 	modelID              string // alias name (for rate limiting, credential lookup, logging)
@@ -44,6 +45,7 @@ type orchestratedRequest struct {
 type credentialPreparedRequest struct {
 	body                 []byte
 	proxyBody            []byte
+	proxyPath            string
 	realModelID          string
 	path                 string
 	convertedResp        bool
@@ -78,8 +80,8 @@ func (p *Proxy) orchestrateRequest(
 	if modelID != realModelID {
 		proxyBody = openai.ReplaceModelInBody(body, realModelID, modelID)
 	}
-	baseBody := append([]byte(nil), body...)
-	baseProxyBody := append([]byte(nil), proxyBody...)
+	baseBody := body
+	baseProxyBody := proxyBody
 	baseRealModelID := realModelID
 	basePath := r.URL.Path
 
@@ -191,6 +193,7 @@ func (p *Proxy) orchestrateRequest(
 		request:              r,
 		body:                 body,
 		proxyBody:            proxyBody,
+		proxyPath:            credentialReq.proxyPath,
 		baseBody:             baseBody,
 		baseProxyBody:        baseProxyBody,
 		modelID:              modelID,
@@ -247,12 +250,12 @@ func (p *Proxy) prepareRequestForCredential(
 	req := credentialPreparedRequest{
 		body:        body,
 		proxyBody:   proxyBody,
+		proxyPath:   basePath,
 		realModelID: realModelID,
 		path:        basePath,
 	}
 	if !isResponsesAPI {
 		req.body = openai.ReplaceBodyParam(realModelID, body)
-		req.proxyBody = openai.ReplaceBodyParam(realModelID, proxyBody)
 		return req, nil
 	}
 
@@ -272,16 +275,10 @@ func (p *Proxy) prepareRequestForCredential(
 		if err != nil {
 			return req, err
 		}
-		proxyChatBody, err := responses.RequestToChat(proxyBody)
-		if err != nil {
-			return req, err
-		}
 		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
-		req.proxyBody = openai.ReplaceBodyParam(realModelID, proxyChatBody)
 		req.convertedResp = true
 		if streaming {
 			req.body = injectStreamOptions(req.body)
-			req.proxyBody = injectStreamOptions(req.proxyBody)
 		}
 		req.path = strings.Replace(basePath, "/responses", "/chat/completions", 1)
 		p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",

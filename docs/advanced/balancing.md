@@ -112,7 +112,7 @@ tries another OpenAI credential for the same model.
 Set `fallback_priority` when the retry order must be explicit and may cross provider types.
 Lower numbers are tried first after the initially selected credential returns a retryable error.
 The field is applied to regular primary credentials; `is_fallback: true` credentials stay reserved
-for the fallback phase.
+for the fallback phase and cannot set `fallback_priority`.
 
 ```yaml
 credentials:

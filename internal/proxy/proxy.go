@@ -49,6 +49,15 @@ func respCtx(resp *http.Response) context.Context {
 	return resp.Request.Context()
 }
 
+func requestWithPath(r *http.Request, path string) *http.Request {
+	if r == nil || path == "" || r.URL == nil || r.URL.Path == path {
+		return r
+	}
+	clone := r.Clone(r.Context())
+	clone.URL.Path = path
+	return clone
+}
+
 // Context returns the originating client request's context (carrying the OTEL
 // span for log/trace correlation), or context.Background() when no request is
 // set (e.g. in unit tests).
@@ -845,32 +854,44 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			nextCred, err := p.balancer.NextRetryForModelExcluding(modelID, cred, triedCreds)
-			if err != nil {
-				p.logger.DebugContext(r.Context(), "No more retry credentials available",
-					"model", modelID, "attempt", attempt, "error", err)
-				break
-			}
-			nextReq, prepErr := p.prepareRequestForCredential(
-				r,
-				prepared.baseBody,
-				prepared.baseProxyBody,
-				modelID,
-				prepared.baseRealModelID,
-				prepared.basePath,
-				streaming,
-				nextCred,
-				prepared.isResponsesAPI,
-				prepared.responsesPrevHandled,
-				prepared.stickyCacheEligible,
-			)
-			if prepErr != nil {
+			var nextCred *config.CredentialConfig
+			var nextReq credentialPreparedRequest
+			retryReady := false
+			for {
+				candidate, err := p.balancer.NextRetryForModelExcluding(modelID, cred, triedCreds)
+				if err != nil {
+					p.logger.DebugContext(r.Context(), "No more retry credentials available",
+						"model", modelID, "attempt", attempt, "error", err)
+					break
+				}
+				preparedRetry, prepErr := p.prepareRequestForCredential(
+					r,
+					prepared.baseBody,
+					prepared.baseProxyBody,
+					modelID,
+					prepared.baseRealModelID,
+					prepared.basePath,
+					streaming,
+					candidate,
+					prepared.isResponsesAPI,
+					prepared.responsesPrevHandled,
+					prepared.stickyCacheEligible,
+				)
+				if prepErr == nil {
+					nextCred = candidate
+					nextReq = preparedRetry
+					retryReady = true
+					break
+				}
+				triedCreds[candidate.Name] = true
 				p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
-					"credential", nextCred.Name,
-					"provider", string(nextCred.Type),
+					"credential", candidate.Name,
+					"provider", string(candidate.Type),
 					"model", modelID,
 					"attempt", attempt,
 					"error", prepErr)
+			}
+			if !retryReady {
 				break
 			}
 
@@ -891,6 +912,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = nextReq.path
 			prepared.body = nextReq.body
 			prepared.proxyBody = nextReq.proxyBody
+			prepared.proxyPath = nextReq.proxyPath
 			prepared.realModelID = nextReq.realModelID
 			prepared.convertedResp = nextReq.convertedResp
 			prepared.passthroughResponses = nextReq.passthroughResponses
@@ -1196,7 +1218,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.logger.InfoContext(r.Context(), "All retry credentials exhausted, attempting fallback proxy",
 			"credential", cred.Name, "model", modelID,
 			"last_status", fallbackStatus, "reason", retryReason)
-		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
+		fallbackReq := requestWithPath(r, prepared.proxyPath)
+		success, fallbackReason := p.TryFallbackProxy(w, fallbackReq, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
 		if success {
 			if closeBody != nil {
 				closeBody()
