@@ -779,6 +779,88 @@ func TestConfig_ValidateFallback_AllowsFallbackOnAnyType(t *testing.T) {
 	assert.NoError(t, err, "is_fallback should be allowed on any credential type")
 }
 
+func TestConfig_ValidateFallbackPriority(t *testing.T) {
+	tests := []struct {
+		name       string
+		priority   int
+		isFallback bool
+		wantErr    bool
+	}{
+		{name: "unset", priority: 0, wantErr: false},
+		{name: "positive", priority: 10, wantErr: false},
+		{name: "negative", priority: -1, wantErr: true},
+		{name: "fallback with priority", priority: 10, isFallback: true, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, IsFallback: tt.isFallback, FallbackPriority: tt.priority},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid fallback_priority")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCredentialConfig_UnmarshalYAML_FallbackPriority(t *testing.T) {
+	t.Setenv("TEST_FALLBACK_PRIORITY", "20")
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "test-key"
+  request_timeout: 30s
+
+credentials:
+  - name: "cheapgpt"
+    type: "anthropic"
+    api_key: "key"
+    base_url: "http://cheapgpt.com"
+    rpm: 100
+    fallback_priority: 10
+  - name: "cometapi"
+    type: "anthropic"
+    api_key: "key2"
+    base_url: "http://cometapi.com"
+    rpm: 100
+    fallback_priority: os.environ/TEST_FALLBACK_PRIORITY
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [429]
+`
+
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Credentials, 2)
+	assert.Equal(t, 10, cfg.Credentials[0].FallbackPriority)
+	assert.Equal(t, 20, cfg.Credentials[1].FallbackPriority)
+}
+
 func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

@@ -49,6 +49,15 @@ func respCtx(resp *http.Response) context.Context {
 	return resp.Request.Context()
 }
 
+func requestWithPath(r *http.Request, path string) *http.Request {
+	if r == nil || path == "" || r.URL == nil || r.URL.Path == path {
+		return r
+	}
+	clone := r.Clone(r.Context())
+	clone.URL.Path = path
+	return clone
+}
+
 // Context returns the originating client request's context (carrying the OTEL
 // span for log/trace correlation), or context.Background() when no request is
 // set (e.g. in unit tests).
@@ -820,14 +829,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// === Direct provider path with same-type credential retry ===
+	// === Direct provider path with credential retry ===
 
 	// Track embeddings requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 
-	// Retry loop: try same-type credentials on provider errors (429/5xx/auth)
+	// Retry loop: try same-type credentials by default, or fallback_priority tiers when configured.
 	triedCreds := GetTried(r.Context())
-	initialCredType := cred.Type
 	var (
 		resp            *http.Response
 		responseBody    []byte
@@ -846,10 +854,44 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Check for next credential BEFORE resetting resp/responseBody.
 			// If no credential is available, break while preserving the last HTTP response
 			// (e.g. a 429 from the provider) so the caller returns it instead of 502.
-			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, initialCredType, triedCreds)
-			if err != nil {
-				p.logger.DebugContext(r.Context(), "No more same-type credentials for retry",
-					"model", modelID, "attempt", attempt, "error", err)
+			var nextCred *config.CredentialConfig
+			var nextReq credentialPreparedRequest
+			retryReady := false
+			for {
+				candidate, err := p.balancer.NextRetryForModelExcluding(modelID, cred, triedCreds)
+				if err != nil {
+					p.logger.DebugContext(r.Context(), "No more retry credentials available",
+						"model", modelID, "attempt", attempt, "error", err)
+					break
+				}
+				preparedRetry, prepErr := p.prepareRequestForCredential(
+					r,
+					prepared.baseBody,
+					prepared.baseProxyBody,
+					modelID,
+					prepared.baseRealModelID,
+					prepared.basePath,
+					streaming,
+					candidate,
+					prepared.isResponsesAPI,
+					prepared.responsesPrevHandled,
+					prepared.stickyCacheEligible,
+				)
+				if prepErr == nil {
+					nextCred = candidate
+					nextReq = preparedRetry
+					retryReady = true
+					break
+				}
+				triedCreds[candidate.Name] = true
+				p.logger.WarnContext(r.Context(), "Failed to prepare retry request for credential",
+					"credential", candidate.Name,
+					"provider", string(candidate.Type),
+					"model", modelID,
+					"attempt", attempt,
+					"error", prepErr)
+			}
+			if !retryReady {
 				break
 			}
 
@@ -864,8 +906,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			cred = nextCred
 			triedCreds[cred.Name] = true
 			logCtx.Credential = cred
+			body = nextReq.body
+			proxyBody = nextReq.proxyBody
+			realModelID = nextReq.realModelID
+			r.URL.Path = nextReq.path
+			prepared.body = nextReq.body
+			prepared.proxyBody = nextReq.proxyBody
+			prepared.proxyPath = nextReq.proxyPath
+			prepared.realModelID = nextReq.realModelID
+			prepared.convertedResp = nextReq.convertedResp
+			prepared.passthroughResponses = nextReq.passthroughResponses
+			prepared.nativeResponses = nextReq.nativeResponses
+			logCtx.RealModelID = realModelID
 
-			p.logger.InfoContext(r.Context(), "Retrying with next same-type credential",
+			p.logger.InfoContext(r.Context(), "Retrying with next credential",
 				"credential", cred.Name, "model", modelID,
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 				"retry_reason", retryReason)
@@ -889,6 +943,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				IsStreaming:    streaming,
 			}
 			provResponses = responses.NewProviderResponses(cred.Type, mode)
+			if provResponses == nil {
+				p.logger.ErrorContext(r.Context(), "Native Responses converter unavailable",
+					"error_code", http.StatusInternalServerError,
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID,
+					"request_id", logCtx.RequestID)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusInternalServerError
+				logCtx.ErrorMsg = "Native Responses converter unavailable"
+				logCtx.TargetURL = cred.BaseURL
+				WriteErrorInternal(w, "Failed to convert request")
+				return
+			}
 			var convErr error
 			requestBody, _, convErr = provResponses.RequestFrom(body)
 			if convErr != nil {
@@ -1148,10 +1215,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			fallbackStatus = resp.StatusCode
 		}
 
-		p.logger.InfoContext(r.Context(), "All same-type credentials exhausted, attempting fallback proxy",
+		p.logger.InfoContext(r.Context(), "All retry credentials exhausted, attempting fallback proxy",
 			"credential", cred.Name, "model", modelID,
 			"last_status", fallbackStatus, "reason", retryReason)
-		success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
+		fallbackReq := requestWithPath(r, prepared.proxyPath)
+		success, fallbackReason := p.TryFallbackProxy(w, fallbackReq, modelID, cred.Name, fallbackStatus, retryReason, proxyBody, start, logCtx)
 		if success {
 			if closeBody != nil {
 				closeBody()

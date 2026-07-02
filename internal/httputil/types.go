@@ -16,6 +16,7 @@ type CredentialHealthStats struct {
 	IsFallback        bool        `json:"is_fallback"`
 	IsBanned          bool        `json:"is_banned"`
 	Weight            int         `json:"weight"`
+	FallbackPriority  int         `json:"fallback_priority,omitempty"`
 	CurrentRPM        int         `json:"current_rpm"`
 	CurrentTPM        int         `json:"current_tpm"`
 	LimitRPM          int         `json:"limit_rpm"`
