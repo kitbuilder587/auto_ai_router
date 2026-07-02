@@ -23,13 +23,8 @@ type aggregateTagKey struct {
 
 // aggregateTagValue holds aggregated metrics for a tag with request_id
 type aggregateTagValue struct {
-	promptTokens       int64
-	completionTokens   int64
-	spend              float64
-	apiRequests        int64
-	successfulRequests int64
-	failedRequests     int64
-	requestID          string // Store the first request_id for the tag (required by schema)
+	aggregationValue
+	requestID string // Store the first request_id for the tag (required by schema)
 }
 
 // aggregateDailyTagSpendLogs aggregates spend logs into DailyTagSpend
@@ -98,17 +93,7 @@ func aggregateDailyTagSpendLogs(
 				}
 			}
 
-			agg := aggregations[key]
-			agg.promptTokens += int64(record.PromptTokens)
-			agg.completionTokens += int64(record.CompletionTokens)
-			agg.spend += record.Spend
-			agg.apiRequests++
-
-			if record.Status == "success" {
-				agg.successfulRequests++
-			} else {
-				agg.failedRequests++
-			}
+			aggregations[key].addRecord(record)
 		}
 	}
 
@@ -128,7 +113,9 @@ func aggregateDailyTagSpendLogs(
 			queries.QueryUpsertDailyTagSpend,
 			key.tag, value.requestID, key.date, key.apiKey, key.model, key.modelGroup,
 			key.customLLMProvider, key.mcpNamespacedToolName, key.endpoint,
-			value.promptTokens, value.completionTokens, value.spend,
+			value.promptTokens, value.completionTokens,
+			value.cacheReadInputTokens, value.cacheCreationInputTokens,
+			value.spend,
 			value.apiRequests, value.successfulRequests, value.failedRequests,
 		)
 

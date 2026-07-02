@@ -22,12 +22,29 @@ type aggregationKey struct {
 
 // aggregationValue holds aggregated metrics for a single dimension
 type aggregationValue struct {
-	promptTokens       int64
-	completionTokens   int64
-	spend              float64
-	apiRequests        int64
-	successfulRequests int64
-	failedRequests     int64
+	promptTokens             int64
+	completionTokens         int64
+	cacheReadInputTokens     int64
+	cacheCreationInputTokens int64
+	spend                    float64
+	apiRequests              int64
+	successfulRequests       int64
+	failedRequests           int64
+}
+
+func (agg *aggregationValue) addRecord(record spendLogRecord) {
+	agg.promptTokens += int64(record.PromptTokens)
+	agg.completionTokens += int64(record.CompletionTokens)
+	agg.cacheReadInputTokens += record.CacheReadInputTokens
+	agg.cacheCreationInputTokens += record.CacheCreationInputTokens
+	agg.spend += record.Spend
+	agg.apiRequests++
+
+	if record.Status == "success" {
+		agg.successfulRequests++
+	} else {
+		agg.failedRequests++
+	}
 }
 
 // aggregateDailyUserSpendLogs aggregates spend logs into DailyUserSpend.
@@ -70,17 +87,7 @@ func aggregateDailyUserSpendLogs(
 			aggregations[key] = &aggregationValue{}
 		}
 
-		agg := aggregations[key]
-		agg.promptTokens += int64(record.PromptTokens)
-		agg.completionTokens += int64(record.CompletionTokens)
-		agg.spend += record.Spend
-		agg.apiRequests++
-
-		if record.Status == "success" {
-			agg.successfulRequests++
-		} else {
-			agg.failedRequests++
-		}
+		aggregations[key].addRecord(record)
 	}
 
 	if len(aggregations) == 0 {
@@ -95,7 +102,9 @@ func aggregateDailyUserSpendLogs(
 			queries.QueryUpsertDailyUserSpend,
 			key.userID, key.date, key.apiKey, key.model, key.modelGroup,
 			key.customLLMProvider, key.mcpNamespacedToolName, key.endpoint,
-			value.promptTokens, value.completionTokens, value.spend,
+			value.promptTokens, value.completionTokens,
+			value.cacheReadInputTokens, value.cacheCreationInputTokens,
+			value.spend,
 			value.apiRequests, value.successfulRequests, value.failedRequests,
 		)
 

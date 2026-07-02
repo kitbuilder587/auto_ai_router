@@ -12,23 +12,25 @@ import (
 )
 
 type spendLogRecord struct {
-	UserID            string
-	Date              string
-	APIKey            string
-	Model             string
-	ModelGroup        string
-	CustomLLMProvider string
-	MCPNamespacedTool string
-	Endpoint          string
-	PromptTokens      int
-	CompletionTokens  int
-	Spend             float64
-	Status            string
-	RequestID         string
-	TeamID            string
-	OrganizationID    string
-	EndUser           string
-	RequestTags       string
+	UserID                   string
+	Date                     string
+	APIKey                   string
+	Model                    string
+	ModelGroup               string
+	CustomLLMProvider        string
+	MCPNamespacedTool        string
+	Endpoint                 string
+	PromptTokens             int
+	CompletionTokens         int
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+	Spend                    float64
+	Status                   string
+	RequestID                string
+	TeamID                   string
+	OrganizationID           string
+	EndUser                  string
+	RequestTags              string
 }
 
 func loadUnprocessedSpendLogRecords(
@@ -64,6 +66,8 @@ func loadUnprocessedSpendLogRecords(
 			&apiBase,
 			&record.PromptTokens,
 			&record.CompletionTokens,
+			&record.CacheReadInputTokens,
+			&record.CacheCreationInputTokens,
 			&record.Spend,
 			&status,
 			&record.RequestID,

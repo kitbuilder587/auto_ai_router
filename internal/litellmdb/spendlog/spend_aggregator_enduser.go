@@ -65,17 +65,7 @@ func aggregateDailyEndUserSpendLogs(
 			aggregations[key] = &aggregationValue{}
 		}
 
-		agg := aggregations[key]
-		agg.promptTokens += int64(record.PromptTokens)
-		agg.completionTokens += int64(record.CompletionTokens)
-		agg.spend += record.Spend
-		agg.apiRequests++
-
-		if record.Status == "success" {
-			agg.successfulRequests++
-		} else {
-			agg.failedRequests++
-		}
+		aggregations[key].addRecord(record)
 	}
 
 	logger.Debug("[DB] EndUser aggregation: scan complete",
@@ -94,7 +84,9 @@ func aggregateDailyEndUserSpendLogs(
 			queries.QueryUpsertDailyEndUserSpend,
 			key.endUserID, key.date, key.apiKey, key.model, key.modelGroup,
 			key.customLLMProvider, key.mcpNamespacedToolName, key.endpoint,
-			value.promptTokens, value.completionTokens, value.spend,
+			value.promptTokens, value.completionTokens,
+			value.cacheReadInputTokens, value.cacheCreationInputTokens,
+			value.spend,
 			value.apiRequests, value.successfulRequests, value.failedRequests,
 		)
 
