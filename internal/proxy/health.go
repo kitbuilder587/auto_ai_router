@@ -1,15 +1,19 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
+	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
 func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
+	ctx := context.Background()
+
 	creds := p.balancer.GetCredentialsSnapshot()
 	totalCreds := len(creds)
 	availableCreds := p.balancer.GetAvailableCount()
@@ -17,14 +21,42 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 	healthy := availableCreds > 0
 
-	// Collect credentials info
-	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
 	if creds == nil {
 		creds = []config.CredentialConfig{}
 	}
+
+	// Collect all (credential, model) pairs we'll need stats for.
+	allTrackedModels := p.rateLimiter.GetAllModelPairs()
+	allModelPairs := make([]ratelimit.ModelPair, 0, len(allTrackedModels))
+	seenModelKeys := make(map[string]struct{}, len(allTrackedModels))
+	for _, pair := range allTrackedModels {
+		k := pair.Credential + ":" + pair.Model
+		seenModelKeys[k] = struct{}{}
+		allModelPairs = append(allModelPairs, pair)
+	}
+	if p.modelManager != nil {
+		for _, cred := range creds {
+			for _, model := range p.modelManager.GetModelsForCredential(cred.Name) {
+				k := cred.Name + ":" + model.ID
+				if _, ok := seenModelKeys[k]; ok {
+					continue
+				}
+				seenModelKeys[k] = struct{}{}
+				allModelPairs = append(allModelPairs, ratelimit.ModelPair{Credential: cred.Name, Model: model.ID})
+			}
+		}
+	}
+
+	// Fetch all RPM/TPM counters in a single backend round-trip.
+	credNames := make([]string, len(creds))
+	for i, c := range creds {
+		credNames[i] = c.Name
+	}
+	credStats, modelStats := p.rateLimiter.BatchCurrentStats(ctx, credNames, allModelPairs)
+
+	// Collect credentials info
+	credentialsInfo := make(map[string]httputil.CredentialHealthStats, len(creds))
 	for _, cred := range creds {
-		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
-		// For other credentials, use config values
 		limitRPM := cred.RPM
 		limitTPM := cred.TPM
 		if cred.Type == config.ProviderTypeProxy {
@@ -38,42 +70,24 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			}
 		}
 
-		// Check if credential has any banned models
-		isBanned := p.balancer.HasAnyBan(cred.Name)
-
+		cs := credStats[cred.Name]
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:             string(cred.Type),
 			IsFallback:       cred.IsFallback,
-			IsBanned:         isBanned,
+			IsBanned:         p.balancer.HasAnyBan(cred.Name),
 			Weight:           balancer.EffectiveWeight(0, cred.Weight),
 			FallbackPriority: cred.FallbackPriority,
-			CurrentRPM:       p.rateLimiter.GetCurrentRPM(cred.Name),
-			CurrentTPM:       p.rateLimiter.GetCurrentTPM(cred.Name),
+			CurrentRPM:       cs.RPM,
+			CurrentTPM:       cs.TPM,
 			LimitRPM:         limitRPM,
 			LimitTPM:         limitTPM,
 		}
 	}
 
-	// Collect models info from rateLimiter (which tracks all credential:model pairs)
-	modelsInfo := make(map[string]httputil.ModelHealthStats)
-
-	// Get all tracked credential:model pairs from rateLimiter (pre-parsed)
-	// This includes duplicates when same model is available from different credentials
-	allTrackedModels := p.rateLimiter.GetAllModelPairs()
-	for _, pair := range allTrackedModels {
-		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model)
-	}
-
-	if p.modelManager != nil {
-		for _, cred := range creds {
-			for _, model := range p.modelManager.GetModelsForCredential(cred.Name) {
-				modelKey := cred.Name + ":" + model.ID
-				if _, ok := modelsInfo[modelKey]; ok {
-					continue
-				}
-				p.addModelHealthStats(modelsInfo, creds, cred.Name, model.ID)
-			}
-		}
+	// Collect models info using the pre-fetched stats.
+	modelsInfo := make(map[string]httputil.ModelHealthStats, len(allModelPairs))
+	for _, pair := range allModelPairs {
+		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model, modelStats)
 	}
 
 	// Enrich models and credentials with error code counts from banned pairs
@@ -131,6 +145,7 @@ func (p *Proxy) addModelHealthStats(
 	creds []config.CredentialConfig,
 	credentialName string,
 	modelID string,
+	stats map[string]ratelimit.KeyStats,
 ) {
 	modelKey := credentialName + ":" + modelID
 	credWeight := credentialWeight(creds, credentialName)
@@ -138,13 +153,14 @@ func (p *Proxy) addModelHealthStats(
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
 	}
+	ms := stats[modelKey]
 	modelsInfo[modelKey] = httputil.ModelHealthStats{
 		Credential: credentialName,
 		Model:      modelID,
 		IsBanned:   p.balancer.IsBanned(credentialName, modelID),
 		Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
-		CurrentRPM: p.rateLimiter.GetCurrentModelRPM(credentialName, modelID),
-		CurrentTPM: p.rateLimiter.GetCurrentModelTPM(credentialName, modelID),
+		CurrentRPM: ms.RPM,
+		CurrentTPM: ms.TPM,
 		LimitRPM:   p.rateLimiter.GetModelLimitRPM(credentialName, modelID),
 		LimitTPM:   p.rateLimiter.GetModelLimitTPM(credentialName, modelID),
 	}
