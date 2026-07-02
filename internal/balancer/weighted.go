@@ -15,6 +15,7 @@ type schedKey struct {
 	proxyOnly    bool
 	reqType      config.ProviderType
 	excluding    bool
+	priority     int
 }
 
 // swrrState is the SWRR scheduler for one schedKey. Nodes are keyed by credential name so

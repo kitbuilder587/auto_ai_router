@@ -72,14 +72,15 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 		cs := credStats[cred.Name]
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
-			Type:       string(cred.Type),
-			IsFallback: cred.IsFallback,
-			IsBanned:   p.balancer.HasAnyBan(cred.Name),
-			Weight:     balancer.EffectiveWeight(0, cred.Weight),
-			CurrentRPM: cs.RPM,
-			CurrentTPM: cs.TPM,
-			LimitRPM:   limitRPM,
-			LimitTPM:   limitTPM,
+			Type:             string(cred.Type),
+			IsFallback:       cred.IsFallback,
+			IsBanned:         isBanned,
+			Weight:           balancer.EffectiveWeight(0, cred.Weight),
+			FallbackPriority: cred.FallbackPriority,
+			CurrentRPM:       p.rateLimiter.GetCurrentRPM(cred.Name),
+			CurrentTPM:       p.rateLimiter.GetCurrentTPM(cred.Name),
+			LimitRPM:         limitRPM,
+			LimitTPM:         limitTPM,
 		}
 	}
 

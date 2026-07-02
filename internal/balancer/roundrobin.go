@@ -26,6 +26,11 @@ var (
 	ErrRateLimitExceeded      = errors.New("rate limit exceeded")
 )
 
+type candidateEntry struct {
+	absIdx int
+	cred   *config.CredentialConfig
+}
+
 type RoundRobin struct {
 	mu              sync.RWMutex
 	credentials     []config.CredentialConfig
@@ -192,10 +197,6 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 	defer r.mu.Unlock()
 
 	// Phase 1: Build candidate list using only structural (time-stable) filters.
-	type candidateEntry struct {
-		absIdx int
-		cred   *config.CredentialConfig
-	}
 	var candidates []candidateEntry
 
 	for i := range r.credentials {
@@ -241,13 +242,12 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	// Phase 2: Smooth weighted round-robin over candidates that are available now.
-	// Banned/rate-limited credentials are dropped here (not in Phase 1) so they don't
-	// accumulate weight while down — otherwise a high-weight provider would burst on recovery.
-	// With equal weights this degenerates to the historical round-robin sequence.
-	state := r.swrrStateFor(r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude)))
+	key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude))
+	live, rateLimitHit := r.liveCandidates(modelID, candidates)
+	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+}
 
-	liveWeights := make(map[string]int, len(candidates))
+func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry) ([]candidateEntry, bool) {
 	live := make([]candidateEntry, 0, len(candidates))
 	rateLimitHit := false
 	for _, c := range candidates {
@@ -260,9 +260,12 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 			rateLimitHit = true
 			continue
 		}
-		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
 		live = append(live, c)
 	}
+	return live, rateLimitHit
+}
+
+func (r *RoundRobin) selectWeightedLiveCandidate(modelID string, live []candidateEntry, key schedKey, rateLimitHit bool) (*config.CredentialConfig, error) {
 	if len(live) == 0 {
 		if rateLimitHit {
 			return nil, ErrRateLimitExceeded
@@ -270,6 +273,15 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
+	// Smooth weighted round-robin over candidates that are available now.
+	// Banned/rate-limited credentials are dropped before this point so they don't
+	// accumulate weight while down — otherwise a high-weight provider would burst on recovery.
+	// With equal weights this degenerates to the historical round-robin sequence.
+	state := r.swrrStateFor(key)
+	liveWeights := make(map[string]int, len(live))
+	for _, c := range live {
+		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
+	}
 	total := state.advance(liveWeights)
 
 	// Order by running counter (desc); ties keep the structural candidate order so that
@@ -335,6 +347,79 @@ func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType conf
 		return r.nextExcluding(modelID, false, true, "", exclude)
 	}
 	return r.nextExcluding(modelID, false, false, credType, exclude)
+}
+
+func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.CredentialConfig, exclude map[string]bool) (*config.CredentialConfig, error) {
+	if current == nil {
+		return nil, ErrNoCredentialsAvailable
+	}
+	if current.Type == config.ProviderTypeProxy || current.IsFallback || current.FallbackPriority <= 0 {
+		return r.NextSameTypeForModelExcluding(modelID, current.Type, exclude)
+	}
+	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude)
+}
+
+func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool) (*config.CredentialConfig, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	candidates := make([]candidateEntry, 0, len(r.credentials))
+	for i := range r.credentials {
+		cred := &r.credentials[i]
+		if len(exclude) > 0 && exclude[cred.Name] {
+			continue
+		}
+		if cred.Type == config.ProviderTypeProxy {
+			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
+			continue
+		}
+		if cred.IsFallback {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
+			continue
+		}
+		if cred.FallbackPriority <= 0 || cred.FallbackPriority < minPriority {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+			continue
+		}
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+			if !r.modelChecker.HasModel(cred.Name, modelID) {
+				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
+				continue
+			}
+		}
+		candidates = append(candidates, candidateEntry{absIdx: i, cred: cred})
+	}
+
+	if len(candidates) == 0 {
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	live, rateLimitHit := r.liveCandidates(modelID, candidates)
+	if len(live) == 0 {
+		if rateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	selectedPriority := live[0].cred.FallbackPriority
+	for _, c := range live[1:] {
+		if c.cred.FallbackPriority < selectedPriority {
+			selectedPriority = c.cred.FallbackPriority
+		}
+	}
+
+	bucket := make([]candidateEntry, 0, len(live))
+	for _, c := range live {
+		if c.cred.FallbackPriority != selectedPriority {
+			continue
+		}
+		bucket = append(bucket, c)
+	}
+
+	key := r.schedKeyFor(modelID, false, false, "", true)
+	key.priority = selectedPriority
+	return r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {

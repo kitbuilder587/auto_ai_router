@@ -118,13 +118,14 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	)
 	for i, cred := range cfg.Credentials {
 		credLog := map[string]any{
-			"name":        cred.Name,
-			"type":        cred.Type,
-			"base_url":    cred.BaseURL,
-			"auth_type":   cred.AuthType,
-			"rpm":         rpmToString(cred.RPM),
-			"tpm":         tpmToString(cred.TPM),
-			"is_fallback": cred.IsFallback,
+			"name":              cred.Name,
+			"type":              cred.Type,
+			"base_url":          cred.BaseURL,
+			"auth_type":         cred.AuthType,
+			"rpm":               rpmToString(cred.RPM),
+			"tpm":               tpmToString(cred.TPM),
+			"is_fallback":       cred.IsFallback,
+			"fallback_priority": cred.FallbackPriority,
 		}
 
 		// Add Vertex AI specific fields if present
