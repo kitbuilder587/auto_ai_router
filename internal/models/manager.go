@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -830,6 +831,109 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	return response
 }
 
+func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
+	if visibility.Admin {
+		return m.GetAllModels()
+	}
+	response := m.getAllModelsScoped(visibility)
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	visibleCreds := m.visibleCredentialNamesLocked(visibility)
+	filtered := make([]Model, 0, len(response.Data))
+	for _, model := range response.Data {
+		if m.modelVisibleLocked(model.ID, visibleCreds) {
+			filtered = append(filtered, model)
+		}
+	}
+	return ModelsResponse{Object: response.Object, Data: filtered}
+}
+
+func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
+	m.mu.RLock()
+
+	var models []Model
+	modelMap := make(map[string]bool)
+	allModelsSnapshot := append([]Model(nil), m.allModels...)
+	if len(m.modelLimits) > 0 {
+		models = make([]Model, 0, len(m.modelLimits)+len(allModelsSnapshot))
+		for modelName := range m.modelLimits {
+			models = append(models, Model{
+				ID:      modelName,
+				Object:  "model",
+				Created: converterutil.GetCurrentTimestamp(),
+				OwnedBy: "system",
+			})
+			modelMap[modelName] = true
+		}
+	} else {
+		models = make([]Model, 0, len(allModelsSnapshot))
+	}
+	for _, model := range allModelsSnapshot {
+		if !modelMap[model.ID] {
+			models = append(models, model)
+			modelMap[model.ID] = true
+		}
+	}
+
+	credentials := make([]config.CredentialConfig, 0, len(m.credentials))
+	for _, cred := range m.credentials {
+		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+			credentials = append(credentials, cred)
+		}
+	}
+
+	m.mu.RUnlock()
+
+	modelUpdates := make(map[string][]string)
+	successfullyFetched := make(map[string]bool)
+	for _, cred := range credentials {
+		if cred.Type != config.ProviderTypeProxy {
+			continue
+		}
+		remoteModels, err := m.GetRemoteModelsWithError(context.Background(), &cred)
+		if err != nil {
+			m.logger.Warn("Failed to fetch models from visible proxy during scoped model list refresh",
+				"credential", cred.Name,
+				"error", err,
+			)
+			continue
+		}
+		successfullyFetched[cred.Name] = true
+		for _, model := range remoteModels {
+			modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
+			if !modelMap[model.ID] {
+				models = append(models, model)
+				modelMap[model.ID] = true
+			}
+		}
+	}
+
+	m.mu.Lock()
+	if len(successfullyFetched) > 0 {
+		for modelID, creds := range m.modelToCredentials {
+			var kept []string
+			for _, c := range creds {
+				if !successfullyFetched[c] {
+					kept = append(kept, c)
+				}
+			}
+			if len(kept) == 0 {
+				delete(m.modelToCredentials, modelID)
+			} else {
+				m.modelToCredentials[modelID] = kept
+			}
+		}
+	}
+	for modelID, creds := range modelUpdates {
+		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
+	}
+	m.mu.Unlock()
+
+	return ModelsResponse{Object: "list", Data: models}
+}
+
 // GetCredentialsForModel returns list of credential names that support the given model
 // Works with both fetched models (when enabled=true) and config-loaded models (when enabled=false)
 func (m *Manager) GetCredentialsForModel(modelID string) []string {
@@ -1259,11 +1363,18 @@ var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
 // used when the caller requests ?include_model_access_groups=True.
 // Each (provider, model) pair appears at most once in the response.
 func (m *Manager) GetAllModelsWithAccessGroups() ModelsResponse {
+	return m.GetAllModelsWithAccessGroupsScoped(scope.AdminContext())
+}
+
+func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) ModelsResponse {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	credProvider := make(map[string]string, len(m.credentials))
 	for _, cred := range m.credentials {
+		if !visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+			continue
+		}
 		prefix, ok := providerTypeLiteLLMPrefix[cred.Type]
 		if !ok {
 			prefix = string(cred.Type)
@@ -1295,6 +1406,32 @@ func (m *Manager) GetAllModelsWithAccessGroups() ModelsResponse {
 	}
 
 	return ModelsResponse{Object: "list", Data: result}
+}
+
+func (m *Manager) visibleCredentialNamesLocked(visibility scope.Context) map[string]bool {
+	result := make(map[string]bool, len(m.credentials))
+	for _, cred := range m.credentials {
+		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+			result[cred.Name] = true
+		}
+	}
+	return result
+}
+
+func (m *Manager) modelVisibleLocked(modelID string, visibleCreds map[string]bool) bool {
+	if len(visibleCreds) == 0 {
+		return false
+	}
+	creds, ok := m.modelToCredentials[modelID]
+	if !ok {
+		return true
+	}
+	for _, cred := range creds {
+		if visibleCreds[cred] {
+			return true
+		}
+	}
+	return false
 }
 
 // GetModelsForCredential returns all models available for a specific credential.

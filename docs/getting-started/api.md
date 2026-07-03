@@ -126,4 +126,4 @@ All API requests require the `Authorization` header with the master key:
 Authorization: Bearer sk-your-master-key-here
 ```
 
-Health endpoints (`/health`, `/vhealth`, `/metrics`) do not require authentication.
+Health endpoints (`/health`, `/vhealth`, `/metrics`) do not require authentication. If credential scopes are configured, unauthenticated health views only include unscoped credentials; pass an API key to see that key's scoped view.

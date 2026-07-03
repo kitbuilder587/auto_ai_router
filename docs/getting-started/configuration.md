@@ -154,13 +154,71 @@ Each credential defines a connection to an LLM provider. See [Providers](../prov
 
 Common fields for all credentials:
 
-| Field         | Type   | Description                                                                                 |
-| ------------- | ------ | ------------------------------------------------------------------------------------------- |
-| `name`        | string | Unique credential identifier                                                                |
-| `type`        | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `proxy` |
-| `rpm`         | int    | Requests per minute limit (-1 = unlimited)                                                  |
-| `tpm`         | int    | Tokens per minute limit (-1 = unlimited)                                                    |
-| `is_fallback` | bool   | Use as fallback when primary credentials are exhausted                                      |
+| Field           | Type   | Description                                                                                 |
+| --------------- | ------ | ------------------------------------------------------------------------------------------- |
+| `name`          | string | Unique credential identifier                                                                |
+| `type`          | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `proxy` |
+| `rpm`           | int    | Requests per minute limit (-1 = unlimited)                                                  |
+| `tpm`           | int    | Tokens per minute limit (-1 = unlimited)                                                    |
+| `is_fallback`   | bool   | Use as fallback when primary credentials are exhausted                                      |
+| `scopes`        | list   | Optional client scopes allowed to use and see this credential                               |
+| `denied_scopes` | list   | Optional client scopes that must not use or see this credential                             |
+
+### Scoped credential visibility
+
+Credential scopes let one shared AIR instance expose different providers to different API keys.
+If `scopes` is omitted or empty, the credential remains available to everyone. If `scopes`
+is set, a request can use the credential only when the request API key has at least one
+matching scope. `denied_scopes` always wins over `scopes`.
+
+```yaml
+credentials:
+  - name: shared-openai
+    type: openai
+    api_key: "os.environ/OPENAI_KEY"
+    base_url: "https://api.openai.com/v1"
+    rpm: -1
+
+  - name: team-a-openai
+    type: openai
+    api_key: "os.environ/TEAM_A_OPENAI_KEY"
+    base_url: "https://api.openai.com/v1"
+    rpm: -1
+    scopes: [team-a]
+
+  - name: all-except-team-a
+    type: openai
+    api_key: "os.environ/SHARED_KEY"
+    base_url: "https://api.openai.com/v1"
+    rpm: -1
+    denied_scopes: [team-a]
+```
+
+For LiteLLM DB auth, request scopes are read from API key metadata:
+
+```json
+{
+  "air_scopes": ["team-a"],
+  "air_denied_scopes": ["premium"]
+}
+```
+
+If `air_scopes` is not set, AIR falls back to the LiteLLM API key name
+(`key_name`, then `key_alias`). For example, a key named `team-a` gets the `team-a`
+scope automatically. The master key bypasses scope filters.
+
+For DB-loaded credentials, add the same fields to `LiteLLM_CredentialsTable.credential_info`:
+
+```json
+{
+  "custom_llm_provider": "openai",
+  "air_scopes": ["team-a"],
+  "air_denied_scopes": ["premium"]
+}
+```
+
+Scope filtering applies to routing, retry/fallback selection, `/health`, `/v1/models`,
+`/trace`, `/vhealth`, and `/vtrace`.
 
 ## Models
 

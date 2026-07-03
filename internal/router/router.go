@@ -170,13 +170,18 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
+	visibility, ok := r.visibilityScope(w, req)
+	if !ok {
+		return
+	}
+
 	var modelsResp models.ModelsResponse
 	if r.modelManager != nil {
 		includeGroups := strings.EqualFold(req.URL.Query().Get("include_model_access_groups"), "true")
 		if includeGroups {
-			modelsResp = r.modelManager.GetAllModelsWithAccessGroups()
+			modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScoped(visibility)
 		} else {
-			modelsResp = r.modelManager.GetAllModels()
+			modelsResp = r.modelManager.GetAllModelsScoped(visibility)
 		}
 	} else {
 		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}

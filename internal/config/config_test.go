@@ -79,6 +79,23 @@ monitoring:
 	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
 }
 
+func TestCredentialConfig_UnmarshalScopes(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: provider
+type: openai
+api_key: sk-test
+base_url: https://api.openai.com
+scopes: [Team-A, team-a, " "]
+denied_scopes: [premium]
+forbidden_scopes: [blocked]
+`), &cred)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"team-a"}, cred.Scopes)
+	assert.Equal(t, []string{"premium", "blocked"}, cred.DeniedScopes)
+}
+
 func TestConfig_Validate_InvalidAuthType(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

@@ -217,6 +217,27 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 	assert.Equal(t, "unhealthy", response["status"])
 }
 
+func TestServeHTTP_HealthCheck_ScopedViewDoesNotDriveStatusCode(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
+	}
+	prx := createProxyWithConfig(credentials, nil)
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "unhealthy", response["status"])
+	assert.Equal(t, float64(0), response["total_credentials"])
+}
+
 func TestServeHTTP_V1Models_Enabled(t *testing.T) {
 	modelManager := createEnabledTestModelManager()
 

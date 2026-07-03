@@ -105,6 +105,23 @@ func TestFillCredentialFromParams(t *testing.T) {
 	})
 }
 
+func TestConvertCredentialTableToConfig_Scopes(t *testing.T) {
+	provider := "openai"
+	name := "team-a-openai"
+	cfg := convertCredentialTableToConfig(queries.CredentialTable{
+		CredentialName: &name,
+		CredentialInfo: &queries.CredentialLiteLLMInfo{
+			CustomLLMProvider:  &provider,
+			AirScopes:          []string{"Team-A", "team-a"},
+			AirDeniedScopes:    []string{"premium"},
+			AirForbiddenScopes: []string{"blocked"},
+		},
+	})
+
+	assert.Equal(t, []string{"team-a"}, cfg.Scopes)
+	assert.Equal(t, []string{"premium", "blocked"}, cfg.DeniedScopes)
+}
+
 // TestConvertCredentialTableToConfig_ProviderTypes tests various provider types
 func TestConvertCredentialTableToConfig_ProviderTypes(t *testing.T) {
 	tests := []struct {

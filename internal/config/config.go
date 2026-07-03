@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"gopkg.in/yaml.v3"
 )
 
@@ -574,6 +575,8 @@ type CredentialConfig struct {
 	TPM              int          `yaml:"tpm"`
 	Weight           int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 	FallbackPriority int          `yaml:"fallback_priority,omitempty"`
+	Scopes           []string     `yaml:"scopes,omitempty"`
+	DeniedScopes     []string     `yaml:"denied_scopes,omitempty"`
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -601,6 +604,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		Scopes           []string         `yaml:"scopes,omitempty"`
+		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
+		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
 		ProjectID        string           `yaml:"project_id,omitempty"`
 		Location         string           `yaml:"location,omitempty"`
 		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
@@ -620,6 +626,8 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
 	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
+	c.Scopes = scope.NormalizeList(temp.Scopes)
+	c.DeniedScopes = scope.NormalizeList(append(temp.DeniedScopes, temp.ForbiddenScopes...))
 
 	// Resolve Vertex AI specific fields
 	c.ProjectID = resolveEnvString(temp.ProjectID)

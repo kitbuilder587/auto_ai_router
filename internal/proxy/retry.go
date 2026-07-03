@@ -10,6 +10,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 // RetryReason describes why a request is being retried
@@ -135,7 +136,11 @@ func (p *Proxy) TryFallbackProxy(
 	var lastFallbackCred *config.CredentialConfig
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		fallbackCred, err := p.balancer.NextFallbackProxyForModel(modelID)
+		visibility := scope.PublicContext()
+		if logCtx != nil {
+			visibility = logCtx.Scope
+		}
+		fallbackCred, err := p.balancer.NextFallbackProxyForModelScoped(modelID, visibility)
 		if err != nil {
 			if attempt == 0 {
 				p.logger.DebugContext(r.Context(), "No fallback proxy available for retry",

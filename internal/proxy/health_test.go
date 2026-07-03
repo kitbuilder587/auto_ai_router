@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
@@ -116,6 +117,25 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	fallbackStats := status.Credentials["fallback_cred"]
 	assert.Equal(t, "http://fallback.com", fallbackStats.BaseURL)
 	assert.Equal(t, true, fallbackStats.IsFallback)
+}
+
+func TestHealthCheckScoped_FiltersCredentials(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithMasterKey("test-key").
+		WithCredentials(
+			config.CredentialConfig{Name: "shared", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://shared.com", RPM: 100},
+			config.CredentialConfig{Name: "team-a", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
+			config.CredentialConfig{Name: "team-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://team-b.example", RPM: 100, Scopes: []string{"team-b"}},
+		).
+		Build()
+
+	healthy, status := prx.HealthCheckScoped(scope.NewContext([]string{"team-a"}, nil))
+
+	assert.True(t, healthy)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Contains(t, status.Credentials, "shared")
+	assert.Contains(t, status.Credentials, "team-a")
+	assert.NotContains(t, status.Credentials, "team-b")
 }
 
 func TestHealthCheck_CredentialRateLimit(t *testing.T) {

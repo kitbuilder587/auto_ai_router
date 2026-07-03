@@ -51,7 +51,7 @@ All API requests require the `Authorization` header with the master key:
 curl -H "Authorization: Bearer sk-your-master-key" http://localhost:8080/v1/chat/completions ...
 ```
 
-Health and metrics endpoints (`/health`, `/vhealth`, `/metrics`) do not require authentication.
+Health and metrics endpoints (`/health`, `/vhealth`, `/metrics`) do not require authentication. If credential scopes are configured, unauthenticated health views only include unscoped credentials; pass an API key to see that key's scoped view.
 
 ## LiteLLM API Key Auth
 

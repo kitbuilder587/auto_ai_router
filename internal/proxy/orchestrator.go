@@ -17,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
@@ -330,9 +331,8 @@ func (p *Proxy) authenticateRequest(
 		return false
 	}
 
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	logCtx.Token = token
-	if token == authHeader {
+	token, ok := bearerToken(authHeader)
+	if !ok {
 		p.logger.WarnContext(r.Context(), "Invalid Authorization header format",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
@@ -341,9 +341,11 @@ func (p *Proxy) authenticateRequest(
 		WriteErrorUnauthorized(w, "Invalid Authorization header format")
 		return false
 	}
+	logCtx.Token = token
 
 	if token == p.masterKey {
 		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
+		logCtx.Scope = scope.AdminContext()
 		return true
 	}
 
@@ -366,6 +368,7 @@ func (p *Proxy) authenticateRequest(
 				"team_id", tokenInfo.TeamID,
 			)
 		}
+		logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
 		return true
 	} else {
 		p.logger.WarnContext(r.Context(), "Invalid master key",
@@ -452,7 +455,7 @@ func (p *Proxy) selectCredentialForModel(
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
 	if preferredCredentialName != "" {
-		cred, err := p.balancer.NextSpecific(preferredCredentialName, modelID)
+		cred, err := p.balancer.NextSpecificScoped(preferredCredentialName, modelID, logCtx.Scope)
 		if err == nil {
 			p.logger.DebugContext(logCtx.Context(), "Responses API sticky routing: using credential from previous_response_id",
 				"credential", cred.Name,
@@ -470,7 +473,7 @@ func (p *Proxy) selectCredentialForModel(
 
 	if sessionID != "" && p.sessionStore != nil {
 		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
-			cred, err := p.balancer.NextSpecific(credName, modelID)
+			cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
 			if err == nil {
 				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
 					"session_id", sessionID,
@@ -489,13 +492,13 @@ func (p *Proxy) selectCredentialForModel(
 		}
 	}
 
-	cred, err := p.balancer.NextForModel(modelID)
+	cred, err := p.balancer.NextForModelScoped(modelID, logCtx.Scope)
 	if err == nil {
 		return cred, true
 	}
 
 	fallbackErr := error(nil)
-	cred, fallbackErr = p.balancer.NextFallbackForModel(modelID)
+	cred, fallbackErr = p.balancer.NextFallbackForModelScoped(modelID, logCtx.Scope)
 	if fallbackErr == nil {
 		return cred, true
 	}

@@ -7,6 +7,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1282,6 +1283,48 @@ func TestNextSpecific_RespectsModelCheckerBanAndRateLimit(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
 
+func TestNextForModelScoped_FiltersCredentialScopes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "shared", APIKey: "key1", BaseURL: "http://shared.com", RPM: -1},
+		{Name: "team-a", APIKey: "key2", BaseURL: "http://team-a.example", RPM: -1, Scopes: []string{"team-a"}},
+		{Name: "team-b", APIKey: "key3", BaseURL: "http://team-b.example", RPM: -1, Scopes: []string{"team-b"}},
+		{Name: "blocked", APIKey: "key4", BaseURL: "http://blocked.com", RPM: -1, Scopes: []string{"team-a"}, DeniedScopes: []string{"team-a"}},
+	}
+	bal := New(credentials, f2b, rl)
+	teamAScope := scope.NewContext([]string{"team-a"}, nil)
+
+	for i := 0; i < 8; i++ {
+		cred, err := bal.NextForModelScoped("", teamAScope)
+		require.NoError(t, err)
+		assert.Contains(t, []string{"shared", "team-a"}, cred.Name)
+	}
+
+	_, err := bal.NextSpecificScoped("team-b", "", teamAScope)
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+	_, err = bal.NextSpecificScoped("blocked", "", teamAScope)
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+}
+
+func TestNextForModelScoped_SharesCycleForSameVisiblePool(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "shared-a", APIKey: "key1", BaseURL: "http://a.com", RPM: -1},
+		{Name: "shared-b", APIKey: "key2", BaseURL: "http://b.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	first, err := bal.NextForModelScoped("", scope.NewContext([]string{"team-a"}, nil))
+	require.NoError(t, err)
+	second, err := bal.NextForModelScoped("", scope.NewContext([]string{"team-b"}, nil))
+	require.NoError(t, err)
+
+	assert.Equal(t, "shared-a", first.Name)
+	assert.Equal(t, "shared-b", second.Name)
+}
+
 func TestSetLogger(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{500})
 	rl := ratelimit.New()
@@ -1461,7 +1504,8 @@ func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 	_, err := bal.NextForModel("")
 	require.NoError(t, err)
 
-	state := bal.swrr[schedKey{}]
+	key := schedKey{scopeKey: "yaml-1\x00yaml-2"}
+	state := bal.swrr[key]
 	require.NotNil(t, state)
 	beforeYAML1 := state.currentOf("yaml-1")
 	beforeYAML2 := state.currentOf("yaml-2")
@@ -1470,7 +1514,7 @@ func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 		{Name: "db-1", APIKey: "dbkey1", BaseURL: "http://db1.com", RPM: -1},
 	})
 
-	assert.Same(t, state, bal.swrr[schedKey{}], "DB sync should not reset existing SWRR cycles")
+	assert.Same(t, state, bal.swrr[key], "DB sync should not reset existing SWRR cycles")
 	assert.Equal(t, beforeYAML1, state.currentOf("yaml-1"))
 	assert.Equal(t, beforeYAML2, state.currentOf("yaml-2"))
 }

@@ -11,15 +11,31 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
+	return p.HealthCheckScoped(scope.AdminContext())
+}
+
+func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.ProxyHealthResponse) {
 	ctx := context.Background()
 
-	creds := p.balancer.GetCredentialsSnapshot()
+	creds := visibleCredentials(p.balancer.GetCredentialsSnapshot(), visibility)
 	totalCreds := len(creds)
-	availableCreds := p.balancer.GetAvailableCount()
-	bannedCreds := p.balancer.GetBannedCount()
+	visibleCreds := credentialNameSet(creds)
+	availableCreds := 0
+	for _, cred := range creds {
+		if !p.balancer.HasAnyBan(cred.Name) {
+			availableCreds++
+		}
+	}
+	bannedCreds := 0
+	for _, bp := range p.balancer.GetBannedPairs() {
+		if visibleCreds[bp.Credential] {
+			bannedCreds++
+		}
+	}
 
 	healthy := availableCreds > 0
 
@@ -32,6 +48,9 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	allModelPairs := make([]ratelimit.ModelPair, 0, len(allTrackedModels))
 	seenModelKeys := make(map[string]struct{}, len(allTrackedModels))
 	for _, pair := range allTrackedModels {
+		if !visibleCreds[pair.Credential] {
+			continue
+		}
 		k := pair.Credential + ":" + pair.Model
 		seenModelKeys[k] = struct{}{}
 		allModelPairs = append(allModelPairs, pair)
@@ -98,6 +117,9 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// credentialErrorCounts accumulates error counts per credential across all its banned models
 	credentialErrorCounts := make(map[string]map[int]int)
 	for _, bp := range bannedPairs {
+		if !visibleCreds[bp.Credential] {
+			continue
+		}
 		modelKey := bp.Credential + ":" + bp.Model
 		if ms, ok := modelsInfo[modelKey]; ok {
 			if len(bp.ErrorCodeCounts) > 0 {
@@ -141,6 +163,27 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	}
 
 	return healthy, status
+}
+
+func visibleCredentials(creds []config.CredentialConfig, visibility scope.Context) []config.CredentialConfig {
+	if len(creds) == 0 {
+		return nil
+	}
+	result := make([]config.CredentialConfig, 0, len(creds))
+	for _, cred := range creds {
+		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+			result = append(result, cred)
+		}
+	}
+	return result
+}
+
+func credentialNameSet(creds []config.CredentialConfig) map[string]bool {
+	result := make(map[string]bool, len(creds))
+	for _, cred := range creds {
+		result[cred.Name] = true
+	}
+	return result
 }
 
 func cleanBaseURL(raw string) string {

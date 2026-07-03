@@ -21,6 +21,7 @@ SELECT
   t.expires,
   t.blocked as token_blocked,
   t.models as token_models,
+  t.metadata as token_metadata,
 
   -- ============ User ============
   u.user_id as user_id_check,
