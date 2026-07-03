@@ -105,7 +105,48 @@ This gives you an effective 200 RPM for `gpt-4o`.
 
 ## Fallback Priority
 
-Primary credentials (non-fallback) are always tried first. Fallback credentials (`is_fallback: true`) are used only when all primary credentials are exhausted. See [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
+Primary credentials (non-fallback) are used for the initial request. By default provider retry
+stays within the same provider type: if an OpenAI credential returns `429` or `5xx`, the router
+tries another OpenAI credential for the same model.
+
+Set `fallback_priority` when the retry order must be explicit and may cross provider types.
+Lower numbers are tried first after the initially selected credential returns a retryable error.
+The field is applied to regular primary credentials; `is_fallback: true` credentials stay reserved
+for the fallback phase and cannot set `fallback_priority`.
+
+```yaml
+credentials:
+  - name: "primary-anthropic"
+    type: "anthropic"
+    api_key: "os.environ/PRIMARY_ANTHROPIC_KEY"
+    base_url: "https://anthropic-primary.example.com"
+    rpm: 400
+    fallback_priority: 10
+
+  - name: "backup-anthropic"
+    type: "anthropic"
+    api_key: "os.environ/BACKUP_ANTHROPIC_KEY"
+    base_url: "https://anthropic-backup.example.com"
+    rpm: 500
+    fallback_priority: 20
+
+  - name: "bedrock-reserve"
+    type: "bedrock"
+    api_key: "os.environ/BEDROCK_RESERVE_KEY"
+    base_url: "https://bedrock-reserve.example.com"
+    rpm: 1000
+    fallback_priority: 30
+```
+
+With this configuration, if `primary-anthropic` returns a retryable error for `claude`, the router
+tries `backup-anthropic` next. If `backup-anthropic` is also unavailable, it tries
+`bedrock-reserve`. When the next credential has a credential-specific real model mapping, the
+router re-resolves the model before sending the retry request, so an Anthropic model alias can
+safely move to a Bedrock credential.
+
+If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved.
+Fallback credentials (`is_fallback: true`) are still used only by the fallback mechanism.
+See [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
 
 ## Proxy Chain Fallback
 

@@ -246,3 +246,11 @@ func (b *localBackend) deleteKey(_ context.Context, key string) {
 	defer b.mu.Unlock()
 	delete(b.counters, key)
 }
+
+func (b *localBackend) batchCurrentStats(ctx context.Context, keys []string) map[string][2]int {
+	out := make(map[string][2]int, len(keys))
+	for _, key := range keys {
+		out[key] = [2]int{b.currentRPM(ctx, key), b.currentTPM(ctx, key)}
+	}
+	return out
+}

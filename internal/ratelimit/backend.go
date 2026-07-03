@@ -39,4 +39,8 @@ type counterBackend interface {
 
 	// deleteKey removes all RPM/TPM counters for key.
 	deleteKey(ctx context.Context, key string)
+
+	// batchCurrentStats returns [rpm, tpm] for each key in a single round-trip.
+	// Keys not found in storage return [0, 0].
+	batchCurrentStats(ctx context.Context, keys []string) map[string][2]int
 }

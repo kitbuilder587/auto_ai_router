@@ -412,8 +412,16 @@ func initializeBalancer(
 
 	var rateLimiter *ratelimit.RPMLimiter
 	if redisBackend != nil {
-		log.Info("Rate limiter: using Redis backend")
-		rateLimiter = ratelimit.NewWithRedis(redisBackend)
+		if cfg.Redis.Hybrid {
+			log.Info("Rate limiter: using hybrid backend (local decisions, async Redis sync)",
+				"sync_interval", cfg.Redis.SyncInterval)
+			hybridBackend := ratelimit.NewHybridBackend(redisBackend, cfg.Redis.SyncInterval)
+			defer hybridBackend.Close()
+			rateLimiter = ratelimit.NewWithHybrid(hybridBackend)
+		} else {
+			log.Info("Rate limiter: using Redis backend")
+			rateLimiter = ratelimit.NewWithRedis(redisBackend)
+		}
 	} else {
 		rateLimiter = ratelimit.New()
 	}
@@ -821,24 +829,33 @@ func updateMetrics(
 ) {
 	credentials := bal.GetCredentialsSnapshot()
 
+	credNames := make([]string, 0, len(credentials))
 	for _, cred := range credentials {
-		if bal.IsProxyCredential(cred.Name) {
-			continue
+		if !bal.IsProxyCredential(cred.Name) {
+			credNames = append(credNames, cred.Name)
 		}
-
-		metrics.UpdateCredentialRPM(cred.Name, rateLimiter.GetCurrentRPM(cred.Name))
-		metrics.UpdateCredentialTPM(cred.Name, rateLimiter.GetCurrentTPM(cred.Name))
 	}
 
-	// Update model metrics
-	for _, key := range rateLimiter.GetAllModels() {
-		parts := modelupdate.SplitCredentialModel(key)
-		if len(parts) != 2 || bal.IsProxyCredential(parts[0]) {
-			continue
+	modelPairs := rateLimiter.GetAllModelPairs()
+	filteredPairs := make([]ratelimit.ModelPair, 0, len(modelPairs))
+	for _, p := range modelPairs {
+		if !bal.IsProxyCredential(p.Credential) {
+			filteredPairs = append(filteredPairs, p)
 		}
+	}
 
-		metrics.UpdateModelRPM(parts[0], parts[1], rateLimiter.GetCurrentModelRPM(parts[0], parts[1]))
-		metrics.UpdateModelTPM(parts[0], parts[1], rateLimiter.GetCurrentModelTPM(parts[0], parts[1]))
+	credStats, modelStats := rateLimiter.BatchCurrentStats(context.Background(), credNames, filteredPairs)
+
+	for _, name := range credNames {
+		cs := credStats[name]
+		metrics.UpdateCredentialRPM(name, cs.RPM)
+		metrics.UpdateCredentialTPM(name, cs.TPM)
+	}
+
+	for _, p := range filteredPairs {
+		ms := modelStats[p.Credential+":"+p.Model]
+		metrics.UpdateModelRPM(p.Credential, p.Model, ms.RPM)
+		metrics.UpdateModelTPM(p.Credential, p.Model, ms.TPM)
 	}
 }
 

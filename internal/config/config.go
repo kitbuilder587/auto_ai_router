@@ -309,6 +309,15 @@ type RedisConfig struct {
 
 	// CommandTimeout is the timeout for individual Redis commands (default: 3s).
 	CommandTimeout time.Duration `yaml:"command_timeout,omitempty"`
+
+	// Hybrid enables the hybrid backend: rate-limit decisions are made locally
+	// (zero added latency) and Redis is updated asynchronously in batches.
+	// Recommended when Redis latency is high or for single-instance deployments.
+	Hybrid bool `yaml:"hybrid,omitempty"`
+
+	// SyncInterval controls how often the hybrid backend pulls aggregated stats
+	// from Redis to account for traffic from other instances (default: 5s).
+	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for RedisConfig with env variable support.
@@ -329,6 +338,8 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxConnLifetime   string   `yaml:"max_conn_lifetime,omitempty"`
 		KeyTTL            string   `yaml:"key_ttl,omitempty"`
 		CommandTimeout    string   `yaml:"command_timeout,omitempty"`
+		Hybrid            string   `yaml:"hybrid,omitempty"`
+		SyncInterval      string   `yaml:"sync_interval,omitempty"`
 	}
 
 	var temp tempConfig
@@ -386,6 +397,13 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Command timeout
 	if r.CommandTimeout, err = parseField(temp.CommandTimeout, 3*time.Second, time.ParseDuration, "redis.command_timeout"); err != nil {
+		return err
+	}
+
+	if r.Hybrid, err = parseField(temp.Hybrid, false, strconv.ParseBool, "redis.hybrid"); err != nil {
+		return err
+	}
+	if r.SyncInterval, err = parseField(temp.SyncInterval, 5*time.Second, time.ParseDuration, "redis.sync_interval"); err != nil {
 		return err
 	}
 
@@ -547,14 +565,15 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name     string       `yaml:"name"`
-	Type     ProviderType `yaml:"type"`
-	APIKey   string       `yaml:"api_key"`
-	BaseURL  string       `yaml:"base_url"`
-	AuthType string       `yaml:"auth_type,omitempty"`
-	RPM      int          `yaml:"rpm"`
-	TPM      int          `yaml:"tpm"`
-	Weight   int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	Name             string       `yaml:"name"`
+	Type             ProviderType `yaml:"type"`
+	APIKey           string       `yaml:"api_key"`
+	BaseURL          string       `yaml:"base_url"`
+	AuthType         string       `yaml:"auth_type,omitempty"`
+	RPM              int          `yaml:"rpm"`
+	TPM              int          `yaml:"tpm"`
+	Weight           int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	FallbackPriority int          `yaml:"fallback_priority,omitempty"`
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -573,20 +592,21 @@ type CredentialConfig struct {
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name            string           `yaml:"name"`
-		Type            string           `yaml:"type"`
-		APIKey          string           `yaml:"api_key"`
-		BaseURL         string           `yaml:"base_url"`
-		AuthType        string           `yaml:"auth_type,omitempty"`
-		RPM             string           `yaml:"rpm"`
-		TPM             string           `yaml:"tpm"`
-		Weight          string           `yaml:"weight"`
-		ProjectID       string           `yaml:"project_id,omitempty"`
-		Location        string           `yaml:"location,omitempty"`
-		CredentialsFile string           `yaml:"credentials_file,omitempty"`
-		CredentialsJSON string           `yaml:"credentials_json,omitempty"`
-		IsFallback      string           `yaml:"is_fallback,omitempty"`
-		Models          []ModelRPMConfig `yaml:"models,omitempty"`
+		Name             string           `yaml:"name"`
+		Type             string           `yaml:"type"`
+		APIKey           string           `yaml:"api_key"`
+		BaseURL          string           `yaml:"base_url"`
+		AuthType         string           `yaml:"auth_type,omitempty"`
+		RPM              string           `yaml:"rpm"`
+		TPM              string           `yaml:"tpm"`
+		Weight           string           `yaml:"weight"`
+		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		ProjectID        string           `yaml:"project_id,omitempty"`
+		Location         string           `yaml:"location,omitempty"`
+		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
+		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
+		IsFallback       string           `yaml:"is_fallback,omitempty"`
+		Models           []ModelRPMConfig `yaml:"models,omitempty"`
 	}
 
 	var temp tempConfig
@@ -616,6 +636,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.FallbackPriority, err = parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 
@@ -1308,6 +1331,12 @@ func (c *Config) Validate() error {
 		// Weight: 0 means default (1), positive means a higher share. Negative is invalid.
 		if cred.Weight < 0 {
 			return fmt.Errorf("credential %s: invalid weight: %d (must be 0 for default or positive number)", cred.Name, cred.Weight)
+		}
+		if cred.FallbackPriority < 0 {
+			return fmt.Errorf("credential %s: invalid fallback_priority: %d (must be >= 0)", cred.Name, cred.FallbackPriority)
+		}
+		if cred.IsFallback && cred.FallbackPriority > 0 {
+			return fmt.Errorf("credential %s: invalid fallback_priority: fallback credentials cannot set fallback_priority", cred.Name)
 		}
 	}
 
