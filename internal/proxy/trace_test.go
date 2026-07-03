@@ -77,6 +77,7 @@ func TestTraceCheck_Depth0_LocalOnly(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, "router-local", result.RouterID)
 	assert.NotEmpty(t, result.Status)
+	assert.Equal(t, upstream.URL, result.Credentials["up"].BaseURL)
 	assert.Nil(t, result.Upstreams, "upstreams must be nil at depth=0")
 	assert.False(t, fetchCalled, "upstream server must not be contacted at depth=0")
 }
@@ -265,6 +266,7 @@ func TestHandleTrace_JSON(t *testing.T) {
 		"response body must be valid JSON ProxyTraceResponse")
 	assert.Equal(t, "trace-router", resp.RouterID)
 	assert.NotEmpty(t, resp.Status)
+	assert.Equal(t, "http://api.openai.com", resp.Credentials["c1"].BaseURL)
 }
 
 // TestHandleTrace_DepthParam_Zero verifies depth=0 causes no upstream fetches.
@@ -430,5 +432,14 @@ func TestHandleVisualTrace_HTML(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html",
 		"Content-Type must be text/html for visual trace endpoint")
-	assert.NotEmpty(t, w.Body.String(), "visual trace response body must not be empty")
+	body := w.Body.String()
+	assert.NotEmpty(t, body, "visual trace response body must not be empty")
+	assert.Contains(t, body, "route diagram")
+	assert.Contains(t, body, "chain diagram")
+	assert.Contains(t, body, "providerFilters")
+	assert.Contains(t, body, "route-provider-url")
+	assert.Contains(t, body, "chainDiagramWrap")
+	assert.Contains(t, body, "mermaid@11")
+	assert.Contains(t, body, "CHAIN_ZOOM_MAX = 20")
+	assert.NotContains(t, body, "Downstream routers")
 }

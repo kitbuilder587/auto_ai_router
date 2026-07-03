@@ -107,12 +107,14 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 
 	openaiStats := status.Credentials["openai_cred"]
 	assert.Equal(t, "openai", openaiStats.Type)
+	assert.Equal(t, "http://openai.com", openaiStats.BaseURL)
 	assert.Equal(t, false, openaiStats.IsFallback)
 	assert.Equal(t, 7, openaiStats.Weight)
 	assert.Equal(t, 100, openaiStats.LimitRPM)
 	assert.Equal(t, 2000, openaiStats.LimitTPM)
 
 	fallbackStats := status.Credentials["fallback_cred"]
+	assert.Equal(t, "http://fallback.com", fallbackStats.BaseURL)
 	assert.Equal(t, true, fallbackStats.IsFallback)
 }
 

@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -73,6 +75,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 		cs := credStats[cred.Name]
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:             string(cred.Type),
+			BaseURL:          cleanBaseURL(cred.BaseURL),
 			IsFallback:       cred.IsFallback,
 			IsBanned:         p.balancer.HasAnyBan(cred.Name),
 			Weight:           balancer.EffectiveWeight(0, cred.Weight),
@@ -138,6 +141,21 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	}
 
 	return healthy, status
+}
+
+func cleanBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 func (p *Proxy) addModelHealthStats(

@@ -61,7 +61,7 @@ If an upstream proxy does not yet expose `/trace` (older deployment), the router
 
 ## HTML Dashboard — `/vtrace`
 
-An interactive dashboard showing the router chain as a Mermaid flowchart with per-credential tables:
+An interactive dashboard showing the router chain as a readable route diagram with per-credential tables:
 
 ```
 http://localhost:8080/vtrace
@@ -71,8 +71,13 @@ http://localhost:8080/vtrace
 
 Features:
 
-- Live Mermaid diagram of the full router chain
-- Per-router credential tables (RPM/TPM usage, ban status, error codes)
+- Route diagram grouped into primary and fallback route lanes
+- Legacy chain diagram below the route diagram for full topology debugging, with vector zoom up to 2000%
+- Router focus tabs and proxy cards to drill into a downstream proxy node without rendering the whole tree
+- Provider-family filters inferred from model names, for example Anthropic, OpenAI, Google, ZAI, Qwen, or proxy
+- Model text filter for narrowing a route view to one model family or concrete model name
+- Primary/fallback route lanes showing provider URLs and when traffic moves to fallback on 429, 5xx, ban, or limit pressure
+- Per-router credential tables with source type, primary/fallback role, model-provider family, RPM/TPM usage, ban status, and error codes
 - Auto-refresh every 30 seconds
 - Dark / light theme toggle with preference saved in `localStorage`
 
