@@ -9,6 +9,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
+const liteLLMMasterKeyIdentity = "litellm-master-key"
+
 var errInvalidScopeAuth = errors.New("invalid authorization")
 
 func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
@@ -47,6 +49,9 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 	if info == nil {
 		return scope.PublicContext()
 	}
+	if isLiteLLMMasterTokenInfo(info) {
+		return scope.AdminContext()
+	}
 
 	allowed := metadataScopes(info.Metadata, "air_scopes", "air_scope")
 	if len(allowed) == 0 {
@@ -64,6 +69,10 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 	)
 
 	return scope.NewContext(allowed, denied)
+}
+
+func isLiteLLMMasterTokenInfo(info *dbmodels.TokenInfo) bool {
+	return info != nil && info.UserID == liteLLMMasterKeyIdentity
 }
 
 func metadataScopes(metadata map[string]interface{}, keys ...string) []string {

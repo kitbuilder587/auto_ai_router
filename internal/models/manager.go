@@ -142,6 +142,8 @@ type allModelsCache struct {
 	expiresAt time.Time
 }
 
+const allModelsCacheTTL = 3 * time.Second
+
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                          sync.RWMutex
@@ -164,6 +166,7 @@ type Manager struct {
 	remoteModelsCache           map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
 	cacheExpiration             time.Duration               // how long to cache remote models (default 5 minutes)
 	allModelsCache              allModelsCache              // cached result of GetAllModels (3 second TTL)
+	scopedAllModelsCache        map[string]allModelsCache   // cached scoped /v1/models responses
 }
 
 // New creates a new model manager
@@ -187,6 +190,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		credentials:                 make([]config.CredentialConfig, 0),
 		remoteModelsCache:           make(map[string]remoteModelCache),
 		cacheExpiration:             5 * time.Minute, // Default cache TTL: 5 minutes
+		scopedAllModelsCache:        make(map[string]allModelsCache),
 	}
 
 	// Load static models from config.yaml
@@ -358,6 +362,7 @@ func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.credentials = credentials
+	m.scopedAllModelsCache = make(map[string]allModelsCache)
 }
 
 // SetModelAliases sets the model alias map (alias -> real model name)
@@ -678,7 +683,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 
 	// 5. Invalidate caches so next GetAllModels rebuilds from the updated modelLimits.
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 
 	m.logger.Info("DB model data updated",
 		"db_models", len(m.dbModelNames),
@@ -824,9 +829,10 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			Object: response.Object,
 			Data:   append([]Model(nil), models...),
 		},
-		expiresAt: utils.NowUTC().Add(3 * time.Second),
+		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
 	}
 	m.allModels = append([]Model(nil), models...)
+	m.scopedAllModelsCache = make(map[string]allModelsCache)
 
 	return response
 }
@@ -835,10 +841,14 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 	if visibility.Admin {
 		return m.GetAllModels()
 	}
+	if response, ok := m.getCachedScopedAllModels(visibility); ok {
+		return response
+	}
+
 	response := m.getAllModelsScoped(visibility)
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	visibleCreds := m.visibleCredentialNamesLocked(visibility)
 	filtered := make([]Model, 0, len(response.Data))
@@ -847,7 +857,47 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 			filtered = append(filtered, model)
 		}
 	}
-	return ModelsResponse{Object: response.Object, Data: filtered}
+	scopedResponse := ModelsResponse{Object: response.Object, Data: filtered}
+	m.scopedAllModelsCache[m.scopedAllModelsCacheKeyLocked(visibility)] = allModelsCache{
+		response:  copyModelsResponse(scopedResponse),
+		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
+	}
+	return scopedResponse
+}
+
+func (m *Manager) getCachedScopedAllModels(visibility scope.Context) (ModelsResponse, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cacheKey := m.scopedAllModelsCacheKeyLocked(visibility)
+	cached, ok := m.scopedAllModelsCache[cacheKey]
+	if !ok || cached.expiresAt.IsZero() || !utils.NowUTC().Before(cached.expiresAt) {
+		return ModelsResponse{}, false
+	}
+	return copyModelsResponse(cached.response), true
+}
+
+func (m *Manager) scopedAllModelsCacheKeyLocked(visibility scope.Context) string {
+	credentialNames := make([]string, 0, len(m.credentials))
+	for _, cred := range m.credentials {
+		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+			credentialNames = append(credentialNames, cred.Name)
+		}
+	}
+	slices.Sort(credentialNames)
+	return visibility.Key() + "|c:" + strings.Join(credentialNames, "\x00")
+}
+
+func copyModelsResponse(response ModelsResponse) ModelsResponse {
+	return ModelsResponse{
+		Object: response.Object,
+		Data:   append([]Model(nil), response.Data...),
+	}
+}
+
+func (m *Manager) invalidateAllModelsCachesLocked() {
+	m.allModelsCache = allModelsCache{}
+	m.scopedAllModelsCache = make(map[string]allModelsCache)
 }
 
 func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
@@ -928,6 +978,9 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 	}
 	for modelID, creds := range modelUpdates {
 		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
+	}
+	if len(successfullyFetched) > 0 {
+		m.scopedAllModelsCache = make(map[string]allModelsCache)
 	}
 	m.mu.Unlock()
 
@@ -1029,6 +1082,7 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	if !m.contains(m.modelToCredentials[modelID], credentialName) {
 		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 	}
+	m.scopedAllModelsCache = make(map[string]allModelsCache)
 }
 
 // ReplaceModelsForCredential replaces the dynamic proxy-discovered model list
@@ -1086,7 +1140,7 @@ func (m *Manager) ReplaceModelsForCredential(credentialName string, modelIDs []s
 	}
 
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 }
 
 // SetModelWeightForCredential stores a dynamic model-level weight learned from a proxy

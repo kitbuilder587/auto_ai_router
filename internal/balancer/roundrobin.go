@@ -402,7 +402,13 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if current.Type == config.ProviderTypeProxy || current.IsFallback || current.FallbackPriority <= 0 {
+	if current.Type == config.ProviderTypeProxy || current.IsFallback {
+		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
+	}
+	if current.FallbackPriority <= 0 {
+		if r.hasTriedPriorityCredential(exclude) {
+			return r.nextUnprioritizedRetry(modelID, exclude, visibility)
+		}
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
 	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude, visibility)
@@ -412,7 +418,25 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	candidates := make([]candidateEntry, 0, len(r.credentials))
+	priorityCandidates, unprioritizedCandidates := r.splitPriorityRetryCandidatesLocked(modelID, minPriority, exclude, visibility)
+	cred, found, priorityRateLimitHit, err := r.selectPriorityRetryCandidateLocked(modelID, priorityCandidates)
+	if err != nil || found {
+		return cred, err
+	}
+	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
+}
+
+func (r *RoundRobin) nextUnprioritizedRetry(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, candidates := r.splitPriorityRetryCandidatesLocked(modelID, 1, exclude, visibility)
+	return r.selectUnprioritizedRetryCandidateLocked(modelID, candidates, false)
+}
+
+func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) ([]candidateEntry, []candidateEntry) {
+	priorityCandidates := make([]candidateEntry, 0, len(r.credentials))
+	unprioritizedCandidates := make([]candidateEntry, 0, len(r.credentials))
 	for i := range r.credentials {
 		cred := &r.credentials[i]
 		if len(exclude) > 0 && exclude[cred.Name] {
@@ -426,10 +450,6 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
-		if cred.FallbackPriority <= 0 || cred.FallbackPriority < minPriority {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
-			continue
-		}
 		if !visibility.Allows(cred.Scopes, cred.DeniedScopes) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
 			continue
@@ -440,19 +460,27 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 				continue
 			}
 		}
-		candidates = append(candidates, candidateEntry{absIdx: i, cred: cred})
+		if cred.FallbackPriority <= 0 {
+			unprioritizedCandidates = append(unprioritizedCandidates, candidateEntry{absIdx: i, cred: cred})
+			continue
+		}
+		if cred.FallbackPriority < minPriority {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+			continue
+		}
+		priorityCandidates = append(priorityCandidates, candidateEntry{absIdx: i, cred: cred})
 	}
+	return priorityCandidates, unprioritizedCandidates
+}
 
+func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool, error) {
 	if len(candidates) == 0 {
-		return nil, ErrNoCredentialsAvailable
+		return nil, false, false, nil
 	}
 
 	live, rateLimitHit := r.liveCandidates(modelID, candidates)
 	if len(live) == 0 {
-		if rateLimitHit {
-			return nil, ErrRateLimitExceeded
-		}
-		return nil, ErrNoCredentialsAvailable
+		return nil, false, rateLimitHit, nil
 	}
 
 	selectedPriority := live[0].cred.FallbackPriority
@@ -472,7 +500,49 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 
 	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(bucket))
 	key.priority = selectedPriority
-	return r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
+	cred, err := r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
+	return cred, err == nil, rateLimitHit, err
+}
+
+func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, candidates []candidateEntry, priorRateLimitHit bool) (*config.CredentialConfig, error) {
+	if len(candidates) == 0 {
+		if priorRateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	live, rateLimitHit := r.liveCandidates(modelID, candidates)
+	rateLimitHit = rateLimitHit || priorRateLimitHit
+	if len(live) == 0 {
+		if rateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(candidates))
+	key.priority = -1
+	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+}
+
+func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
+	if len(exclude) == 0 {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for name, tried := range exclude {
+		if !tried {
+			continue
+		}
+		cred := r.getCredentialByName(name)
+		if cred != nil && cred.FallbackPriority > 0 && !cred.IsFallback && cred.Type != config.ProviderTypeProxy {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {

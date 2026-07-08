@@ -117,6 +117,7 @@ func TestGetAllModelsScoped_FetchesOnlyVisibleProxyCredentials(t *testing.T) {
 	defer hiddenServer.Close()
 
 	manager := New(logger, 100, nil)
+	manager.cacheExpiration = -time.Second
 	manager.SetCredentials([]config.CredentialConfig{
 		{Name: "visible-proxy", Type: config.ProviderTypeProxy, BaseURL: visibleServer.URL, Scopes: []string{"team-a"}},
 		{Name: "hidden-proxy", Type: config.ProviderTypeProxy, BaseURL: hiddenServer.URL, Scopes: []string{"team-b"}},
@@ -124,6 +125,17 @@ func TestGetAllModelsScoped_FetchesOnlyVisibleProxyCredentials(t *testing.T) {
 
 	resp := manager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil))
 	ids := make([]string, 0, len(resp.Data))
+	for _, model := range resp.Data {
+		ids = append(ids, model.ID)
+	}
+
+	assert.Equal(t, 1, visibleRequests)
+	assert.Equal(t, 0, hiddenRequests)
+	assert.Contains(t, ids, "visible-model")
+	assert.NotContains(t, ids, "hidden-model")
+
+	resp = manager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil))
+	ids = ids[:0]
 	for _, model := range resp.Data {
 		ids = append(ids, model.ID)
 	}

@@ -1000,6 +1000,53 @@ func TestNextRetryForModelExcluding_FallbackPriorityOrder(t *testing.T) {
 	assert.Equal(t, "grant", cred.Name)
 }
 
+func TestNextRetryForModelExcluding_FallbackPriorityFallsBackToUnprioritized(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
+		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
+		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	tried := map[string]bool{"cheapgpt": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cometapi", cred.Name)
+
+	tried["cometapi"] = true
+	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cloudru", cred.Name)
+}
+
+func TestNextRetryForModelExcluding_UnprioritizedTailContinuesAcrossTypes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
+		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
+		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100},
+		{Name: "yandex", Type: config.ProviderTypeAnthropic, APIKey: "key4", BaseURL: "http://yandex.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	tried := map[string]bool{"cheapgpt": true, "cometapi": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[1], tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cloudru", cred.Name)
+
+	tried["cloudru"] = true
+	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "yandex", cred.Name)
+}
+
 func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()

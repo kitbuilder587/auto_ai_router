@@ -1,10 +1,26 @@
 package proxy
 
 import (
+	"context"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 )
+
+type scopeTestDB struct {
+	*litellmdb.NoopManager
+	info *dbmodels.TokenInfo
+}
+
+func (db scopeTestDB) IsEnabled() bool { return true }
+
+func (db scopeTestDB) IsHealthy() bool { return true }
+
+func (db scopeTestDB) ValidateToken(context.Context, string) (*dbmodels.TokenInfo, error) {
+	return db.info, nil
+}
 
 func TestScopeContextFromTokenInfo_FallsBackToKeyName(t *testing.T) {
 	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{KeyName: "Team-A"})
@@ -34,5 +50,43 @@ func TestScopeContextFromTokenInfo_MetadataScopesAndDeniedScopes(t *testing.T) {
 	}
 	if ctx.Allows([]string{"team-b", "premium"}, nil) {
 		t.Fatal("metadata denied scopes must override allow")
+	}
+}
+
+func TestScopeContextFromTokenInfo_LiteLLMMasterKeyIsAdmin(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		KeyName: liteLLMMasterKeyIdentity,
+		UserID:  liteLLMMasterKeyIdentity,
+	})
+
+	if !ctx.Admin {
+		t.Fatal("LiteLLM master key token info must become admin context")
+	}
+	if !ctx.Allows([]string{"private"}, []string{"private"}) {
+		t.Fatal("admin context must bypass credential scope filters")
+	}
+}
+
+func TestScopeContextForRequest_LiteLLMMasterKeyFromDBIsAdmin(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithMasterKey("config-master").
+		Build()
+	prx.LiteLLMDB = scopeTestDB{
+		NoopManager: litellmdb.NewNoopManager(),
+		info: &dbmodels.TokenInfo{
+			KeyName: liteLLMMasterKeyIdentity,
+			UserID:  liteLLMMasterKeyIdentity,
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("Authorization", "Bearer db-master")
+
+	ctx, err := prx.ScopeContextForRequest(req)
+	if err != nil {
+		t.Fatalf("ScopeContextForRequest returned error: %v", err)
+	}
+	if !ctx.Admin {
+		t.Fatal("DB-loaded LiteLLM master key must use admin visibility")
 	}
 }
