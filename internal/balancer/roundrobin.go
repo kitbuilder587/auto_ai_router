@@ -96,6 +96,20 @@ func (r *RoundRobin) SetModelChecker(mc ModelChecker) {
 	r.modelChecker = mc
 }
 
+func (r *RoundRobin) UpdateProviderScopes(credentialName string, scopes, deniedScopes []string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cred := r.getCredentialByName(credentialName)
+	if cred == nil {
+		return false
+	}
+
+	cred.ProviderScopes = scope.NormalizeList(scopes)
+	cred.ProviderDeniedScopes = scope.NormalizeList(deniedScopes)
+	return true
+}
+
 // getCredentialByName finds a credential by name (must be called with lock held)
 func (r *RoundRobin) getCredentialByName(name string) *config.CredentialConfig {
 	idx, ok := r.credentialIndex[name]
@@ -181,11 +195,11 @@ func (r *RoundRobin) NextSpecificScoped(credentialName, modelID string, visibili
 	}
 
 	cred := &r.credentials[idx]
-	if !visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+	if !cred.VisibleTo(visibility) {
 		return nil, ErrNoCredentialsAvailable
 	}
 	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-		if !r.modelChecker.HasModel(credentialName, modelID) {
+		if !r.hasModel(credentialName, modelID, visibility) {
 			return nil, ErrNoCredentialsAvailable
 		}
 	}
@@ -246,7 +260,7 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
-		if !visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if !cred.VisibleTo(visibility) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
 			continue
 		}
@@ -254,7 +268,7 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 		// Check model availability before ban/rate checks.
 		// model_not_available is a structural property, not a temporary issue.
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-			if !r.modelChecker.HasModel(cred.Name, modelID) {
+			if !r.hasModel(cred.Name, modelID, visibility) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
 				continue
 			}
@@ -450,12 +464,12 @@ func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPrior
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
-		if !visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if !cred.VisibleTo(visibility) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
 			continue
 		}
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-			if !r.modelChecker.HasModel(cred.Name, modelID) {
+			if !r.hasModel(cred.Name, modelID, visibility) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
 				continue
 			}
@@ -471,6 +485,15 @@ func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPrior
 		priorityCandidates = append(priorityCandidates, candidateEntry{absIdx: i, cred: cred})
 	}
 	return priorityCandidates, unprioritizedCandidates
+}
+
+func (r *RoundRobin) hasModel(credentialName, modelID string, visibility scope.Context) bool {
+	if scoped, ok := r.modelChecker.(interface {
+		HasModelScoped(credentialName, modelID string, visibility scope.Context) bool
+	}); ok {
+		return scoped.HasModelScoped(credentialName, modelID, visibility)
+	}
+	return r.modelChecker.HasModel(credentialName, modelID)
 }
 
 func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool, error) {

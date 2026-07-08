@@ -18,6 +18,7 @@ curl -H "Authorization: Bearer sk-your-key" http://localhost:8080/health
 Response includes:
 
 - Status of visible credentials (RPM/TPM usage, ban status)
+- Visible credential scopes (`scopes`, `denied_scopes`) for chained routers
 - Status of visible configured models
 - Aggregated statistics from connected proxy instances
 
@@ -41,4 +42,4 @@ http://localhost:8080/vhealth
 
 - Health endpoints do not require authentication, but unauthenticated scoped views only include credentials without `scopes`
 - The `/health` path is hardcoded and cannot be reconfigured
-- Proxy credential statistics are synced from remote `/health` endpoints every 30 seconds
+- Proxy credential statistics, model metadata, and provider scopes are synced from remote `/health` endpoints every 30 seconds

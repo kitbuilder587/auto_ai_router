@@ -104,6 +104,11 @@ func UpdateAllProxyCredentials(
 		}
 
 		updateMutex.Lock()
+		bal.UpdateProviderScopes(
+			result.credential.Name,
+			result.credential.ProviderScopes,
+			result.credential.ProviderDeniedScopes,
+		)
 		modelManager.ReplaceModelsForCredential(result.credential.Name, modelIDs)
 		for _, pair := range rateLimiter.GetAllModelPairs() {
 			if pair.Credential != result.credential.Name || modelIDSet[pair.Model] {

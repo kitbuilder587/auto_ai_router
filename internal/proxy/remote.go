@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
@@ -16,6 +17,11 @@ type ModelManagerInterface interface {
 	ReplaceModelsForCredential(credentialName string, modelIDs []string)
 	ReplaceModelWeightsForCredential(credentialName string, weights map[string]int)
 	HasModel(credentialName, modelID string) bool
+}
+
+type modelScopeUpdater interface {
+	UpdateProviderScopesForCredential(credentialName string, metadata models.ScopeMetadata)
+	ReplaceModelScopesForCredential(credentialName string, scopes map[string]models.ScopeMetadata)
 }
 
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
@@ -65,6 +71,23 @@ func UpdateStatsFromHealth(
 
 	// Update model limits from remote models
 	updateModelLimits(health, cred, rateLimiter, logger, modelManager)
+
+	updateModelScopes(health, cred, modelManager)
+}
+
+func updateModelScopes(
+	health *httputil.ProxyHealthResponse,
+	cred *config.CredentialConfig,
+	modelManager ModelManagerInterface,
+) {
+	providerScopes := models.AggregateProviderScopesFromHealth(health, cred.IsFallback)
+	cred.ProviderScopes = providerScopes.Scopes
+	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
+
+	if updater, ok := modelManager.(modelScopeUpdater); ok {
+		updater.UpdateProviderScopesForCredential(cred.Name, providerScopes)
+		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health, cred.IsFallback))
+	}
 }
 
 type limitAggregation struct {

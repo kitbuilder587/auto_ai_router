@@ -99,6 +99,8 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 			IsBanned:         p.balancer.HasAnyBan(cred.Name),
 			Weight:           balancer.EffectiveWeight(0, cred.Weight),
 			FallbackPriority: cred.FallbackPriority,
+			Scopes:           cred.EffectiveScopes(),
+			DeniedScopes:     cred.EffectiveDeniedScopes(),
 			CurrentRPM:       cs.RPM,
 			CurrentTPM:       cs.TPM,
 			LimitRPM:         limitRPM,
@@ -171,7 +173,7 @@ func visibleCredentials(creds []config.CredentialConfig, visibility scope.Contex
 	}
 	result := make([]config.CredentialConfig, 0, len(creds))
 	for _, cred := range creds {
-		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if cred.VisibleTo(visibility) {
 			result = append(result, cred)
 		}
 	}

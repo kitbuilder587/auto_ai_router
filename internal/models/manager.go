@@ -130,6 +130,11 @@ type ModelLimits struct {
 	Credential string // If set, limits apply only to this credential
 }
 
+type ScopeMetadata struct {
+	Scopes       []string
+	DeniedScopes []string
+}
+
 // remoteModelCache stores cached remote models with expiration time
 type remoteModelCache struct {
 	models    []Model
@@ -156,6 +161,7 @@ type Manager struct {
 	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
 	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
 	dynamicModelWeights         map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
+	dynamicModelScopes          map[string]map[string]ScopeMetadata
 	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
 	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
@@ -185,6 +191,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
+		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
 		defaultModelsRPM:            defaultModelsRPM,
 		logger:                      logger,
 		credentials:                 make([]config.CredentialConfig, 0),
@@ -853,7 +860,7 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 	visibleCreds := m.visibleCredentialNamesLocked(visibility)
 	filtered := make([]Model, 0, len(response.Data))
 	for _, model := range response.Data {
-		if m.modelVisibleLocked(model.ID, visibleCreds) {
+		if m.modelVisibleLocked(model.ID, visibleCreds, visibility) {
 			filtered = append(filtered, model)
 		}
 	}
@@ -880,7 +887,7 @@ func (m *Manager) getCachedScopedAllModels(visibility scope.Context) (ModelsResp
 func (m *Manager) scopedAllModelsCacheKeyLocked(visibility scope.Context) string {
 	credentialNames := make([]string, 0, len(m.credentials))
 	for _, cred := range m.credentials {
-		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if cred.VisibleTo(visibility) {
 			credentialNames = append(credentialNames, cred.Name)
 		}
 	}
@@ -929,7 +936,7 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 
 	credentials := make([]config.CredentialConfig, 0, len(m.credentials))
 	for _, cred := range m.credentials {
-		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if cred.VisibleTo(visibility) {
 			credentials = append(credentials, cred)
 		}
 	}
@@ -1025,7 +1032,20 @@ func hasModelInCredentials(modelToCredentials map[string][]string, modelID, cred
 func (m *Manager) HasModel(credentialName, modelID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.hasModelLocked(credentialName, modelID)
+}
 
+func (m *Manager) HasModelScoped(credentialName, modelID string, visibility scope.Context) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if !m.hasModelLocked(credentialName, modelID) {
+		return false
+	}
+	return m.modelScopeAllowsLocked(modelID, credentialName, visibility)
+}
+
+func (m *Manager) hasModelLocked(credentialName, modelID string) bool {
 	// Check modelToCredentials map
 	hasModel, modelExists := hasModelInCredentials(m.modelToCredentials, modelID, credentialName)
 	if hasModel {
@@ -1194,6 +1214,57 @@ func (m *Manager) ReplaceModelWeightsForCredential(credentialName string, weight
 			m.dynamicModelWeights[modelID] = make(map[string]int)
 		}
 		m.dynamicModelWeights[modelID][credentialName] = weight
+	}
+}
+
+func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes map[string]ScopeMetadata) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for modelID, credentialScopes := range m.dynamicModelScopes {
+		delete(credentialScopes, credentialName)
+		if len(credentialScopes) == 0 {
+			delete(m.dynamicModelScopes, modelID)
+		}
+	}
+
+	for modelID, metadata := range scopes {
+		if modelID == "" {
+			continue
+		}
+		metadata.Scopes = scope.NormalizeList(metadata.Scopes)
+		metadata.DeniedScopes = scope.NormalizeList(metadata.DeniedScopes)
+		if len(metadata.Scopes) == 0 && len(metadata.DeniedScopes) == 0 {
+			continue
+		}
+		if m.dynamicModelScopes[modelID] == nil {
+			m.dynamicModelScopes[modelID] = make(map[string]ScopeMetadata)
+		}
+		m.dynamicModelScopes[modelID][credentialName] = metadata
+	}
+	m.scopedAllModelsCache = make(map[string]allModelsCache)
+}
+
+func (m *Manager) UpdateProviderScopesForCredential(credentialName string, metadata ScopeMetadata) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := range m.credentials {
+		if m.credentials[i].Name != credentialName {
+			continue
+		}
+		m.credentials[i].ProviderScopes = scope.NormalizeList(metadata.Scopes)
+		m.credentials[i].ProviderDeniedScopes = scope.NormalizeList(metadata.DeniedScopes)
+		m.scopedAllModelsCache = make(map[string]allModelsCache)
+		return
 	}
 }
 
@@ -1426,7 +1497,7 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 
 	credProvider := make(map[string]string, len(m.credentials))
 	for _, cred := range m.credentials {
-		if !visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if !cred.VisibleTo(visibility) {
 			continue
 		}
 		prefix, ok := providerTypeLiteLLMPrefix[cred.Type]
@@ -1443,6 +1514,9 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 		for _, credName := range creds {
 			prefix, ok := credProvider[credName]
 			if !ok {
+				continue
+			}
+			if !m.modelScopeAllowsLocked(modelID, credName, visibility) {
 				continue
 			}
 			prefixedID := prefix + "/" + modelID
@@ -1465,14 +1539,14 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 func (m *Manager) visibleCredentialNamesLocked(visibility scope.Context) map[string]bool {
 	result := make(map[string]bool, len(m.credentials))
 	for _, cred := range m.credentials {
-		if visibility.Allows(cred.Scopes, cred.DeniedScopes) {
+		if cred.VisibleTo(visibility) {
 			result[cred.Name] = true
 		}
 	}
 	return result
 }
 
-func (m *Manager) modelVisibleLocked(modelID string, visibleCreds map[string]bool) bool {
+func (m *Manager) modelVisibleLocked(modelID string, visibleCreds map[string]bool, visibility scope.Context) bool {
 	if len(visibleCreds) == 0 {
 		return false
 	}
@@ -1481,11 +1555,20 @@ func (m *Manager) modelVisibleLocked(modelID string, visibleCreds map[string]boo
 		return true
 	}
 	for _, cred := range creds {
-		if visibleCreds[cred] {
+		if visibleCreds[cred] && m.modelScopeAllowsLocked(modelID, cred, visibility) {
 			return true
 		}
 	}
 	return false
+}
+
+func (m *Manager) modelScopeAllowsLocked(modelID, credentialName string, visibility scope.Context) bool {
+	if scopedCreds, ok := m.dynamicModelScopes[modelID]; ok {
+		if metadata, ok := scopedCreds[credentialName]; ok {
+			return visibility.Allows(metadata.Scopes, metadata.DeniedScopes)
+		}
+	}
+	return true
 }
 
 // GetModelsForCredential returns all models available for a specific credential.
@@ -1658,7 +1741,17 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		return nil, err
 	}
 
-	if len(health.Credentials) == 0 || len(health.Models) == 0 {
+	if len(health.Credentials) == 0 {
+		return nil, errProxyHealthModelMetadataUnavailable
+	}
+
+	providerScopes := AggregateProviderScopesFromHealth(&health, cred.IsFallback)
+	cred.ProviderScopes = providerScopes.Scopes
+	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
+	m.UpdateProviderScopesForCredential(cred.Name, providerScopes)
+	m.ReplaceModelScopesForCredential(cred.Name, AggregateModelScopesFromHealth(&health, cred.IsFallback))
+
+	if len(health.Models) == 0 {
 		return nil, errProxyHealthModelMetadataUnavailable
 	}
 

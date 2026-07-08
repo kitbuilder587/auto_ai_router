@@ -18,6 +18,8 @@ type CredentialHealthStats struct {
 	IsBanned          bool        `json:"is_banned"`
 	Weight            int         `json:"weight"`
 	FallbackPriority  int         `json:"fallback_priority,omitempty"`
+	Scopes            []string    `json:"scopes,omitempty"`
+	DeniedScopes      []string    `json:"denied_scopes,omitempty"`
 	CurrentRPM        int         `json:"current_rpm"`
 	CurrentTPM        int         `json:"current_tpm"`
 	LimitRPM          int         `json:"limit_rpm"`

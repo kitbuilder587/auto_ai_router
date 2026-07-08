@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -566,17 +567,19 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name             string       `yaml:"name"`
-	Type             ProviderType `yaml:"type"`
-	APIKey           string       `yaml:"api_key"`
-	BaseURL          string       `yaml:"base_url"`
-	AuthType         string       `yaml:"auth_type,omitempty"`
-	RPM              int          `yaml:"rpm"`
-	TPM              int          `yaml:"tpm"`
-	Weight           int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
-	FallbackPriority int          `yaml:"fallback_priority,omitempty"`
-	Scopes           []string     `yaml:"scopes,omitempty"`
-	DeniedScopes     []string     `yaml:"denied_scopes,omitempty"`
+	Name                 string       `yaml:"name"`
+	Type                 ProviderType `yaml:"type"`
+	APIKey               string       `yaml:"api_key"`
+	BaseURL              string       `yaml:"base_url"`
+	AuthType             string       `yaml:"auth_type,omitempty"`
+	RPM                  int          `yaml:"rpm"`
+	TPM                  int          `yaml:"tpm"`
+	Weight               int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	FallbackPriority     int          `yaml:"fallback_priority,omitempty"`
+	Scopes               []string     `yaml:"scopes,omitempty"`
+	DeniedScopes         []string     `yaml:"denied_scopes,omitempty"`
+	ProviderScopes       []string     `yaml:"-"`
+	ProviderDeniedScopes []string     `yaml:"-"`
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -589,6 +592,47 @@ type CredentialConfig struct {
 
 	// Proxy specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
+}
+
+func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
+	return visibility.Allows(c.Scopes, c.DeniedScopes) &&
+		visibility.Allows(c.ProviderScopes, c.ProviderDeniedScopes)
+}
+
+func (c CredentialConfig) EffectiveScopes() []string {
+	return intersectScopeLists(c.Scopes, c.ProviderScopes)
+}
+
+func (c CredentialConfig) EffectiveDeniedScopes() []string {
+	return scope.NormalizeList(append(append([]string(nil), c.DeniedScopes...), c.ProviderDeniedScopes...))
+}
+
+func intersectScopeLists(a, b []string) []string {
+	a = scope.NormalizeList(a)
+	b = scope.NormalizeList(b)
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	if slices.Contains(a, "*") {
+		return b
+	}
+	if slices.Contains(b, "*") {
+		return a
+	}
+	bSet := make(map[string]struct{}, len(b))
+	for _, value := range b {
+		bSet[value] = struct{}{}
+	}
+	result := make([]string, 0, min(len(a), len(b)))
+	for _, value := range a {
+		if _, ok := bSet[value]; ok {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
