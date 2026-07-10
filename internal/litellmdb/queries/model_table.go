@@ -16,6 +16,7 @@ type CustomPricingLiteLLMParams struct {
 
 	// Гибкие настройки стоимости (Flex/Priority/Cache)
 	CacheReadInputTokenCost                *float64 `json:"cache_read_input_token_cost,omitempty"`
+	CacheCreationInputTokenCost            *float64 `json:"cache_creation_input_token_cost,omitempty"`
 	CacheReadInputTokenCostAbove200kTokens *float64 `json:"cache_read_input_token_cost_above_200k_tokens,omitempty"`
 	CacheReadInputAudioTokenCost           *float64 `json:"cache_read_input_audio_token_cost,omitempty"`
 

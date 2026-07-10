@@ -497,6 +497,14 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "usage with cache write tokens",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cache_write_tokens":40}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 100 && u.CacheCreationTokens == 40
+			},
+		},
+		{
 			name:      "usage with audio output tokens",
 			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"completion_tokens_details":{"audio_tokens":10}}}`),
 			expectNil: false,
@@ -550,6 +558,14 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			expectNil: false,
 			expectUsage: func(u *StreamUsageInfo) bool {
 				return u.PromptTokens == 300 && u.CompletionTokens == 50 && u.CachedTokens == 100
+			},
+		},
+		{
+			name:      "responses API - with cache creation tokens",
+			chunk:     []byte(`{"usage":{"input_tokens":300,"output_tokens":50,"input_tokens_details":{"cache_creation_tokens":120}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 300 && u.CacheCreationTokens == 120
 			},
 		},
 		{

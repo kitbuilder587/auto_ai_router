@@ -120,6 +120,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	output := 0.02
 	outputReasoning := 0.03
 	cacheRead := 0.04
+	cacheCreation := 0.05
 	outputImage := 0.5
 	outputImageToken := 0.6
 	inputAbove200k := 0.07
@@ -129,6 +130,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 		OutputCostPerToken:                &output,
 		OutputCostPerReasoningToken:       &outputReasoning,
 		CacheReadInputTokenCost:           &cacheRead,
+		CacheCreationInputTokenCost:       &cacheCreation,
 		OutputCostPerImage:                &outputImage,
 		OutputCostPerImageToken:           &outputImageToken,
 		InputCostPerTokenAbove200kTokens:  &inputAbove200k,
@@ -140,6 +142,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	assert.Equal(t, output, price.OutputCostPerToken)
 	assert.Equal(t, outputReasoning, price.OutputCostPerReasoningToken)
 	assert.Equal(t, cacheRead, price.InputCostPerCachedToken)
+	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
 	assert.Equal(t, inputAbove200k, price.InputCostPerTokenAbove200k)
@@ -157,6 +160,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	outputAudio := 0.06
 	outputReasoning := 0.07
 	cacheRead := 0.08
+	cacheCreation := 0.085
 	outputImage := 0.09
 	outputImageToken := 0.10
 
@@ -169,6 +173,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		OutputCostPerAudioToken:           &outputAudio,
 		OutputCostPerReasoningToken:       &outputReasoning,
 		CacheReadInputTokenCost:           &cacheRead,
+		CacheCreationInputTokenCost:       &cacheCreation,
 		OutputCostPerImage:                &outputImage,
 		OutputCostPerImageToken:           &outputImageToken,
 	})
@@ -182,6 +187,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.Equal(t, outputAudio, price.OutputCostPerAudioToken)
 	assert.Equal(t, outputReasoning, price.OutputCostPerReasoningToken)
 	assert.Equal(t, cacheRead, price.InputCostPerCachedToken)
+	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
 }

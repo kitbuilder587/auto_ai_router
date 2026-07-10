@@ -100,6 +100,7 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	outputCostPerSecond := 0.0003
 
 	cacheReadInput := 0.000001
+	cacheCreationInput := 0.00000125
 	cacheReadInputAbove200k := 0.0000008
 
 	inputAudio := 0.000006
@@ -129,6 +130,7 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 		InputCostPerSecond:                         &inputCostPerSecond,
 		OutputCostPerSecond:                        &outputCostPerSecond,
 		CacheReadInputTokenCost:                    &cacheReadInput,
+		CacheCreationInputTokenCost:                &cacheCreationInput,
 		CacheReadInputTokenCostAbove200kTokens:     &cacheReadInputAbove200k,
 		InputCostPerAudioToken:                     &inputAudio,
 		InputCostPerAudioPerSecond:                 &inputAudioPerSecond,
@@ -151,6 +153,7 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	assert.Equal(t, 0.00001, *params.InputCostPerToken)
 	assert.Equal(t, 0.00003, *params.OutputCostPerToken)
 	assert.Equal(t, 0.000018, *params.OutputCostPerReasoningToken)
+	assert.Equal(t, 0.00000125, *params.CacheCreationInputTokenCost)
 }
 
 // TestGenericLiteLLMParamsFields verifies GenericLiteLLMParams structure with embedded types

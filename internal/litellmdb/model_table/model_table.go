@@ -412,6 +412,9 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheReadInputTokenCost != nil {
 		price.InputCostPerCachedToken = *p.CacheReadInputTokenCost
 	}
+	if p.CacheCreationInputTokenCost != nil {
+		price.CacheCreationInputTokenCost = *p.CacheCreationInputTokenCost
+	}
 	if p.OutputCostPerImage != nil {
 		price.OutputCostPerImage = *p.OutputCostPerImage
 	}
