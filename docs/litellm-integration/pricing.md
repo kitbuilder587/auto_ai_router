@@ -63,6 +63,8 @@ For reference:
 | `output_cost_per_token`                   | Regular output tokens                                                        |
 | `input_cost_per_token_above_200k_tokens`  | Input rate for tokens beyond the 200k threshold                              |
 | `output_cost_per_token_above_200k_tokens` | Output rate for tokens beyond the 200k threshold                             |
+| `input_cost_per_token_above_272k_tokens`  | Full-session input rate when prompt exceeds 272k tokens                       |
+| `output_cost_per_token_above_272k_tokens` | Full-session output rate when prompt exceeds 272k tokens                      |
 | `input_cost_per_audio_token`              | Audio input tokens (falls back to `input_cost_per_token` if absent)          |
 | `output_cost_per_audio_token`             | Audio output tokens (falls back to `output_cost_per_token` if absent)        |
 | `input_cost_per_image_token`              | Image input tokens                                                           |
@@ -71,6 +73,8 @@ For reference:
 | `input_cost_per_cached_token`             | Cached prompt read cost (alias: `cache_read_input_token_cost`)               |
 | `cache_read_input_token_cost`             | LiteLLM-compatible alias for `input_cost_per_cached_token`                   |
 | `cache_creation_input_token_cost`         | Prompt cache write cost (falls back to `input_cost_per_token`)                |
+| `cache_read_input_token_cost_above_272k_tokens` | Full-session cache read rate when prompt exceeds 272k tokens            |
+| `cache_creation_input_token_cost_above_272k_tokens` | Full-session cache write rate when prompt exceeds 272k tokens       |
 | `output_cost_per_cached_token`            | Cached output tokens (falls back to `output_cost_per_token`)                 |
 | `output_cost_per_prediction_token`        | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
 | `output_cost_per_image`                   | Cost per generated image (takes priority over `output_cost_per_image_token`) |
@@ -139,6 +143,10 @@ input_cost = regular_below × input_cost_per_token
 ```
 
 The same logic applies to output tokens using `output_cost_per_token_above_200k_tokens`.
+
+### Long-context pricing (272k threshold)
+
+When the prompt exceeds 272 000 tokens, models such as GPT-5.6 apply their `*_above_272k_tokens` rates to the full session rather than only the tokens beyond the threshold. The prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly 272 000 tokens, base rates still apply.
 
 ### Specialised token types
 

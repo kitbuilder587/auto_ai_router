@@ -4,8 +4,10 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
-// Tiered pricing threshold: tokens above this count are billed at a different rate
-const tokenTiering200kThreshold = 200_000
+const (
+	tokenTiering200kThreshold = 200_000
+	tokenTiering272kThreshold = 272_000
+)
 
 // CalculateTokenCosts computes costs based on token usage and model pricing
 // Returns nil if price is nil (model not found in pricing database)
@@ -26,6 +28,15 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	costs := &converter.TokenCosts{}
+	longContext272k := usage.PromptTokens > tokenTiering272kThreshold
+	inputCostPerToken := price.InputCostPerToken
+	if longContext272k && price.InputCostPerTokenAbove272k > 0 {
+		inputCostPerToken = price.InputCostPerTokenAbove272k
+	}
+	outputCostPerToken := price.OutputCostPerToken
+	if longContext272k && price.OutputCostPerTokenAbove272k > 0 {
+		outputCostPerToken = price.OutputCostPerTokenAbove272k
+	}
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
@@ -35,7 +46,9 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	// Regular input with 200k tiering
-	if price.InputCostPerTokenAbove200k > 0 && usage.PromptTokens > tokenTiering200kThreshold {
+	if longContext272k && price.InputCostPerTokenAbove272k > 0 {
+		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
+	} else if price.InputCostPerTokenAbove200k > 0 && usage.PromptTokens > tokenTiering200kThreshold {
 		above := usage.PromptTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
 		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(usage.PromptTokens))
@@ -43,7 +56,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.InputCost = float64(regularBelow)*price.InputCostPerToken +
 			float64(regularAbove)*price.InputCostPerTokenAbove200k
 	} else {
-		costs.InputCost = float64(regularInputTokens) * price.InputCostPerToken
+		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	}
 
 	// Calculate "regular" output tokens by subtracting specialized token types
@@ -54,7 +67,9 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	// Regular output with 200k tiering
-	if price.OutputCostPerTokenAbove200k > 0 && usage.CompletionTokens > tokenTiering200kThreshold {
+	if longContext272k && price.OutputCostPerTokenAbove272k > 0 {
+		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
+	} else if price.OutputCostPerTokenAbove200k > 0 && usage.CompletionTokens > tokenTiering200kThreshold {
 		above := usage.CompletionTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
 		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(usage.CompletionTokens))
@@ -62,19 +77,19 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.OutputCost = float64(regularBelow)*price.OutputCostPerToken +
 			float64(regularAbove)*price.OutputCostPerTokenAbove200k
 	} else {
-		costs.OutputCost = float64(regularOutputTokens) * price.OutputCostPerToken
+		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
 	}
 
 	// Audio tokens with fallback to regular tokens
 	audioInputCost := price.InputCostPerAudioToken
 	if audioInputCost == 0 {
-		audioInputCost = price.InputCostPerToken
+		audioInputCost = inputCostPerToken
 	}
 	costs.AudioInputCost = float64(usage.AudioInputTokens) * audioInputCost
 
 	audioOutputCost := price.OutputCostPerAudioToken
 	if audioOutputCost == 0 {
-		audioOutputCost = price.OutputCostPerToken
+		audioOutputCost = outputCostPerToken
 	}
 	costs.AudioOutputCost = float64(usage.AudioOutputTokens) * audioOutputCost
 
@@ -84,40 +99,45 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	if cachedInputCost == 0 {
 		cachedInputCost = price.CacheReadInputTokenCost
 	}
+	if longContext272k && price.CacheReadInputTokenCostAbove272k > 0 {
+		cachedInputCost = price.CacheReadInputTokenCostAbove272k
+	}
 	if cachedInputCost == 0 {
-		cachedInputCost = price.InputCostPerToken
+		cachedInputCost = inputCostPerToken
 	}
 	costs.CachedInputCost = float64(usage.CachedInputTokens) * cachedInputCost
 
-	// Cache creation tokens (Anthropic prompt caching write cost).
 	cacheCreationCost := price.CacheCreationInputTokenCost
+	if longContext272k && price.CacheCreationInputTokenCostAbove272k > 0 {
+		cacheCreationCost = price.CacheCreationInputTokenCostAbove272k
+	}
 	if cacheCreationCost == 0 {
-		cacheCreationCost = price.InputCostPerToken
+		cacheCreationCost = inputCostPerToken
 	}
 	costs.CacheCreationCost = float64(usage.CacheCreationTokens) * cacheCreationCost
 
 	cachedOutputCost := price.OutputCostPerCachedToken
 	if cachedOutputCost == 0 {
-		cachedOutputCost = price.OutputCostPerToken
+		cachedOutputCost = outputCostPerToken
 	}
 	costs.CachedOutputCost = float64(usage.CachedOutputTokens) * cachedOutputCost
 
 	// Reasoning tokens with fallback
 	reasoningCost := price.OutputCostPerReasoningToken
 	if reasoningCost == 0 {
-		reasoningCost = price.OutputCostPerToken
+		reasoningCost = outputCostPerToken
 	}
 	costs.ReasoningCost = float64(usage.ReasoningTokens) * reasoningCost
 
 	// Prediction tokens with fallback (accepted tokens)
 	predictionCost := price.OutputCostPerPredictionToken
 	if predictionCost == 0 {
-		predictionCost = price.OutputCostPerToken
+		predictionCost = outputCostPerToken
 	}
 	costs.PredictionCost = float64(usage.AcceptedPredictionTokens) * predictionCost
 
 	// Rejected prediction tokens count as regular output tokens
-	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * price.OutputCostPerToken
+	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
 
 	// Image cost calculation: supports both per-image and per-image-token pricing
 	// Priority: 1) Per-image cost if available (typical for image generation APIs)
