@@ -8,6 +8,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 // ModelManagerInterface for adding dynamically loaded models
@@ -83,6 +84,8 @@ func updateModelScopes(
 	providerScopes := models.AggregateProviderScopesFromHealth(health, cred.IsFallback)
 	cred.ProviderScopes = providerScopes.Scopes
 	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
+	cred.ProviderScopeExpression = scope.NormalizeExpression(providerScopes.ScopeExpression)
+	cred.ProviderScopeKnown = true
 
 	if updater, ok := modelManager.(modelScopeUpdater); ok {
 		updater.UpdateProviderScopesForCredential(cred.Name, providerScopes)

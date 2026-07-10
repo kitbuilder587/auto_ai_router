@@ -39,3 +39,12 @@ func TestContextAllows_AdminBypassesScopes(t *testing.T) {
 		t.Fatal("admin context must bypass scope rules")
 	}
 }
+
+func TestContextKey_DistinguishesDelimitedScopeValues(t *testing.T) {
+	separate := NewContext([]string{"a", "b"}, nil)
+	combined := NewContext([]string{"a,b"}, nil)
+
+	if separate.Key() == combined.Key() {
+		t.Fatal("different scope sets must not share a cache key")
+	}
+}

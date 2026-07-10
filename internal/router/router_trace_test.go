@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +48,26 @@ func TestServeHTTP_Trace_ValidJSON(t *testing.T) {
 	err := json.Unmarshal(w.Body.Bytes(), &resp)
 	require.NoError(t, err, "GET /trace body must be valid ProxyTraceResponse JSON")
 	assert.NotEmpty(t, resp.Status, "trace response must have a non-empty status")
+}
+
+func TestServeHTTP_Trace_UnverifiableTokenFallsBackToPublic(t *testing.T) {
+	prx := createProxyWithConfig([]config.CredentialConfig{
+		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
+	}, nil)
+	prx.LiteLLMDB = unavailableScopeDB{NoopManager: litellmdb.NewNoopManager()}
+	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+
+	req := httptest.NewRequest("GET", "/trace", nil)
+	req.Header.Set("Authorization", "Bearer stale-key")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp httputil.ProxyTraceResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "unhealthy", resp.Status)
+	assert.Empty(t, resp.Credentials)
 }
 
 // TestServeHTTP_Trace_DepthQueryParam verifies that the depth query parameter is

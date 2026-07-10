@@ -9,12 +9,9 @@ import (
 )
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
-	visibility, ok := r.visibilityScope(w, req)
-	if !ok {
-		return
-	}
+	visibility := r.visibilityScopeOrPublic(req)
 	_, status := r.proxy.HealthCheckScoped(visibility)
-	serviceHealthy, _ := r.proxy.HealthCheck()
+	serviceHealthy := r.proxy.HasAvailableCredentials()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Router-Version", r.proxy.GetVersion())

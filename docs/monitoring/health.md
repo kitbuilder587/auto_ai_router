@@ -18,7 +18,10 @@ curl -H "Authorization: Bearer sk-your-key" http://localhost:8080/health
 Response includes:
 
 - Status of visible credentials (RPM/TPM usage, ban status)
-- Visible credential scopes (`scopes`, `denied_scopes`) for chained routers
+- Exact chained scope rules in `scope_expression`. Alternatives are OR branches; every
+  requirement group inside one alternative must have at least one matching request scope.
+  `scopes` and `denied_scopes` remain for legacy readers. Exact chained enforcement
+  requires `scope_expression` support on every router in the chain.
 - Status of visible configured models
 - Aggregated statistics from connected proxy instances
 
@@ -40,6 +43,6 @@ http://localhost:8080/vhealth
 
 ## Notes
 
-- Health endpoints do not require authentication, but unauthenticated scoped views only include credentials without `scopes`
+- Health endpoints do not require authentication. Missing, invalid, or temporarily unverifiable API keys use the public view, which only includes credentials without `scopes`
 - The `/health` path is hardcoded and cannot be reconfigured
 - Proxy credential statistics, model metadata, and provider scopes are synced from remote `/health` endpoints every 30 seconds

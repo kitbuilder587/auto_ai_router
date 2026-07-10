@@ -1,5 +1,7 @@
 package httputil
 
+import "github.com/mixaill76/auto_ai_router/internal/scope"
+
 // ProxyHealthResponse represents the JSON response from /health endpoint
 type ProxyHealthResponse struct {
 	Status               string                           `json:"status"`
@@ -12,32 +14,36 @@ type ProxyHealthResponse struct {
 
 // CredentialHealthStats represents health stats for a single credential
 type CredentialHealthStats struct {
-	Type              string      `json:"type"`
-	BaseURL           string      `json:"base_url,omitempty"`
-	IsFallback        bool        `json:"is_fallback"`
-	IsBanned          bool        `json:"is_banned"`
-	Weight            int         `json:"weight"`
-	FallbackPriority  int         `json:"fallback_priority,omitempty"`
-	Scopes            []string    `json:"scopes,omitempty"`
-	DeniedScopes      []string    `json:"denied_scopes,omitempty"`
-	CurrentRPM        int         `json:"current_rpm"`
-	CurrentTPM        int         `json:"current_tpm"`
-	LimitRPM          int         `json:"limit_rpm"`
-	LimitTPM          int         `json:"limit_tpm"`
-	BannedErrorCounts map[int]int `json:"banned_error_counts,omitempty"` // aggregated error counts from banned models
+	Type              string            `json:"type"`
+	BaseURL           string            `json:"base_url,omitempty"`
+	IsFallback        bool              `json:"is_fallback"`
+	IsBanned          bool              `json:"is_banned"`
+	Weight            int               `json:"weight"`
+	FallbackPriority  int               `json:"fallback_priority,omitempty"`
+	Scopes            []string          `json:"scopes,omitempty"`
+	DeniedScopes      []string          `json:"denied_scopes,omitempty"`
+	ScopeExpression   *scope.Expression `json:"scope_expression,omitempty"`
+	CurrentRPM        int               `json:"current_rpm"`
+	CurrentTPM        int               `json:"current_tpm"`
+	LimitRPM          int               `json:"limit_rpm"`
+	LimitTPM          int               `json:"limit_tpm"`
+	BannedErrorCounts map[int]int       `json:"banned_error_counts,omitempty"` // aggregated error counts from banned models
 }
 
 // ModelHealthStats represents health stats for a single model
 type ModelHealthStats struct {
-	Credential      string      `json:"credential"`
-	Model           string      `json:"model"`
-	IsBanned        bool        `json:"is_banned"`
-	Weight          int         `json:"weight"`
-	CurrentRPM      int         `json:"current_rpm"`
-	CurrentTPM      int         `json:"current_tpm"`
-	LimitRPM        int         `json:"limit_rpm"`
-	LimitTPM        int         `json:"limit_tpm"`
-	ErrorCodeCounts map[int]int `json:"error_code_counts,omitempty"` // error code -> count when banned
+	Credential      string            `json:"credential"`
+	Model           string            `json:"model"`
+	IsBanned        bool              `json:"is_banned"`
+	Weight          int               `json:"weight"`
+	CurrentRPM      int               `json:"current_rpm"`
+	CurrentTPM      int               `json:"current_tpm"`
+	LimitRPM        int               `json:"limit_rpm"`
+	LimitTPM        int               `json:"limit_tpm"`
+	Scopes          []string          `json:"scopes,omitempty"`
+	DeniedScopes    []string          `json:"denied_scopes,omitempty"`
+	ScopeExpression *scope.Expression `json:"scope_expression,omitempty"`
+	ErrorCodeCounts map[int]int       `json:"error_code_counts,omitempty"` // error code -> count when banned
 }
 
 // EffectiveHealthWeight resolves the health weight fallback chain:

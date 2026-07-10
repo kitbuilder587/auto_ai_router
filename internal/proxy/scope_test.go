@@ -53,6 +53,19 @@ func TestScopeContextFromTokenInfo_MetadataScopesAndDeniedScopes(t *testing.T) {
 	}
 }
 
+func TestScopeContextFromTokenInfo_ForbiddenScopesAlias(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		Metadata: map[string]interface{}{
+			"air_scopes":           []interface{}{"team-a"},
+			"air_forbidden_scopes": []interface{}{"blocked"},
+		},
+	})
+
+	if ctx.Allows([]string{"team-a", "blocked"}, nil) {
+		t.Fatal("air_forbidden_scopes must deny matching credentials")
+	}
+}
+
 func TestScopeContextFromTokenInfo_LiteLLMMasterKeyIsAdmin(t *testing.T) {
 	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
 		KeyName: liteLLMMasterKeyIdentity,

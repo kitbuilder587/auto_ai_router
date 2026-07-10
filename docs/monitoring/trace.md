@@ -90,7 +90,7 @@ Features:
 
 ## Notes
 
-- Trace endpoints do not require authentication, but unauthenticated scoped views only include credentials without `scopes`
+- Trace endpoints do not require authentication. Missing, invalid, or temporarily unverifiable API keys use the public view, which only includes credentials without `scopes`
 - The depth parameter is capped at 10 to prevent runaway recursion
 - A 15-second request timeout is applied to the full chain traversal
 - Upstream fetches are rate-limited to one request per 100 ms per credential

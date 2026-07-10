@@ -265,6 +265,17 @@ func TestGetAvailableCount(t *testing.T) {
 	assert.Equal(t, 2, bal.GetAvailableCount())
 }
 
+func TestGetAvailableCount_ExcludesCredentialsWithoutProviderRoute(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	bal := New([]config.CredentialConfig{
+		{Name: "available", RPM: 100},
+		{Name: "no-route", RPM: 100, ProviderScopeExpression: scope.FalseExpression()},
+	}, f2b, rl)
+
+	assert.Equal(t, 1, bal.GetAvailableCount())
+}
+
 func TestGetBannedCount(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -1536,6 +1547,41 @@ func TestUpdateDBCredentials(t *testing.T) {
 	// DB credentials should be registered in the rate limiter with TPM defaulting to -1 when 0.
 	assert.True(t, bal.rateLimiter.AllowTokens("db-1"), "TPM=0 should be treated as unlimited")
 	assert.True(t, bal.rateLimiter.AllowTokens("db-2"))
+}
+
+func TestUpdateDBCredentials_PreservesProviderScopeMetadata(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	staticProxy := config.CredentialConfig{
+		Name: "yaml-proxy", Type: config.ProviderTypeProxy, BaseURL: "http://yaml.example", APIKey: "key", RPM: -1,
+	}
+	bal := New([]config.CredentialConfig{staticProxy}, f2b, rl)
+	teamA := scope.FromScopes([]string{"team-a"}, nil)
+	require.True(t, bal.UpdateProviderScopes(staticProxy, []string{"team-a"}, nil, teamA, true))
+
+	bal.UpdateDBCredentials(nil)
+
+	staticSnapshot := bal.GetCredentialsSnapshot()[0]
+	assert.True(t, staticSnapshot.ProviderScopeKnown)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(staticSnapshot.ProviderScopeExpression))
+	assert.False(t, scope.NewContext([]string{"team-b"}, nil).AllowsExpression(staticSnapshot.ProviderScopeExpression))
+
+	dbProxy := config.CredentialConfig{
+		Name: "db-proxy", Type: config.ProviderTypeProxy, BaseURL: "http://db.example", APIKey: "key", RPM: -1,
+	}
+	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
+	require.True(t, bal.UpdateProviderScopes(dbProxy, []string{"team-a"}, nil, teamA, true))
+	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
+
+	dbSnapshot := bal.GetCredentialsSnapshot()[1]
+	assert.True(t, dbSnapshot.ProviderScopeKnown)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(dbSnapshot.ProviderScopeExpression))
+
+	dbProxy.IsFallback = true
+	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
+	dbSnapshot = bal.GetCredentialsSnapshot()[1]
+	assert.False(t, dbSnapshot.ProviderScopeKnown)
+	assert.False(t, scope.AdminContext().AllowsExpression(dbSnapshot.ProviderScopeExpression))
 }
 
 func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {

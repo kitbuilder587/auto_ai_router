@@ -96,17 +96,24 @@ func (r *RoundRobin) SetModelChecker(mc ModelChecker) {
 	r.modelChecker = mc
 }
 
-func (r *RoundRobin) UpdateProviderScopes(credentialName string, scopes, deniedScopes []string) bool {
+func (r *RoundRobin) UpdateProviderScopes(
+	expected config.CredentialConfig,
+	scopes, deniedScopes []string,
+	expression *scope.Expression,
+	known bool,
+) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cred := r.getCredentialByName(credentialName)
-	if cred == nil {
+	cred := r.getCredentialByName(expected.Name)
+	if cred == nil || !expected.SameProviderIdentity(*cred) {
 		return false
 	}
 
 	cred.ProviderScopes = scope.NormalizeList(scopes)
 	cred.ProviderDeniedScopes = scope.NormalizeList(deniedScopes)
+	cred.ProviderScopeExpression = scope.NormalizeExpression(expression)
+	cred.ProviderScopeKnown = known
 	return true
 }
 
@@ -586,7 +593,7 @@ func (r *RoundRobin) GetAvailableCount() int {
 
 	count := 0
 	for _, cred := range r.credentials {
-		if !r.fail2ban.HasAnyBan(cred.Name) {
+		if cred.VisibleTo(scope.AdminContext()) && !r.fail2ban.HasAnyBan(cred.Name) {
 			count++
 		}
 	}
@@ -610,6 +617,11 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	existing := make(map[string]config.CredentialConfig, len(r.credentials))
+	for _, credential := range r.credentials {
+		existing[credential.Name] = credential
+	}
+
 	// Build name set of static creds so we can skip duplicates from DB.
 	staticNames := make(map[string]bool, len(r.staticCreds))
 	for _, c := range r.staticCreds {
@@ -629,6 +641,9 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 	if len(newCreds) == 0 {
 		// Nothing to update — keep existing credentials to avoid empty-list panics.
 		return
+	}
+	for i := range newCreds {
+		preserveProviderScopeMetadata(&newCreds[i], existing[newCreds[i].Name])
 	}
 
 	// Upsert rate-limiter limits for all DB creds (not just new ones).
@@ -650,6 +665,22 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 
 	r.credentials = newCreds
 	r.credentialIndex = newIndex
+}
+
+func preserveProviderScopeMetadata(next *config.CredentialConfig, previous config.CredentialConfig) {
+	if next.Type != config.ProviderTypeProxy {
+		return
+	}
+	if next.SameProviderIdentity(previous) {
+		next.ProviderScopes = append([]string(nil), previous.ProviderScopes...)
+		next.ProviderDeniedScopes = append([]string(nil), previous.ProviderDeniedScopes...)
+		next.ProviderScopeExpression = scope.NormalizeExpression(previous.ProviderScopeExpression)
+		next.ProviderScopeKnown = previous.ProviderScopeKnown
+		return
+	}
+	if next.ProviderScopeExpression == nil && len(next.ProviderScopes) == 0 && len(next.ProviderDeniedScopes) == 0 {
+		next.ProviderScopeExpression = scope.FalseExpression()
+	}
 }
 
 // validateFallbackConfiguration validates fallback credential configuration

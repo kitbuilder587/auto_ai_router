@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -94,6 +95,17 @@ forbidden_scopes: [blocked]
 	require.NoError(t, err)
 	assert.Equal(t, []string{"team-a"}, cred.Scopes)
 	assert.Equal(t, []string{"premium", "blocked"}, cred.DeniedScopes)
+}
+
+func TestCredentialConfig_ScopeExpressionPreservesIndependentGroups(t *testing.T) {
+	cred := CredentialConfig{
+		Scopes:         []string{"team-a"},
+		ProviderScopes: []string{"team-b"},
+	}
+
+	expression := cred.ScopeExpression()
+	assert.True(t, scope.NewContext([]string{"team-a", "team-b"}, nil).AllowsExpression(expression))
+	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(expression))
 }
 
 func TestConfig_Validate_InvalidAuthType(t *testing.T) {

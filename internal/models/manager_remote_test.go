@@ -13,6 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -379,13 +380,18 @@ func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthUnavailable(t *te
 
 	m := New(logger, 100, []config.ModelRPMConfig{})
 
-	models, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
+	cred := &config.CredentialConfig{
 		Name:    "proxy-1",
 		Type:    config.ProviderTypeProxy,
 		BaseURL: server.URL,
-	})
+	}
+	m.SetCredentials([]config.CredentialConfig{*cred})
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
 	require.NoError(t, err)
+	require.True(t, m.CopyProviderScopeMetadata(cred))
 	assert.Equal(t, []string{"fallback-model"}, modelIDs(models))
+	assert.True(t, cred.ProviderScopeKnown)
+	assert.True(t, scope.PublicContext().AllowsExpression(cred.ProviderScopeExpression))
 }
 
 func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthLacksMetadata(t *testing.T) {
@@ -425,6 +431,123 @@ func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthLacksMetadata(t *
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"real-model"}, modelIDs(models))
+}
+
+func TestGetRemoteModelsWithError_EmptyHealthSnapshotDoesNotFallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	v1Calls := 0
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+				Credentials: map[string]httputil.CredentialHealthStats{},
+				Models:      map[string]httputil.ModelHealthStats{},
+			})
+		case "/v1/models":
+			v1Calls++
+			_ = json.NewEncoder(w).Encode(ModelsResponse{Data: []Model{{ID: "unsafe-model"}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, nil)
+	cred := &config.CredentialConfig{Name: "proxy-1", Type: config.ProviderTypeProxy, BaseURL: server.URL}
+	m.SetCredentials([]config.CredentialConfig{*cred})
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
+	require.True(t, m.CopyProviderScopeMetadata(cred))
+
+	require.NoError(t, err)
+	assert.Empty(t, models)
+	assert.Zero(t, v1Calls)
+	assert.True(t, cred.ProviderScopeKnown)
+	assert.False(t, scope.AdminContext().AllowsExpression(cred.ProviderScopeExpression))
+	assert.False(t, m.credentials[0].VisibleTo(scope.AdminContext()))
+}
+
+func TestGetRemoteModelsWithError_HealthFailureFailsClosed(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	v1Calls := 0
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			v1Calls++
+			_ = json.NewEncoder(w).Encode(ModelsResponse{Data: []Model{{ID: "unsafe-model"}}})
+			return
+		}
+		http.Error(w, "unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, nil)
+	cred := &config.CredentialConfig{Name: "proxy-1", Type: config.ProviderTypeProxy, BaseURL: server.URL}
+	m.SetCredentials([]config.CredentialConfig{*cred})
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
+	require.True(t, m.CopyProviderScopeMetadata(cred))
+
+	require.Error(t, err)
+	assert.Empty(t, models)
+	assert.Zero(t, v1Calls)
+	assert.False(t, cred.ProviderScopeKnown)
+	assert.False(t, scope.AdminContext().AllowsExpression(cred.ProviderScopeExpression))
+	assert.False(t, m.credentials[0].VisibleTo(scope.AdminContext()))
+}
+
+func TestGetRemoteModelsWithError_CacheRestoresScopeSnapshot(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"team-a": {Type: "openai", Scopes: []string{"team-a"}},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"model": {Credential: "team-a", Model: "gpt-4"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, nil)
+	base := config.CredentialConfig{Name: "proxy-1", Type: config.ProviderTypeProxy, BaseURL: server.URL}
+	m.SetCredentials([]config.CredentialConfig{base})
+	first := base
+	_, err := m.GetRemoteModelsWithError(context.Background(), &first)
+	require.NoError(t, err)
+
+	m.mu.Lock()
+	m.credentials[0] = base
+	m.dynamicModelScopes = make(map[string]map[string]ScopeMetadata)
+	m.mu.Unlock()
+	second := base
+	_, err = m.GetRemoteModelsWithError(context.Background(), &second)
+	require.True(t, m.CopyProviderScopeMetadata(&second))
+
+	require.NoError(t, err)
+	assert.True(t, second.ProviderScopeKnown)
+	assert.True(t, m.HasModelScoped("proxy-1", "gpt-4", scope.NewContext([]string{"team-a"}, nil)))
+	assert.False(t, m.HasModelScoped("proxy-1", "gpt-4", scope.NewContext([]string{"team-b"}, nil)))
+}
+
+func TestApplyRemoteScopeSnapshot_RejectsRemovedCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 100, nil)
+	cred := config.CredentialConfig{Name: "proxy-1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy.example"}
+	m.SetCredentials([]config.CredentialConfig{cred})
+	m.SetCredentials(nil)
+
+	applied := m.applyRemoteScopeSnapshot(&cred, []Model{{ID: "stale-model"}}, &remoteScopeSnapshot{
+		providerScopes: scopeMetadataFromExpression(scope.FromScopes(nil, nil)),
+		modelScopes:    map[string]ScopeMetadata{},
+		modelWeights:   map[string]int{},
+		scopeKnown:     true,
+	})
+
+	assert.False(t, applied)
+	assert.NotContains(t, m.modelToCredentials["stale-model"], cred.Name)
 }
 
 func modelIDs(models []Model) []string {

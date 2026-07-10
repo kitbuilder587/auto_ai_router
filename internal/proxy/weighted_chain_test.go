@@ -287,6 +287,57 @@ func TestChainPolling_RootUsesDownstreamProviderScopes(t *testing.T) {
 	assert.ErrorIs(t, err, balancer.ErrNoCredentialsAvailable)
 }
 
+func TestThreeHopChain_PreservesCredentialAndModelScopeExpressions(t *testing.T) {
+	var teamACalls, teamBCalls int32
+	teamAProvider := terminalServer(t, &teamACalls)
+	defer teamAProvider.Close()
+	teamBProvider := terminalServer(t, &teamBCalls)
+	defer teamBProvider.Close()
+
+	leaf := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name: "team-a-provider", Type: config.ProviderTypeOpenAI, BaseURL: teamAProvider.URL,
+				APIKey: "key-a", RPM: -1, TPM: -1, Scopes: []string{"team-a"},
+			},
+			config.CredentialConfig{
+				Name: "team-b-provider", Type: config.ProviderTypeOpenAI, BaseURL: teamBProvider.URL,
+				APIKey: "key-b", RPM: -1, TPM: -1, Scopes: []string{"team-b"},
+			},
+		).
+		Build()
+	registerTestModel(leaf, "team-a-provider", "gpt-4")
+	registerTestModel(leaf, "team-b-provider", "claude-3")
+	leafServer := serveProxyWithHealth(t, leaf)
+	defer leafServer.Close()
+
+	middleCredential := proxyCred("leaf", leafServer.URL, 1)
+	middleCredential.Scopes = []string{"gateway"}
+	middle := NewTestProxyBuilder().WithCredentials(middleCredential).Build()
+	middle.modelManager.SetCredentials([]config.CredentialConfig{middleCredential})
+	var middleUpdateMutex sync.Mutex
+	modelupdate.UpdateAllProxyCredentials(context.Background(), middle.balancer, middle.rateLimiter, middle.logger, middle.modelManager, &middleUpdateMutex)
+	middleServer := serveProxyWithHealth(t, middle)
+	defer middleServer.Close()
+
+	rootCredential := proxyCred("middle", middleServer.URL, 1)
+	root := NewTestProxyBuilder().WithCredentials(rootCredential).Build()
+	root.modelManager.SetCredentials([]config.CredentialConfig{rootCredential})
+	var rootUpdateMutex sync.Mutex
+	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &rootUpdateMutex)
+
+	teamA := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"gateway", "team-a"}, nil)))
+	assert.True(t, teamA["gpt-4"])
+	assert.False(t, teamA["claude-3"])
+
+	teamB := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"gateway", "team-b"}, nil)))
+	assert.False(t, teamB["gpt-4"])
+	assert.True(t, teamB["claude-3"])
+
+	missingGateway := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil)))
+	assert.Empty(t, missingGateway)
+}
+
 func modelIDSet(response models.ModelsResponse) map[string]bool {
 	result := make(map[string]bool, len(response.Data))
 	for _, model := range response.Data {

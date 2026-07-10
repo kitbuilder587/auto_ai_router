@@ -18,3 +18,14 @@ func (r *Router) visibilityScope(w http.ResponseWriter, req *http.Request) (scop
 	}
 	return visibility, true
 }
+
+func (r *Router) visibilityScopeOrPublic(req *http.Request) scope.Context {
+	if r.proxy == nil {
+		return scope.PublicContext()
+	}
+	visibility, err := r.proxy.ScopeContextForRequest(req)
+	if err != nil {
+		return scope.PublicContext()
+	}
+	return visibility
+}

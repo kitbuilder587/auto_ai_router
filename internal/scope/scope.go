@@ -2,8 +2,11 @@ package scope
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
+
+const legacyNoMatchScope = "\x00air:no-matching-scope"
 
 type Context struct {
 	Allowed map[string]struct{}
@@ -48,6 +51,9 @@ func Normalize(value string) string {
 }
 
 func (c Context) Allows(credentialScopes, credentialDeniedScopes []string) bool {
+	if hasLegacyNoMatchScope(credentialScopes) {
+		return false
+	}
 	if c.Admin {
 		return true
 	}
@@ -67,6 +73,15 @@ func (c Context) Allows(credentialScopes, credentialDeniedScopes []string) bool 
 	return c.intersects(credentialScopes)
 }
 
+func hasLegacyNoMatchScope(values []string) bool {
+	for _, value := range values {
+		if value == legacyNoMatchScope {
+			return true
+		}
+	}
+	return false
+}
+
 func (c Context) HasScopes() bool {
 	return c.Admin || len(c.Allowed) > 0 || len(c.Denied) > 0
 }
@@ -80,7 +95,17 @@ func (c Context) Key() string {
 	if len(allowed) == 0 && len(denied) == 0 {
 		return "public"
 	}
-	return "a:" + strings.Join(allowed, ",") + "|d:" + strings.Join(denied, ",")
+	return "a:" + encodeKeyValues(allowed) + "|d:" + encodeKeyValues(denied)
+}
+
+func encodeKeyValues(values []string) string {
+	var key strings.Builder
+	for _, value := range values {
+		key.WriteString(strconv.Itoa(len(value)))
+		key.WriteByte(':')
+		key.WriteString(value)
+	}
+	return key.String()
 }
 
 func (c Context) AllowedList() []string {

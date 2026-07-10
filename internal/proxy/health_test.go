@@ -138,6 +138,50 @@ func TestHealthCheckScoped_FiltersCredentials(t *testing.T) {
 	assert.NotContains(t, status.Credentials, "team-b")
 }
 
+func TestHealthCheck_ReportsIndependentScopeExpression(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:           "chained",
+			Type:           config.ProviderTypeProxy,
+			APIKey:         "key",
+			BaseURL:        "http://router.example",
+			RPM:            100,
+			Scopes:         []string{"team-a"},
+			ProviderScopes: []string{"team-b"},
+		}).
+		Build()
+
+	_, status := prx.HealthCheck()
+	stats := status.Credentials["chained"]
+
+	assert.True(t, scope.NewContext([]string{"team-a", "team-b"}, nil).AllowsExpression(stats.ScopeExpression))
+	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(stats.ScopeExpression))
+	assert.NotEmpty(t, stats.Scopes)
+}
+
+func TestHealthCheckScoped_FiltersModelsByScopeExpression(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:    "chained",
+			Type:    config.ProviderTypeProxy,
+			APIKey:  "key",
+			BaseURL: "http://router.example",
+			RPM:     100,
+		}).
+		Build()
+	prx.modelManager.ReplaceModelsForCredential("chained", []string{"team-a-model", "team-b-model"})
+	prx.modelManager.ReplaceModelScopesForCredential("chained", map[string]models.ScopeMetadata{
+		"team-a-model": {ScopeExpression: scope.FromScopes([]string{"team-a"}, nil)},
+		"team-b-model": {ScopeExpression: scope.FromScopes([]string{"team-b"}, nil)},
+	})
+
+	_, status := prx.HealthCheckScoped(scope.NewContext([]string{"team-a"}, nil))
+
+	assert.Contains(t, status.Models, "chained:team-a-model")
+	assert.NotContains(t, status.Models, "chained:team-b-model")
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(status.Models["chained:team-a-model"].ScopeExpression))
+}
+
 func TestHealthCheck_CredentialRateLimit(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})

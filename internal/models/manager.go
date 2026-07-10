@@ -2,13 +2,16 @@ package models
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -16,7 +19,10 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
-var errProxyHealthModelMetadataUnavailable = fmt.Errorf("proxy health model metadata unavailable")
+var (
+	errProxyHealthModelMetadataUnavailable = errors.New("proxy health model metadata unavailable")
+	errProxyCredentialChanged              = errors.New("proxy credential changed during refresh")
+)
 
 // ModelPrice contains pricing information for a single model
 type ModelPrice struct {
@@ -131,14 +137,24 @@ type ModelLimits struct {
 }
 
 type ScopeMetadata struct {
-	Scopes       []string
-	DeniedScopes []string
+	Scopes          []string
+	DeniedScopes    []string
+	ScopeExpression *scope.Expression
 }
 
 // remoteModelCache stores cached remote models with expiration time
 type remoteModelCache struct {
-	models    []Model
-	expiresAt time.Time
+	credential    config.CredentialConfig
+	models        []Model
+	scopeSnapshot *remoteScopeSnapshot
+	expiresAt     time.Time
+}
+
+type remoteScopeSnapshot struct {
+	providerScopes ScopeMetadata
+	modelScopes    map[string]ScopeMetadata
+	modelWeights   map[string]int
+	scopeKnown     bool
 }
 
 // allModelsCache stores cached result of GetAllModels
@@ -147,7 +163,10 @@ type allModelsCache struct {
 	expiresAt time.Time
 }
 
-const allModelsCacheTTL = 3 * time.Second
+const (
+	allModelsCacheTTL        = 3 * time.Second
+	scopedAllModelsCacheSize = 256
+)
 
 // Manager handles model discovery and mapping
 type Manager struct {
@@ -168,11 +187,12 @@ type Manager struct {
 	modelRealNamesPerCred       map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
 	defaultModelsRPM            int                          // default RPM for models
 	logger                      *slog.Logger
-	credentials                 []config.CredentialConfig   // credentials for fetching remote models
-	remoteModelsCache           map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration             time.Duration               // how long to cache remote models (default 5 minutes)
-	allModelsCache              allModelsCache              // cached result of GetAllModels (3 second TTL)
-	scopedAllModelsCache        map[string]allModelsCache   // cached scoped /v1/models responses
+	credentials                 []config.CredentialConfig // credentials for fetching remote models
+	credentialsConfigured       bool
+	remoteModelsCache           map[string]remoteModelCache        // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration             time.Duration                      // how long to cache remote models (default 5 minutes)
+	allModelsCache              allModelsCache                     // cached result of GetAllModels (3 second TTL)
+	scopedAllModelsCache        *lru.Cache[string, allModelsCache] // cached scoped /v1/models responses
 }
 
 // New creates a new model manager
@@ -197,7 +217,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		credentials:                 make([]config.CredentialConfig, 0),
 		remoteModelsCache:           make(map[string]remoteModelCache),
 		cacheExpiration:             5 * time.Minute, // Default cache TTL: 5 minutes
-		scopedAllModelsCache:        make(map[string]allModelsCache),
+		scopedAllModelsCache:        newScopedAllModelsCache(),
 	}
 
 	// Load static models from config.yaml
@@ -368,8 +388,38 @@ func (m *Manager) IsPassthroughResponsesForProvider(modelID string, providerType
 func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.credentials = credentials
-	m.scopedAllModelsCache = make(map[string]allModelsCache)
+
+	previous := make(map[string]config.CredentialConfig, len(m.credentials))
+	for _, credential := range m.credentials {
+		previous[credential.Name] = credential
+	}
+	next := append(make([]config.CredentialConfig, 0, len(credentials)), credentials...)
+	active := make(map[string]bool, len(next))
+	for i := range next {
+		active[next[i].Name] = true
+		old, ok := previous[next[i].Name]
+		if ok && next[i].SameProviderIdentity(old) {
+			next[i].ProviderScopes = append([]string(nil), old.ProviderScopes...)
+			next[i].ProviderDeniedScopes = append([]string(nil), old.ProviderDeniedScopes...)
+			next[i].ProviderScopeExpression = scope.NormalizeExpression(old.ProviderScopeExpression)
+			next[i].ProviderScopeKnown = old.ProviderScopeKnown
+			continue
+		}
+		delete(m.remoteModelsCache, next[i].Name)
+		if ok && next[i].Type == config.ProviderTypeProxy && next[i].ProviderScopeExpression == nil &&
+			len(next[i].ProviderScopes) == 0 && len(next[i].ProviderDeniedScopes) == 0 {
+			next[i].ProviderScopeExpression = scope.FalseExpression()
+		}
+	}
+	for credentialName := range m.remoteModelsCache {
+		if !active[credentialName] {
+			delete(m.remoteModelsCache, credentialName)
+		}
+	}
+	m.credentials = next
+	m.credentialsConfigured = true
+	m.allModels = nil
+	m.invalidateAllModelsCachesLocked()
 }
 
 // SetModelAliases sets the model alias map (alias -> real model name)
@@ -749,8 +799,6 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.RUnlock()
 
 	// Add models from proxy credentials only (not from other provider types)
-	modelUpdates := make(map[string][]string) // model -> credentials to add
-	successfullyFetched := make(map[string]bool)
 	for _, cred := range credentials {
 		// Skip non-proxy credentials - we only fetch models from proxy credentials
 		if cred.Type != config.ProviderTypeProxy {
@@ -772,7 +820,6 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			)
 			continue
 		}
-		successfullyFetched[cred.Name] = true
 		m.logger.Debug("Got models from proxy",
 			"credential", cred.Name,
 			"remote_models_count", len(remoteModels),
@@ -780,9 +827,6 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		)
 		added := 0
 		for _, model := range remoteModels {
-			// Always record credential→model mapping for ALL credentials that support this model
-			// (not just the first one that returned it)
-			modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			if !modelMap[model.ID] {
 				models = append(models, model)
 				modelMap[model.ID] = true
@@ -806,58 +850,37 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Remove stale mappings for successfully-fetched proxy credentials before adding fresh ones.
-	// Only touch credentials we actually got a response from — failed fetches are left
-	// unchanged to avoid false negatives on transient errors.
-	if len(successfullyFetched) > 0 {
-		for modelID, creds := range m.modelToCredentials {
-			var kept []string
-			for _, c := range creds {
-				if !successfullyFetched[c] {
-					kept = append(kept, c)
-				}
-			}
-			if len(kept) == 0 {
-				delete(m.modelToCredentials, modelID)
-			} else {
-				m.modelToCredentials[modelID] = kept
-			}
-		}
+	currentCredentials := make(map[string]bool, len(m.credentials))
+	for _, credential := range m.credentials {
+		currentCredentials[credential.Name] = true
 	}
-
-	// Add fresh mappings from this refresh cycle.
-	for modelID, creds := range modelUpdates {
-		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
-	}
+	response = m.currentModelsLocked(response, currentCredentials)
 
 	// Cache a copy so the cached backing array is independent from the returned response.
 	m.allModelsCache = allModelsCache{
 		response: ModelsResponse{
 			Object: response.Object,
-			Data:   append([]Model(nil), models...),
+			Data:   append([]Model(nil), response.Data...),
 		},
 		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
 	}
-	m.allModels = append([]Model(nil), models...)
-	m.scopedAllModelsCache = make(map[string]allModelsCache)
+	m.allModels = append([]Model(nil), response.Data...)
+	m.invalidateScopedAllModelsCacheLocked()
 
 	return response
 }
 
 func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
-	if visibility.Admin {
-		return m.GetAllModels()
-	}
 	if response, ok := m.getCachedScopedAllModels(visibility); ok {
 		return response
 	}
-
 	response := m.getAllModelsScoped(visibility)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	visibleCreds := m.visibleCredentialNamesLocked(visibility)
+	response = m.currentModelsLocked(response, visibleCreds)
 	filtered := make([]Model, 0, len(response.Data))
 	for _, model := range response.Data {
 		if m.modelVisibleLocked(model.ID, visibleCreds, visibility) {
@@ -865,10 +888,10 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 		}
 	}
 	scopedResponse := ModelsResponse{Object: response.Object, Data: filtered}
-	m.scopedAllModelsCache[m.scopedAllModelsCacheKeyLocked(visibility)] = allModelsCache{
+	m.scopedAllModelsCache.Add(m.scopedAllModelsCacheKeyLocked(visibility), allModelsCache{
 		response:  copyModelsResponse(scopedResponse),
 		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
-	}
+	})
 	return scopedResponse
 }
 
@@ -877,8 +900,11 @@ func (m *Manager) getCachedScopedAllModels(visibility scope.Context) (ModelsResp
 	defer m.mu.RUnlock()
 
 	cacheKey := m.scopedAllModelsCacheKeyLocked(visibility)
-	cached, ok := m.scopedAllModelsCache[cacheKey]
+	cached, ok := m.scopedAllModelsCache.Get(cacheKey)
 	if !ok || cached.expiresAt.IsZero() || !utils.NowUTC().Before(cached.expiresAt) {
+		if ok {
+			m.scopedAllModelsCache.Remove(cacheKey)
+		}
 		return ModelsResponse{}, false
 	}
 	return copyModelsResponse(cached.response), true
@@ -902,9 +928,60 @@ func copyModelsResponse(response ModelsResponse) ModelsResponse {
 	}
 }
 
+func newScopedAllModelsCache() *lru.Cache[string, allModelsCache] {
+	cache, err := lru.New[string, allModelsCache](scopedAllModelsCacheSize)
+	if err != nil {
+		panic(fmt.Sprintf("models: failed to create scoped models cache: %v", err))
+	}
+	return cache
+}
+
+func (m *Manager) invalidateScopedAllModelsCacheLocked() {
+	m.scopedAllModelsCache.Purge()
+}
+
+func (m *Manager) currentModelsLocked(response ModelsResponse, visibleCredentials map[string]bool) ModelsResponse {
+	metadata := make(map[string]Model, len(response.Data)+len(m.allModels))
+	for _, model := range response.Data {
+		if model.ID != "" {
+			metadata[model.ID] = model
+		}
+	}
+	for _, model := range m.allModels {
+		if model.ID != "" {
+			metadata[model.ID] = model
+		}
+	}
+	seen := make(map[string]bool)
+	models := make([]Model, 0, len(metadata))
+	appendModel := func(modelID string) {
+		if modelID == "" || seen[modelID] {
+			return
+		}
+		seen[modelID] = true
+		model, ok := metadata[modelID]
+		if !ok {
+			model = Model{ID: modelID, Object: "model", Created: converterutil.GetCurrentTimestamp(), OwnedBy: "system"}
+		}
+		models = append(models, model)
+	}
+	for modelID := range m.modelLimits {
+		appendModel(modelID)
+	}
+	for _, model := range m.allModels {
+		appendModel(model.ID)
+	}
+	for credentialName := range visibleCredentials {
+		for _, modelID := range m.credentialModels[credentialName] {
+			appendModel(modelID)
+		}
+	}
+	return ModelsResponse{Object: response.Object, Data: models}
+}
+
 func (m *Manager) invalidateAllModelsCachesLocked() {
 	m.allModelsCache = allModelsCache{}
-	m.scopedAllModelsCache = make(map[string]allModelsCache)
+	m.invalidateScopedAllModelsCacheLocked()
 }
 
 func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
@@ -943,8 +1020,6 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 
 	m.mu.RUnlock()
 
-	modelUpdates := make(map[string][]string)
-	successfullyFetched := make(map[string]bool)
 	for _, cred := range credentials {
 		if cred.Type != config.ProviderTypeProxy {
 			continue
@@ -957,39 +1032,13 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 			)
 			continue
 		}
-		successfullyFetched[cred.Name] = true
 		for _, model := range remoteModels {
-			modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			if !modelMap[model.ID] {
 				models = append(models, model)
 				modelMap[model.ID] = true
 			}
 		}
 	}
-
-	m.mu.Lock()
-	if len(successfullyFetched) > 0 {
-		for modelID, creds := range m.modelToCredentials {
-			var kept []string
-			for _, c := range creds {
-				if !successfullyFetched[c] {
-					kept = append(kept, c)
-				}
-			}
-			if len(kept) == 0 {
-				delete(m.modelToCredentials, modelID)
-			} else {
-				m.modelToCredentials[modelID] = kept
-			}
-		}
-	}
-	for modelID, creds := range modelUpdates {
-		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
-	}
-	if len(successfullyFetched) > 0 {
-		m.scopedAllModelsCache = make(map[string]allModelsCache)
-	}
-	m.mu.Unlock()
 
 	return ModelsResponse{Object: "list", Data: models}
 }
@@ -1043,6 +1092,20 @@ func (m *Manager) HasModelScoped(credentialName, modelID string, visibility scop
 		return false
 	}
 	return m.modelScopeAllowsLocked(modelID, credentialName, visibility)
+}
+
+func (m *Manager) GetModelScopeExpressionForCredential(modelID, credentialName string) *scope.Expression {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	metadata, ok := m.dynamicModelScopes[modelID][credentialName]
+	if !ok {
+		return nil
+	}
+	if metadata.ScopeExpression != nil {
+		return scope.NormalizeExpression(metadata.ScopeExpression)
+	}
+	return scope.FromScopes(metadata.Scopes, metadata.DeniedScopes)
 }
 
 func (m *Manager) hasModelLocked(credentialName, modelID string) bool {
@@ -1102,7 +1165,7 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	if !m.contains(m.modelToCredentials[modelID], credentialName) {
 		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 	}
-	m.scopedAllModelsCache = make(map[string]allModelsCache)
+	m.invalidateScopedAllModelsCacheLocked()
 }
 
 // ReplaceModelsForCredential replaces the dynamic proxy-discovered model list
@@ -1115,7 +1178,10 @@ func (m *Manager) ReplaceModelsForCredential(credentialName string, modelIDs []s
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.replaceModelsForCredentialLocked(credentialName, modelIDs)
+}
 
+func (m *Manager) replaceModelsForCredentialLocked(credentialName string, modelIDs []string) {
 	desiredSet := make(map[string]bool, len(modelIDs))
 	desired := make([]string, 0, len(modelIDs))
 	for _, modelID := range modelIDs {
@@ -1198,7 +1264,10 @@ func (m *Manager) ReplaceModelWeightsForCredential(credentialName string, weight
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.replaceModelWeightsForCredentialLocked(credentialName, weights)
+}
 
+func (m *Manager) replaceModelWeightsForCredentialLocked(credentialName string, weights map[string]int) {
 	for modelID, credentialWeights := range m.dynamicModelWeights {
 		delete(credentialWeights, credentialName)
 		if len(credentialWeights) == 0 {
@@ -1224,7 +1293,10 @@ func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes 
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.replaceModelScopesForCredentialLocked(credentialName, scopes)
+}
 
+func (m *Manager) replaceModelScopesForCredentialLocked(credentialName string, scopes map[string]ScopeMetadata) {
 	for modelID, credentialScopes := range m.dynamicModelScopes {
 		delete(credentialScopes, credentialName)
 		if len(credentialScopes) == 0 {
@@ -1238,7 +1310,8 @@ func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes 
 		}
 		metadata.Scopes = scope.NormalizeList(metadata.Scopes)
 		metadata.DeniedScopes = scope.NormalizeList(metadata.DeniedScopes)
-		if len(metadata.Scopes) == 0 && len(metadata.DeniedScopes) == 0 {
+		metadata.ScopeExpression = scope.NormalizeExpression(metadata.ScopeExpression)
+		if len(metadata.Scopes) == 0 && len(metadata.DeniedScopes) == 0 && metadata.ScopeExpression == nil {
 			continue
 		}
 		if m.dynamicModelScopes[modelID] == nil {
@@ -1246,7 +1319,7 @@ func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes 
 		}
 		m.dynamicModelScopes[modelID][credentialName] = metadata
 	}
-	m.scopedAllModelsCache = make(map[string]allModelsCache)
+	m.invalidateScopedAllModelsCacheLocked()
 }
 
 func (m *Manager) UpdateProviderScopesForCredential(credentialName string, metadata ScopeMetadata) {
@@ -1256,16 +1329,136 @@ func (m *Manager) UpdateProviderScopesForCredential(credentialName string, metad
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.updateProviderScopesForCredentialLocked(credentialName, metadata, true)
+}
 
+func (m *Manager) updateProviderScopesForCredentialLocked(credentialName string, metadata ScopeMetadata, known bool) {
 	for i := range m.credentials {
 		if m.credentials[i].Name != credentialName {
 			continue
 		}
 		m.credentials[i].ProviderScopes = scope.NormalizeList(metadata.Scopes)
 		m.credentials[i].ProviderDeniedScopes = scope.NormalizeList(metadata.DeniedScopes)
-		m.scopedAllModelsCache = make(map[string]allModelsCache)
+		m.credentials[i].ProviderScopeExpression = scope.NormalizeExpression(metadata.ScopeExpression)
+		m.credentials[i].ProviderScopeKnown = known
+		m.invalidateScopedAllModelsCacheLocked()
 		return
 	}
+}
+
+// CopyProviderScopeMetadata copies learned scope metadata into a credential snapshot.
+func (m *Manager) CopyProviderScopeMetadata(cred *config.CredentialConfig) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := range m.credentials {
+		current := &m.credentials[i]
+		if current.Name != cred.Name || !cred.SameProviderIdentity(*current) {
+			continue
+		}
+		cred.ProviderScopes = append([]string(nil), current.ProviderScopes...)
+		cred.ProviderDeniedScopes = append([]string(nil), current.ProviderDeniedScopes...)
+		cred.ProviderScopeExpression = scope.NormalizeExpression(current.ProviderScopeExpression)
+		cred.ProviderScopeKnown = current.ProviderScopeKnown
+		return true
+	}
+	return false
+}
+
+func (m *Manager) applyRemoteScopeSnapshot(
+	cred *config.CredentialConfig,
+	models []Model,
+	snapshot *remoteScopeSnapshot,
+) bool {
+	if snapshot == nil {
+		return true
+	}
+	cloned := cloneRemoteScopeSnapshot(snapshot)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.applyRemoteScopeSnapshotLocked(cred, models, cloned)
+}
+
+func (m *Manager) applyRemoteScopeSnapshotAndCache(
+	cred *config.CredentialConfig,
+	models []Model,
+	snapshot *remoteScopeSnapshot,
+) bool {
+	cloned := cloneRemoteScopeSnapshot(snapshot)
+	cachedModels := append([]Model(nil), models...)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.applyRemoteScopeSnapshotLocked(cred, cachedModels, cloned) {
+		return false
+	}
+	m.remoteModelsCache[cred.Name] = remoteModelCache{
+		credential:    *cred,
+		models:        cachedModels,
+		scopeSnapshot: cloneRemoteScopeSnapshot(cloned),
+		expiresAt:     utils.NowUTC().Add(m.cacheExpiration),
+	}
+	return true
+}
+
+func (m *Manager) applyRemoteScopeSnapshotLocked(
+	cred *config.CredentialConfig,
+	models []Model,
+	snapshot *remoteScopeSnapshot,
+) bool {
+	found := false
+	for i := range m.credentials {
+		if m.credentials[i].Name != cred.Name {
+			continue
+		}
+		found = true
+		if !cred.SameProviderIdentity(m.credentials[i]) {
+			return false
+		}
+	}
+	if m.credentialsConfigured && !found {
+		return false
+	}
+	modelIDs := remoteModelIDs(models)
+	m.updateProviderScopesForCredentialLocked(cred.Name, snapshot.providerScopes, snapshot.scopeKnown)
+	m.replaceModelScopesForCredentialLocked(cred.Name, snapshot.modelScopes)
+	m.replaceModelsForCredentialLocked(cred.Name, modelIDs)
+	m.replaceModelWeightsForCredentialLocked(cred.Name, snapshot.modelWeights)
+	return true
+}
+
+func cloneRemoteScopeSnapshot(snapshot *remoteScopeSnapshot) *remoteScopeSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	return &remoteScopeSnapshot{
+		providerScopes: cloneScopeMetadata(snapshot.providerScopes),
+		modelScopes:    cloneModelScopes(snapshot.modelScopes),
+		modelWeights:   cloneModelWeights(snapshot.modelWeights),
+		scopeKnown:     snapshot.scopeKnown,
+	}
+}
+
+func cloneScopeMetadata(metadata ScopeMetadata) ScopeMetadata {
+	return ScopeMetadata{
+		Scopes:          append([]string(nil), metadata.Scopes...),
+		DeniedScopes:    append([]string(nil), metadata.DeniedScopes...),
+		ScopeExpression: scope.NormalizeExpression(metadata.ScopeExpression),
+	}
+}
+
+func cloneModelScopes(modelScopes map[string]ScopeMetadata) map[string]ScopeMetadata {
+	cloned := make(map[string]ScopeMetadata, len(modelScopes))
+	for modelID, metadata := range modelScopes {
+		cloned[modelID] = cloneScopeMetadata(metadata)
+	}
+	return cloned
+}
+
+func cloneModelWeights(modelWeights map[string]int) map[string]int {
+	cloned := make(map[string]int, len(modelWeights))
+	for modelID, weight := range modelWeights {
+		cloned[modelID] = weight
+	}
+	return cloned
 }
 
 func (m *Manager) isConfiguredForCredentialLocked(modelID, credentialName string) bool {
@@ -1565,6 +1758,9 @@ func (m *Manager) modelVisibleLocked(modelID string, visibleCreds map[string]boo
 func (m *Manager) modelScopeAllowsLocked(modelID, credentialName string, visibility scope.Context) bool {
 	if scopedCreds, ok := m.dynamicModelScopes[modelID]; ok {
 		if metadata, ok := scopedCreds[credentialName]; ok {
+			if metadata.ScopeExpression != nil {
+				return visibility.AllowsExpression(metadata.ScopeExpression)
+			}
 			return visibility.Allows(metadata.Scopes, metadata.DeniedScopes)
 		}
 	}
@@ -1662,12 +1858,16 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 
 	// Check cache first
 	m.mu.RLock()
-	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
-		// Defensive copy to prevent callers from corrupting cached data
+	if cached, ok := m.remoteModelsCache[cred.Name]; ok && cred.SameProviderIdentity(cached.credential) &&
+		!cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
 		cachedModels := append([]Model(nil), cached.models...)
+		cachedSnapshot := cloneRemoteScopeSnapshot(cached.scopeSnapshot)
 		cachedCount := len(cachedModels)
 		expiresIn := time.Until(cached.expiresAt).Seconds()
 		m.mu.RUnlock()
+		if !m.applyRemoteScopeSnapshot(cred, cachedModels, cachedSnapshot) {
+			return nil, errProxyCredentialChanged
+		}
 		m.logger.Debug("Using cached remote models",
 			"credential", cred.Name,
 			"models_count", cachedCount,
@@ -1682,24 +1882,20 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 		"base_url", cred.BaseURL,
 	)
 
-	models, err := m.fetchRemoteModelsFromHealth(ctx, cred)
-	usedHealthSnapshot := err == nil && len(models) > 0
-	if err != nil || len(models) == 0 {
-		if err != nil {
-			m.logger.Debug("Failed to fetch remote models from proxy health; falling back to /v1/models",
-				"credential", cred.Name,
-				"error", err,
-			)
-		} else {
-			m.logger.Debug("Health-based model fetch returned empty list; falling back to /v1/models",
-				"credential", cred.Name,
-			)
+	models, snapshot, err := m.fetchRemoteModelsFromHealth(ctx, cred)
+	if err != nil {
+		if !isLegacyProxyHealthError(err) || !m.providerScopeAllowsLegacyFallback(cred) {
+			m.failClosedUnknownRemoteScope(cred)
+			return nil, err
 		}
 
-		// Fallback for non-AAR proxies that expose /v1/models but not /health,
-		// or for AAR proxies where the health-based IsFallback filter removed all models.
+		m.logger.Debug("Proxy health metadata unavailable; falling back to /v1/models",
+			"credential", cred.Name,
+			"error", err,
+		)
 		var modelsResp ModelsResponse
 		if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
+			m.failClosedUnknownRemoteScope(cred)
 			m.logger.Error("Failed to fetch remote models",
 				"credential", cred.Name,
 				"error", err,
@@ -1707,24 +1903,17 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 			return nil, err
 		}
 		models = modelsResp.Data
-		m.ReplaceModelWeightsForCredential(cred.Name, nil)
+		snapshot = &remoteScopeSnapshot{
+			providerScopes: scopeMetadataFromExpression(scope.FromScopes(nil, nil)),
+			modelScopes:    map[string]ScopeMetadata{},
+			modelWeights:   map[string]int{},
+			scopeKnown:     true,
+		}
 	}
 
-	if len(models) > 0 {
-		m.ReplaceModelsForCredential(cred.Name, remoteModelIDs(models))
+	if !m.applyRemoteScopeSnapshotAndCache(cred, models, snapshot) {
+		return nil, errProxyCredentialChanged
 	}
-	if !usedHealthSnapshot && len(models) == 0 {
-		m.ReplaceModelsForCredential(cred.Name, nil)
-		m.ReplaceModelWeightsForCredential(cred.Name, nil)
-	}
-
-	// Cache the result
-	m.mu.Lock()
-	m.remoteModelsCache[cred.Name] = remoteModelCache{
-		models:    models,
-		expiresAt: utils.NowUTC().Add(m.cacheExpiration),
-	}
-	m.mu.Unlock()
 
 	m.logger.Debug("Cached remote models",
 		"credential", cred.Name,
@@ -1735,25 +1924,21 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 	return models, nil
 }
 
-func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+func (m *Manager) fetchRemoteModelsFromHealth(
+	ctx context.Context,
+	cred *config.CredentialConfig,
+) ([]Model, *remoteScopeSnapshot, error) {
 	var health httputil.ProxyHealthResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, "/health", m.logger, &health); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	if len(health.Credentials) == 0 {
-		return nil, errProxyHealthModelMetadataUnavailable
+	if health.Credentials == nil || health.Models == nil {
+		return nil, nil, errProxyHealthModelMetadataUnavailable
 	}
 
 	providerScopes := AggregateProviderScopesFromHealth(&health, cred.IsFallback)
-	cred.ProviderScopes = providerScopes.Scopes
-	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
-	m.UpdateProviderScopesForCredential(cred.Name, providerScopes)
-	m.ReplaceModelScopesForCredential(cred.Name, AggregateModelScopesFromHealth(&health, cred.IsFallback))
-
-	if len(health.Models) == 0 {
-		return nil, errProxyHealthModelMetadataUnavailable
-	}
+	modelScopes := AggregateModelScopesFromHealth(&health, cred.IsFallback)
 
 	modelsByID := make(map[string]Model)
 	modelWeightsByID := make(map[string]int)
@@ -1783,8 +1968,6 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		}
 	}
 
-	m.ReplaceModelWeightsForCredential(cred.Name, modelWeightsByID)
-
 	models := make([]Model, 0, len(modelsByID))
 	for _, model := range modelsByID {
 		models = append(models, model)
@@ -1793,7 +1976,54 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		return strings.Compare(a.ID, b.ID)
 	})
 
-	return models, nil
+	return models, &remoteScopeSnapshot{
+		providerScopes: providerScopes,
+		modelScopes:    modelScopes,
+		modelWeights:   modelWeightsByID,
+		scopeKnown:     true,
+	}, nil
+}
+
+func isLegacyProxyHealthError(err error) bool {
+	if errors.Is(err, errProxyHealthModelMetadataUnavailable) {
+		return true
+	}
+	var statusErr *httputil.ProxyStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusMethodNotAllowed
+}
+
+func (m *Manager) providerScopeAllowsLegacyFallback(cred *config.CredentialConfig) bool {
+	current := *cred
+	m.CopyProviderScopeMetadata(&current)
+	if !current.ProviderScopeKnown {
+		return true
+	}
+	expression := scope.NormalizeExpression(current.ProviderScopeExpression)
+	if expression == nil {
+		return len(current.ProviderScopes) == 0 && len(current.ProviderDeniedScopes) == 0
+	}
+	for _, alternative := range expression.Alternatives {
+		if len(alternative.Requirements) == 0 && len(alternative.DeniedScopes) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) failClosedUnknownRemoteScope(cred *config.CredentialConfig) {
+	current := *cred
+	m.CopyProviderScopeMetadata(&current)
+	if current.ProviderScopeKnown {
+		return
+	}
+	m.applyRemoteScopeSnapshot(cred, nil, &remoteScopeSnapshot{
+		providerScopes: scopeMetadataFromExpression(scope.FalseExpression()),
+		modelScopes:    map[string]ScopeMetadata{},
+		modelWeights:   map[string]int{},
+	})
 }
 
 func remoteModelIDs(models []Model) []string {
