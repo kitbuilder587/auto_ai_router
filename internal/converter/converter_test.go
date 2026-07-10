@@ -538,6 +538,35 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_CacheWriteTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "chat completions alias",
+			body: `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cache_write_tokens":60}}}`,
+		},
+		{
+			name: "responses API canonical field",
+			body: `{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cache_creation_tokens":60}}}`,
+		},
+		{
+			name: "responses API streaming alias",
+			body: `{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cache_write_tokens":60}}}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+			if usage == nil || usage.CacheCreationTokens != 60 {
+				t.Fatalf("unexpected cache creation usage: %+v", usage)
+			}
+		})
+	}
+}
+
 func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	// Responses API streaming event format: response.completed SSE event
 	// Usage is nested inside response.usage, not at top level

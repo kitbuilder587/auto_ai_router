@@ -44,8 +44,8 @@ type StreamUsageInfo struct {
 	AudioOutputTokens   int // Audio tokens in the response
 	ImageTokens         int // Image/video tokens (if reported)
 	ReasoningTokens     int // Reasoning/thoughts tokens (output)
-	CacheCreationTokens int // Anthropic: tokens created for cache (billed at different rate)
-	CacheReadTokens     int // Anthropic: tokens read from cache (billed at cheaper rate)
+	CacheCreationTokens int // Tokens created for cache (billed at different rate)
+	CacheReadTokens     int // Tokens read from cache (billed at cheaper rate)
 }
 
 // StreamUsageExtractor provides a provider-agnostic interface for extracting
@@ -94,8 +94,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens,omitempty"`
-				AudioTokens  int `json:"audio_tokens,omitempty"`
+				CachedTokens        int `json:"cached_tokens,omitempty"`
+				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
+				AudioTokens         int `json:"audio_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -112,13 +114,19 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		return nil
 	}
 
+	cacheCreationTokens := data.Usage.PromptTokensDetails.CacheCreationTokens
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheWriteTokens
+	}
+
 	return &StreamUsageInfo{
-		PromptTokens:      data.Usage.PromptTokens,
-		CompletionTokens:  data.Usage.CompletionTokens,
-		CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
-		AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
-		AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
-		ReasoningTokens:   data.Usage.CompletionTokensDetails.ReasoningTokens,
+		PromptTokens:        data.Usage.PromptTokens,
+		CompletionTokens:    data.Usage.CompletionTokens,
+		CachedTokens:        data.Usage.PromptTokensDetails.CachedTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		AudioInputTokens:    data.Usage.PromptTokensDetails.AudioTokens,
+		AudioOutputTokens:   data.Usage.CompletionTokensDetails.AudioTokens,
+		ReasoningTokens:     data.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 }
 
@@ -149,13 +157,19 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		return nil
 	}
 
+	cacheCreationTokens := usage.InputTokensDetails.CacheCreationTokens
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
+	}
+
 	return &StreamUsageInfo{
-		PromptTokens:      usage.InputTokens,
-		CompletionTokens:  usage.OutputTokens,
-		CachedTokens:      usage.InputTokensDetails.CachedTokens,
-		AudioInputTokens:  usage.InputTokensDetails.AudioTokens,
-		AudioOutputTokens: usage.OutputTokensDetails.AudioTokens,
-		ReasoningTokens:   usage.OutputTokensDetails.ReasoningTokens,
+		PromptTokens:        usage.InputTokens,
+		CompletionTokens:    usage.OutputTokens,
+		CachedTokens:        usage.InputTokensDetails.CachedTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		AudioInputTokens:    usage.InputTokensDetails.AudioTokens,
+		AudioOutputTokens:   usage.OutputTokensDetails.AudioTokens,
+		ReasoningTokens:     usage.OutputTokensDetails.ReasoningTokens,
 	}
 }
 
@@ -164,8 +178,10 @@ type responsesAPIUsage struct {
 	InputTokens        int `json:"input_tokens"`
 	OutputTokens       int `json:"output_tokens"`
 	InputTokensDetails struct {
-		CachedTokens int `json:"cached_tokens,omitempty"`
-		AudioTokens  int `json:"audio_tokens,omitempty"`
+		CachedTokens        int `json:"cached_tokens,omitempty"`
+		CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
+		AudioTokens         int `json:"audio_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`

@@ -57,23 +57,27 @@ For reference:
 
 ### Available fields
 
-| Field                                     | Description                                                                  |
-| ----------------------------------------- | ---------------------------------------------------------------------------- |
-| `input_cost_per_token`                    | Regular input tokens                                                         |
-| `output_cost_per_token`                   | Regular output tokens                                                        |
-| `input_cost_per_token_above_200k_tokens`  | Input rate for tokens beyond the 200k threshold                              |
-| `output_cost_per_token_above_200k_tokens` | Output rate for tokens beyond the 200k threshold                             |
-| `input_cost_per_audio_token`              | Audio input tokens (falls back to `input_cost_per_token` if absent)          |
-| `output_cost_per_audio_token`             | Audio output tokens (falls back to `output_cost_per_token` if absent)        |
-| `input_cost_per_image_token`              | Image input tokens                                                           |
-| `output_cost_per_image_token`             | Image output tokens                                                          |
-| `output_cost_per_reasoning_token`         | Reasoning/thinking tokens (falls back to `output_cost_per_token`)            |
-| `input_cost_per_cached_token`             | Cached prompt read cost (alias: `cache_read_input_token_cost`)               |
-| `cache_read_input_token_cost`             | LiteLLM-compatible alias for `input_cost_per_cached_token`                   |
-| `cache_creation_input_token_cost`         | Anthropic cache write cost (falls back to `input_cost_per_token`)            |
-| `output_cost_per_cached_token`            | Cached output tokens (falls back to `output_cost_per_token`)                 |
-| `output_cost_per_prediction_token`        | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
-| `output_cost_per_image`                   | Cost per generated image (takes priority over `output_cost_per_image_token`) |
+| Field                                               | Description                                                                  |
+| --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `input_cost_per_token`                              | Regular input tokens                                                         |
+| `output_cost_per_token`                             | Regular output tokens                                                        |
+| `input_cost_per_token_above_200k_tokens`            | Input rate for tokens beyond the 200k threshold                              |
+| `output_cost_per_token_above_200k_tokens`           | Output rate for tokens beyond the 200k threshold                             |
+| `input_cost_per_token_above_272k_tokens`            | Full-session input rate when prompt exceeds 272k tokens                      |
+| `output_cost_per_token_above_272k_tokens`           | Full-session output rate when prompt exceeds 272k tokens                     |
+| `input_cost_per_audio_token`                        | Audio input tokens (falls back to `input_cost_per_token` if absent)          |
+| `output_cost_per_audio_token`                       | Audio output tokens (falls back to `output_cost_per_token` if absent)        |
+| `input_cost_per_image_token`                        | Image input tokens                                                           |
+| `output_cost_per_image_token`                       | Image output tokens                                                          |
+| `output_cost_per_reasoning_token`                   | Reasoning/thinking tokens (falls back to `output_cost_per_token`)            |
+| `input_cost_per_cached_token`                       | Cached prompt read cost (alias: `cache_read_input_token_cost`)               |
+| `cache_read_input_token_cost`                       | LiteLLM-compatible alias for `input_cost_per_cached_token`                   |
+| `cache_creation_input_token_cost`                   | Prompt cache write cost (falls back to `input_cost_per_token`)               |
+| `cache_read_input_token_cost_above_272k_tokens`     | Full-session cache read rate when prompt exceeds 272k tokens                 |
+| `cache_creation_input_token_cost_above_272k_tokens` | Full-session cache write rate when prompt exceeds 272k tokens                |
+| `output_cost_per_cached_token`                      | Cached output tokens (falls back to `output_cost_per_token`)                 |
+| `output_cost_per_prediction_token`                  | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
+| `output_cost_per_image`                             | Cost per generated image (takes priority over `output_cost_per_image_token`) |
 
 ## Cost Calculation
 
@@ -81,7 +85,7 @@ All providers return specialised token counts as **subsets** of the totals:
 
 - `prompt_tokens` (Vertex AI, OpenAI) already includes `audio_input_tokens`, `cached_input_tokens`
 - `completion_tokens` (all providers) already includes `reasoning_tokens`, `audio_output_tokens`, prediction tokens
-- Anthropic is the exception: `cached_input_tokens` and `cache_creation_tokens` are reported **separately** and are not included in `prompt_tokens`
+- Anthropic reports cache tokens separately; OpenAI-compatible APIs report them in prompt/input token details
 
 To avoid billing the same tokens at two different rates, the calculator first computes **regular** (base-rate) token counts by subtracting all specialised sub-types, then adds each sub-type back at its own rate:
 
@@ -140,6 +144,10 @@ input_cost = regular_below × input_cost_per_token
 
 The same logic applies to output tokens using `output_cost_per_token_above_200k_tokens`.
 
+### Long-context pricing (272k threshold)
+
+When the prompt exceeds 272 000 tokens, models such as GPT-5.6 apply their `*_above_272k_tokens` rates to the full session rather than only the tokens beyond the threshold. The prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly 272 000 tokens, base rates still apply.
+
 ### Specialised token types
 
 | Type                | Formula                                                                                                                    |
@@ -170,6 +178,8 @@ Loading is handled by `internal/models/price_loader.go`:
 ### DB price merging
 
 When the LiteLLM database is enabled, prices defined in `LiteLLM_ModelTable` are merged on top of the file-based registry via `MergeDB`. Database prices take precedence for any model that appears in both sources. The file-based prices remain intact for all other models.
+
+Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
 
 ### Lookup
 

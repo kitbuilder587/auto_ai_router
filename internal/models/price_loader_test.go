@@ -41,6 +41,32 @@ func TestLoadModelPrices_FromFile(t *testing.T) {
 	assert.Len(t, prices, 2)
 }
 
+func TestLoadModelPrices_GPT56LongContext(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	pricesJSON := `{
+		"gpt-5.6-sol": {
+			"input_cost_per_token": 0.0000065,
+			"output_cost_per_token": 0.000039,
+			"cache_read_input_token_cost": 0.00000065,
+			"cache_creation_input_token_cost": 0.000008125,
+			"input_cost_per_token_above_272k_tokens": 0.000013,
+			"output_cost_per_token_above_272k_tokens": 0.0000585,
+			"cache_read_input_token_cost_above_272k_tokens": 0.0000013,
+			"cache_creation_input_token_cost_above_272k_tokens": 0.00001625
+		}
+	}`
+	require.NoError(t, os.WriteFile(filePath, []byte(pricesJSON), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	price := prices["gpt-5.6-sol"]
+	require.NotNil(t, price)
+	assert.InDelta(t, 0.000013, price.InputCostPerTokenAbove272k, 1e-12)
+	assert.InDelta(t, 0.0000585, price.OutputCostPerTokenAbove272k, 1e-12)
+	assert.InDelta(t, 0.0000013, price.CacheReadInputTokenCostAbove272k, 1e-12)
+	assert.InDelta(t, 0.00001625, price.CacheCreationInputTokenCostAbove272k, 1e-12)
+}
+
 func TestLoadModelPrices_FromFilePath(t *testing.T) {
 	// Create a temporary file with valid JSON
 	tmpDir := t.TempDir()

@@ -447,3 +447,76 @@ func TestCalculateTokenCosts_CacheCreationTokens(t *testing.T) {
 	// Total: 0.0015 + 0.00009 + 0.00075 + 0.0015 = $0.00384
 	assert.InDelta(t, 0.00384, costs.TotalCost, 1e-9)
 }
+
+func TestCalculateTokenCosts_GPT56CacheWrite(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        1000,
+		CompletionTokens:    100,
+		CachedInputTokens:   300,
+		CacheCreationTokens: 600,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:           0.000005,
+		OutputCostPerToken:          0.00003,
+		CacheReadInputTokenCost:     0.0000005,
+		CacheCreationInputTokenCost: 0.00000625,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.0005, costs.InputCost, 1e-9)
+	assert.InDelta(t, 0.00015, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 0.00375, costs.CacheCreationCost, 1e-9)
+	assert.InDelta(t, 0.003, costs.OutputCost, 1e-9)
+	assert.InDelta(t, 0.0074, costs.TotalCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_GPT56LongContext(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        300_000,
+		CompletionTokens:    10_000,
+		CachedInputTokens:   60_000,
+		CacheCreationTokens: 90_000,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:                    0.0000065,
+		OutputCostPerToken:                   0.000039,
+		CacheReadInputTokenCost:              0.00000065,
+		CacheCreationInputTokenCost:          0.000008125,
+		InputCostPerTokenAbove272k:           0.000013,
+		OutputCostPerTokenAbove272k:          0.0000585,
+		CacheReadInputTokenCostAbove272k:     0.0000013,
+		CacheCreationInputTokenCostAbove272k: 0.00001625,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 1.95, costs.InputCost, 1e-9)
+	assert.InDelta(t, 0.078, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 1.4625, costs.CacheCreationCost, 1e-9)
+	assert.InDelta(t, 0.585, costs.OutputCost, 1e-9)
+	assert.InDelta(t, 4.0755, costs.TotalCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_GPT56ThresholdIsExclusive(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:     tokenTiering272kThreshold,
+		CompletionTokens: 1,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:           0.0000065,
+		OutputCostPerToken:          0.000039,
+		InputCostPerTokenAbove272k:  0.000013,
+		OutputCostPerTokenAbove272k: 0.0000585,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 1.768, costs.InputCost, 1e-9)
+	assert.InDelta(t, 0.000039, costs.OutputCost, 1e-12)
+}

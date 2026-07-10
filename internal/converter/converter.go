@@ -324,10 +324,12 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		InputTokens        int `json:"input_tokens"`
 		OutputTokens       int `json:"output_tokens"`
 		InputTokensDetails struct {
-			CachedTokens int `json:"cached_tokens,omitempty"`
-			ImageTokens  int `json:"image_tokens,omitempty"`
-			TextTokens   int `json:"text_tokens,omitempty"`
-			AudioTokens  int `json:"audio_tokens,omitempty"`
+			CachedTokens        int `json:"cached_tokens,omitempty"`
+			CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+			CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
+			ImageTokens         int `json:"image_tokens,omitempty"`
+			TextTokens          int `json:"text_tokens,omitempty"`
+			AudioTokens         int `json:"audio_tokens,omitempty"`
 		} `json:"input_tokens_details,omitempty"`
 		OutputTokensDetails struct {
 			AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -343,6 +345,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 			PromptTokensDetails struct {
 				CachedTokens        int `json:"cached_tokens,omitempty"`
 				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
 				AudioTokens         int `json:"audio_tokens,omitempty"`
 				TextTokens          int `json:"text_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
@@ -392,6 +395,15 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	}
 	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
 	if audioIn == 0 {
 		audioIn = resp.Usage.InputTokensDetails.AudioTokens
@@ -410,6 +422,12 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		u := resp.Response.Usage
 		if cachedTokens == 0 {
 			cachedTokens = u.InputTokensDetails.CachedTokens
+		}
+		if cacheCreationTokens == 0 {
+			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens
+		}
+		if cacheCreationTokens == 0 {
+			cacheCreationTokens = u.InputTokensDetails.CacheWriteTokens
 		}
 		if audioIn == 0 {
 			audioIn = u.InputTokensDetails.AudioTokens

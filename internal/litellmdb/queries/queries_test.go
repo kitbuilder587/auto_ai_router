@@ -93,14 +93,19 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	outputCost := 0.00003
 	inputAbove128k := 0.000008
 	inputAbove200k := 0.000005
+	inputAbove272k := 0.00001
 	outputAbove128k := 0.000024
 	outputAbove200k := 0.000015
+	outputAbove272k := 0.000045
 
 	inputCostPerSecond := 0.0001
 	outputCostPerSecond := 0.0003
 
 	cacheReadInput := 0.000001
+	cacheCreationInput := 0.00000125
 	cacheReadInputAbove200k := 0.0000008
+	cacheReadInputAbove272k := 0.000001
+	cacheCreationInputAbove272k := 0.0000125
 
 	inputAudio := 0.000006
 	inputAudioPerSecond := 0.00006
@@ -124,12 +129,17 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 		OutputCostPerToken:                         &outputCost,
 		InputCostPerTokenAbove128kTokens:           &inputAbove128k,
 		InputCostPerTokenAbove200kTokens:           &inputAbove200k,
+		InputCostPerTokenAbove272kTokens:           &inputAbove272k,
 		OutputCostPerTokenAbove128kTokens:          &outputAbove128k,
 		OutputCostPerTokenAbove200kTokens:          &outputAbove200k,
+		OutputCostPerTokenAbove272kTokens:          &outputAbove272k,
 		InputCostPerSecond:                         &inputCostPerSecond,
 		OutputCostPerSecond:                        &outputCostPerSecond,
 		CacheReadInputTokenCost:                    &cacheReadInput,
+		CacheCreationInputTokenCost:                &cacheCreationInput,
 		CacheReadInputTokenCostAbove200kTokens:     &cacheReadInputAbove200k,
+		CacheReadInputTokenCostAbove272kTokens:     &cacheReadInputAbove272k,
+		CacheCreationInputTokenCostAbove272kTokens: &cacheCreationInputAbove272k,
 		InputCostPerAudioToken:                     &inputAudio,
 		InputCostPerAudioPerSecond:                 &inputAudioPerSecond,
 		InputCostPerAudioPerSecondAbove128kTokens:  &inputAudioAbove128k,
@@ -151,6 +161,11 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	assert.Equal(t, 0.00001, *params.InputCostPerToken)
 	assert.Equal(t, 0.00003, *params.OutputCostPerToken)
 	assert.Equal(t, 0.000018, *params.OutputCostPerReasoningToken)
+	assert.Equal(t, 0.00000125, *params.CacheCreationInputTokenCost)
+	assert.Equal(t, 0.00001, *params.InputCostPerTokenAbove272kTokens)
+	assert.Equal(t, 0.000045, *params.OutputCostPerTokenAbove272kTokens)
+	assert.Equal(t, 0.000001, *params.CacheReadInputTokenCostAbove272kTokens)
+	assert.Equal(t, 0.0000125, *params.CacheCreationInputTokenCostAbove272kTokens)
 }
 
 // TestGenericLiteLLMParamsFields verifies GenericLiteLLMParams structure with embedded types

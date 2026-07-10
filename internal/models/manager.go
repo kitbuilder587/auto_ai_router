@@ -26,6 +26,8 @@ type ModelPrice struct {
 	// Tiered pricing: tokens above 200k threshold billed at a different rate
 	InputCostPerTokenAbove200k  float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
 	OutputCostPerTokenAbove200k float64 `json:"output_cost_per_token_above_200k_tokens,omitempty"`
+	InputCostPerTokenAbove272k  float64 `json:"input_cost_per_token_above_272k_tokens,omitempty"`
+	OutputCostPerTokenAbove272k float64 `json:"output_cost_per_token_above_272k_tokens,omitempty"`
 
 	// Audio tokens (can be more specific than regular tokens)
 	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
@@ -39,11 +41,13 @@ type ModelPrice struct {
 	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
 
 	// Cached/Prediction tokens
-	OutputCostPerCachedToken     float64 `json:"output_cost_per_cached_token,omitempty"`
-	InputCostPerCachedToken      float64 `json:"input_cost_per_cached_token,omitempty"`
-	CacheReadInputTokenCost      float64 `json:"cache_read_input_token_cost,omitempty"`     // LiteLLM alias for InputCostPerCachedToken
-	CacheCreationInputTokenCost  float64 `json:"cache_creation_input_token_cost,omitempty"` // Anthropic cache write cost
-	OutputCostPerPredictionToken float64 `json:"output_cost_per_prediction_token,omitempty"`
+	OutputCostPerCachedToken             float64 `json:"output_cost_per_cached_token,omitempty"`
+	InputCostPerCachedToken              float64 `json:"input_cost_per_cached_token,omitempty"`
+	CacheReadInputTokenCost              float64 `json:"cache_read_input_token_cost,omitempty"`
+	CacheCreationInputTokenCost          float64 `json:"cache_creation_input_token_cost,omitempty"`
+	CacheReadInputTokenCostAbove272k     float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove272k float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
+	OutputCostPerPredictionToken         float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
