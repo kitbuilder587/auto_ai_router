@@ -60,8 +60,8 @@ func UpdateAllProxyCredentials(
 		go func(c *config.CredentialConfig) {
 			defer wg.Done()
 
-			// Fetch models from proxy
 			remoteModels, err := modelManager.GetRemoteModelsWithError(ctx, c)
+			modelManager.CopyProviderScopeMetadata(c)
 
 			resultsChan <- proxyResult{
 				credential: c,
@@ -82,6 +82,13 @@ func UpdateAllProxyCredentials(
 	failedCount := 0
 
 	for result := range resultsChan {
+		bal.UpdateProviderScopes(
+			*result.credential,
+			result.credential.ProviderScopes,
+			result.credential.ProviderDeniedScopes,
+			result.credential.ProviderScopeExpression,
+			result.credential.ProviderScopeKnown,
+		)
 		if result.err != nil {
 			log.Warn("Failed to fetch models from proxy",
 				"credential", result.credential.Name,
@@ -93,18 +100,15 @@ func UpdateAllProxyCredentials(
 
 		// Update rate limiter and model manager with fetched models
 		addedCount := 0
-		modelIDs := make([]string, 0, len(result.models))
 		modelIDSet := make(map[string]bool, len(result.models))
 		for _, model := range result.models {
 			if model.ID == "" || modelIDSet[model.ID] {
 				continue
 			}
 			modelIDSet[model.ID] = true
-			modelIDs = append(modelIDs, model.ID)
 		}
 
 		updateMutex.Lock()
-		modelManager.ReplaceModelsForCredential(result.credential.Name, modelIDs)
 		for _, pair := range rateLimiter.GetAllModelPairs() {
 			if pair.Credential != result.credential.Name || modelIDSet[pair.Model] {
 				continue

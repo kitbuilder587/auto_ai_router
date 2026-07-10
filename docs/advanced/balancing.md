@@ -144,9 +144,12 @@ tries `backup-anthropic` next. If `backup-anthropic` is also unavailable, it tri
 router re-resolves the model before sending the retry request, so an Anthropic model alias can
 safely move to a Bedrock credential.
 
-If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved.
-Fallback credentials (`is_fallback: true`) are still used only by the fallback mechanism.
-See [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
+If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved
+when that credential starts the retry chain. When a retry chain starts from a credential with
+`fallback_priority > 0`, the router tries all configured priority tiers first, then continues
+with regular credentials that do not set `fallback_priority`. Fallback credentials
+(`is_fallback: true`) are still used only by the fallback mechanism. See
+[Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
 
 ## Proxy Chain Fallback
 

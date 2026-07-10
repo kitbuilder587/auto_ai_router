@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -54,6 +57,210 @@ func TestGetAllModels_WithStaticModels(t *testing.T) {
 
 	assert.Equal(t, "list", result.Object)
 	assert.Equal(t, 2, len(result.Data))
+}
+
+func TestGetAllModelsScoped_FiltersByCredentialScope(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	staticModels := []config.ModelRPMConfig{
+		{Name: "shared-model"},
+		{Name: "team-a-model", Credential: "team-a-cred"},
+		{Name: "team-b-model", Credential: "team-b-cred"},
+	}
+	manager := New(logger, 100, staticModels)
+	credentials := []config.CredentialConfig{
+		{Name: "shared-cred", Type: config.ProviderTypeOpenAI},
+		{Name: "team-a-cred", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-a"}},
+		{Name: "team-b-cred", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-b"}},
+	}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+
+	resp := manager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil))
+	ids := make([]string, 0, len(resp.Data))
+	for _, model := range resp.Data {
+		ids = append(ids, model.ID)
+	}
+
+	assert.ElementsMatch(t, []string{"shared-model", "team-a-model"}, ids)
+}
+
+func TestGetAllModelsScoped_AdminExcludesCredentialsWithoutRoute(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	staticModels := []config.ModelRPMConfig{{Name: "blocked-model", Credential: "proxy"}}
+	manager := New(logger, 100, staticModels)
+	credentials := []config.CredentialConfig{{
+		Name:                    "proxy",
+		Type:                    config.ProviderTypeProxy,
+		ProviderScopeExpression: scope.FalseExpression(),
+		ProviderScopeKnown:      true,
+	}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+
+	response := manager.GetAllModelsScoped(scope.AdminContext())
+
+	assert.Empty(t, response.Data)
+}
+
+func TestGetAllModelsScoped_FetchesOnlyVisibleProxyCredentials(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	visibleRequests := 0
+	visibleServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		visibleRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"upstream": {Type: "openai"},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"visible": {Credential: "upstream", Model: "visible-model"},
+			},
+		})
+	}))
+	defer visibleServer.Close()
+
+	hiddenRequests := 0
+	hiddenServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hiddenRequests++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"upstream": {Type: "openai"},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"hidden": {Credential: "upstream", Model: "hidden-model"},
+			},
+		})
+	}))
+	defer hiddenServer.Close()
+
+	manager := New(logger, 100, nil)
+	manager.cacheExpiration = -time.Second
+	manager.SetCredentials([]config.CredentialConfig{
+		{Name: "visible-proxy", Type: config.ProviderTypeProxy, BaseURL: visibleServer.URL, Scopes: []string{"team-a"}},
+		{Name: "hidden-proxy", Type: config.ProviderTypeProxy, BaseURL: hiddenServer.URL, Scopes: []string{"team-b"}},
+	})
+
+	resp := manager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil))
+	ids := make([]string, 0, len(resp.Data))
+	for _, model := range resp.Data {
+		ids = append(ids, model.ID)
+	}
+
+	assert.Equal(t, 1, visibleRequests)
+	assert.Equal(t, 0, hiddenRequests)
+	assert.Contains(t, ids, "visible-model")
+	assert.NotContains(t, ids, "hidden-model")
+
+	resp = manager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil))
+	ids = ids[:0]
+	for _, model := range resp.Data {
+		ids = append(ids, model.ID)
+	}
+
+	assert.Equal(t, 1, visibleRequests)
+	assert.Equal(t, 0, hiddenRequests)
+	assert.Contains(t, ids, "visible-model")
+	assert.NotContains(t, ids, "hidden-model")
+}
+
+func TestGetAllModelsScoped_CacheIsBounded(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "shared-model"}})
+	credentials := []config.CredentialConfig{{Name: "shared", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+
+	for i := 0; i < scopedAllModelsCacheSize+10; i++ {
+		manager.GetAllModelsScoped(scope.NewContext([]string{fmt.Sprintf("tenant-%d", i)}, nil))
+	}
+
+	assert.Equal(t, scopedAllModelsCacheSize, manager.scopedAllModelsCache.Len())
+}
+
+func TestGetAllModelsScoped_CacheSeparatesDynamicModelScopes(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	staticModels := []config.ModelRPMConfig{
+		{Name: "team-a-model", Credential: "shared"},
+		{Name: "team-b-model", Credential: "shared"},
+	}
+	manager := New(logger, 100, staticModels)
+	credentials := []config.CredentialConfig{{Name: "shared", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+	manager.ReplaceModelScopesForCredential("shared", map[string]ScopeMetadata{
+		"team-a-model": {Scopes: []string{"team-a"}},
+		"team-b-model": {Scopes: []string{"team-b"}},
+	})
+
+	teamA := manager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil))
+	teamB := manager.GetAllModelsScoped(scope.NewContext([]string{"team-b"}, nil))
+
+	assert.Equal(t, []string{"team-a-model"}, responseModelIDs(teamA))
+	assert.Equal(t, []string{"team-b-model"}, responseModelIDs(teamB))
+}
+
+func TestGetAllModelsScoped_CacheKeyDistinguishesDelimitedScopeValues(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "model-a", Credential: "shared"}})
+	credentials := []config.CredentialConfig{{Name: "shared", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+	manager.ReplaceModelScopesForCredential("shared", map[string]ScopeMetadata{
+		"model-a": {Scopes: []string{"a"}},
+	})
+
+	separate := manager.GetAllModelsScoped(scope.NewContext([]string{"a", "b"}, nil))
+	combined := manager.GetAllModelsScoped(scope.NewContext([]string{"a,b"}, nil))
+
+	assert.Equal(t, []string{"model-a"}, responseModelIDs(separate))
+	assert.Empty(t, responseModelIDs(combined))
+}
+
+func TestGetAllModelsScoped_RemovesExpiredCacheEntry(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "shared-model"}})
+	credentials := []config.CredentialConfig{{Name: "shared", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+	visibility := scope.NewContext([]string{"team-a"}, nil)
+
+	manager.GetAllModelsScoped(visibility)
+	cacheKey := manager.scopedAllModelsCacheKeyLocked(visibility)
+	cached, ok := manager.scopedAllModelsCache.Peek(cacheKey)
+	assert.True(t, ok)
+	cached.expiresAt = time.Now().Add(-time.Second)
+	manager.scopedAllModelsCache.Add(cacheKey, cached)
+
+	_, ok = manager.getCachedScopedAllModels(visibility)
+
+	assert.False(t, ok)
+	assert.False(t, manager.scopedAllModelsCache.Contains(cacheKey))
+}
+
+func TestCurrentModelsLocked_DropsStaleFetchedModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, nil)
+	manager.SetCredentials([]config.CredentialConfig{{Name: "proxy", Type: config.ProviderTypeProxy}})
+	manager.ReplaceModelsForCredential("proxy", []string{"current-model"})
+
+	manager.mu.Lock()
+	response := manager.currentModelsLocked(ModelsResponse{
+		Object: "list",
+		Data:   []Model{{ID: "stale-model"}},
+	}, map[string]bool{"proxy": true})
+	manager.mu.Unlock()
+
+	assert.Equal(t, []string{"current-model"}, responseModelIDs(response))
+}
+
+func responseModelIDs(response ModelsResponse) []string {
+	ids := make([]string, 0, len(response.Data))
+	for _, model := range response.Data {
+		ids = append(ids, model.ID)
+	}
+	return ids
 }
 
 func TestGetAllModels_Empty(t *testing.T) {

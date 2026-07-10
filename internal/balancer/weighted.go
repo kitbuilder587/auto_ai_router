@@ -16,6 +16,7 @@ type schedKey struct {
 	reqType      config.ProviderType
 	excluding    bool
 	priority     int
+	scopeKey     string
 }
 
 // swrrState is the SWRR scheduler for one schedKey. Nodes are keyed by credential name so
@@ -70,12 +71,12 @@ func (s *swrrState) currentOf(name string) int {
 // filtering is active; otherwise every model shares one candidate set, so they must share
 // one cycle too — keeping the key out avoids unbounded map growth from arbitrary model
 // names. Must be called with r.mu held.
-func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, excluding bool) schedKey {
+func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, excluding bool, scopeKey string) schedKey {
 	model := modelID
 	if model == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
 		model = ""
 	}
-	return schedKey{model: model, fallbackOnly: allowOnlyFallback, proxyOnly: allowOnlyProxy, reqType: requiredType, excluding: excluding}
+	return schedKey{model: model, fallbackOnly: allowOnlyFallback, proxyOnly: allowOnlyProxy, reqType: requiredType, excluding: excluding, scopeKey: scopeKey}
 }
 
 // swrrStateFor returns (creating if needed) the SWRR scheduler for a selection cycle.

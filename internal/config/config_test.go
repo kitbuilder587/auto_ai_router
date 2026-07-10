@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -77,6 +78,34 @@ monitoring:
 	// Validate monitoring
 	assert.True(t, cfg.Monitoring.PrometheusEnabled)
 	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
+}
+
+func TestCredentialConfig_UnmarshalScopes(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: provider
+type: openai
+api_key: sk-test
+base_url: https://api.openai.com
+scopes: [Team-A, team-a, " "]
+denied_scopes: [premium]
+forbidden_scopes: [blocked]
+`), &cred)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"team-a"}, cred.Scopes)
+	assert.Equal(t, []string{"premium", "blocked"}, cred.DeniedScopes)
+}
+
+func TestCredentialConfig_ScopeExpressionPreservesIndependentGroups(t *testing.T) {
+	cred := CredentialConfig{
+		Scopes:         []string{"team-a"},
+		ProviderScopes: []string{"team-b"},
+	}
+
+	expression := cred.ScopeExpression()
+	assert.True(t, scope.NewContext([]string{"team-a", "team-b"}, nil).AllowsExpression(expression))
+	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(expression))
 }
 
 func TestConfig_Validate_InvalidAuthType(t *testing.T) {

@@ -15,13 +15,23 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
+
+type unavailableScopeDB struct {
+	*litellmdb.NoopManager
+}
+
+func (unavailableScopeDB) IsEnabled() bool { return true }
+
+func (unavailableScopeDB) IsHealthy() bool { return false }
 
 func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
@@ -215,6 +225,79 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	assert.NoError(t, err)
 	assert.Equal(t, "unhealthy", response["status"])
+}
+
+func TestServeHTTP_HealthCheck_NoProviderRouteIsUnavailable(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "no-route", RPM: 100, ProviderScopeExpression: scope.FalseExpression()},
+	}
+	prx := createProxyWithConfig(credentials, nil)
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestServeHTTP_HealthCheck_ScopedViewDoesNotDriveStatusCode(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
+	}
+	prx := createProxyWithConfig(credentials, nil)
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "unhealthy", response["status"])
+	assert.Equal(t, float64(0), response["total_credentials"])
+}
+
+func TestServeHTTP_HealthCheck_UnverifiableTokenFallsBackToPublic(t *testing.T) {
+	credentials := []config.CredentialConfig{
+		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
+	}
+	prx := createProxyWithConfig(credentials, nil)
+	prx.LiteLLMDB = unavailableScopeDB{NoopManager: litellmdb.NewNoopManager()}
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("Authorization", "Bearer stale-key")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "unhealthy", response["status"])
+	assert.Equal(t, float64(0), response["total_credentials"])
+}
+
+func TestServeHTTP_V1Models_UnverifiableTokenRemainsUnauthorized(t *testing.T) {
+	prx := createTestProxy()
+	prx.LiteLLMDB = unavailableScopeDB{NoopManager: litellmdb.NewNoopManager()}
+	router := New(prx, createEnabledTestModelManager(), testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer stale-key")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestServeHTTP_V1Models_Enabled(t *testing.T) {

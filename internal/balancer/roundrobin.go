@@ -5,12 +5,14 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 // ModelChecker interface for checking model availability
@@ -94,6 +96,27 @@ func (r *RoundRobin) SetModelChecker(mc ModelChecker) {
 	r.modelChecker = mc
 }
 
+func (r *RoundRobin) UpdateProviderScopes(
+	expected config.CredentialConfig,
+	scopes, deniedScopes []string,
+	expression *scope.Expression,
+	known bool,
+) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cred := r.getCredentialByName(expected.Name)
+	if cred == nil || !expected.SameProviderIdentity(*cred) {
+		return false
+	}
+
+	cred.ProviderScopes = scope.NormalizeList(scopes)
+	cred.ProviderDeniedScopes = scope.NormalizeList(deniedScopes)
+	cred.ProviderScopeExpression = scope.NormalizeExpression(expression)
+	cred.ProviderScopeKnown = known
+	return true
+}
+
 // getCredentialByName finds a credential by name (must be called with lock held)
 func (r *RoundRobin) getCredentialByName(name string) *config.CredentialConfig {
 	idx, ok := r.credentialIndex[name]
@@ -138,22 +161,38 @@ func (r *RoundRobin) GetProxyCredentials() []config.CredentialConfig {
 
 // NextForModel returns the next available credential that supports the specified model
 func (r *RoundRobin) NextForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, false, false)
+	return r.NextForModelScoped(modelID, scope.AdminContext())
 }
 
 // NextFallbackForModel returns the next available fallback credential
 func (r *RoundRobin) NextFallbackForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, true, false)
+	return r.NextFallbackForModelScoped(modelID, scope.AdminContext())
 }
 
 // NextFallbackProxyForModel returns the next available fallback proxy credential
 func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, true, true)
+	return r.NextFallbackProxyForModelScoped(modelID, scope.AdminContext())
+}
+
+func (r *RoundRobin) NextForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextScoped(modelID, false, false, visibility)
+}
+
+func (r *RoundRobin) NextFallbackForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextScoped(modelID, true, false, visibility)
+}
+
+func (r *RoundRobin) NextFallbackProxyForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextScoped(modelID, true, true, visibility)
 }
 
 // NextSpecific tries to return a specific credential by name without advancing the
 // round-robin state. It still applies model availability, ban, and rate-limit checks.
 func (r *RoundRobin) NextSpecific(credentialName, modelID string) (*config.CredentialConfig, error) {
+	return r.NextSpecificScoped(credentialName, modelID, scope.AdminContext())
+}
+
+func (r *RoundRobin) NextSpecificScoped(credentialName, modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -163,8 +202,11 @@ func (r *RoundRobin) NextSpecific(credentialName, modelID string) (*config.Crede
 	}
 
 	cred := &r.credentials[idx]
+	if !cred.VisibleTo(visibility) {
+		return nil, ErrNoCredentialsAvailable
+	}
 	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-		if !r.modelChecker.HasModel(credentialName, modelID) {
+		if !r.hasModel(credentialName, modelID, visibility) {
 			return nil, ErrNoCredentialsAvailable
 		}
 	}
@@ -180,8 +222,8 @@ func (r *RoundRobin) NextSpecific(credentialName, modelID string) (*config.Crede
 	return cred, nil
 }
 
-func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool) (*config.CredentialConfig, error) {
-	return r.nextExcluding(modelID, allowOnlyFallback, allowOnlyProxy, "", nil)
+func (r *RoundRobin) nextScoped(modelID string, allowOnlyFallback, allowOnlyProxy bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextExcludingScoped(modelID, allowOnlyFallback, allowOnlyProxy, "", nil, visibility)
 }
 
 // nextExcluding is the core credential selection logic with optional exclude set.
@@ -192,7 +234,7 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 //     These are time-stable properties — they don't change between requests.
 //  2. Drop banned candidates, then pick by smooth weighted round-robin per selection cycle.
 //  3. Commit the highest-priority candidate that passes its rate limits.
-func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, exclude map[string]bool) (*config.CredentialConfig, error) {
+func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -225,11 +267,15 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
+		if !cred.VisibleTo(visibility) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
+			continue
+		}
 
 		// Check model availability before ban/rate checks.
 		// model_not_available is a structural property, not a temporary issue.
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-			if !r.modelChecker.HasModel(cred.Name, modelID) {
+			if !r.hasModel(cred.Name, modelID, visibility) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
 				continue
 			}
@@ -242,7 +288,7 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude))
+	key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), candidateCycleKey(candidates))
 	live, rateLimitHit := r.liveCandidates(modelID, candidates)
 	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
 }
@@ -332,38 +378,86 @@ func hasActiveExclusion(exclude map[string]bool) bool {
 	return false
 }
 
+func candidateCycleKey(candidates []candidateEntry) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		names = append(names, c.cred.Name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, "\x00")
+}
+
 // NextForModelExcluding returns the next available non-fallback credential that supports
 // the specified model, excluding credentials in the exclude set.
 func (r *RoundRobin) NextForModelExcluding(modelID string, exclude map[string]bool) (*config.CredentialConfig, error) {
-	return r.nextExcluding(modelID, false, false, "", exclude)
+	return r.NextForModelExcludingScoped(modelID, exclude, scope.AdminContext())
+}
+
+func (r *RoundRobin) NextForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextExcludingScoped(modelID, false, false, "", exclude, visibility)
 }
 
 // NextSameTypeForModelExcluding returns the next available non-fallback credential of the
 // same type as credType, excluding credentials in the exclude set. Used for same-type
 // credential retry on provider errors (429/5xx/auth errors) to prevent cross-type routing.
 func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType config.ProviderType, exclude map[string]bool) (*config.CredentialConfig, error) {
+	return r.NextSameTypeForModelExcludingScoped(modelID, credType, exclude, scope.AdminContext())
+}
+
+func (r *RoundRobin) NextSameTypeForModelExcludingScoped(modelID string, credType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	if credType == config.ProviderTypeProxy {
 		// allowOnlyProxy=true already restricts to proxy type
-		return r.nextExcluding(modelID, false, true, "", exclude)
+		return r.nextExcludingScoped(modelID, false, true, "", exclude, visibility)
 	}
-	return r.nextExcluding(modelID, false, false, credType, exclude)
+	return r.nextExcludingScoped(modelID, false, false, credType, exclude, visibility)
 }
 
 func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.CredentialConfig, exclude map[string]bool) (*config.CredentialConfig, error) {
+	return r.NextRetryForModelExcludingScoped(modelID, current, exclude, scope.AdminContext())
+}
+
+func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *config.CredentialConfig, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if current.Type == config.ProviderTypeProxy || current.IsFallback || current.FallbackPriority <= 0 {
-		return r.NextSameTypeForModelExcluding(modelID, current.Type, exclude)
+	if current.Type == config.ProviderTypeProxy || current.IsFallback {
+		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
-	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude)
+	if current.FallbackPriority <= 0 {
+		if r.hasTriedPriorityCredential(exclude) {
+			return r.nextUnprioritizedRetry(modelID, exclude, visibility)
+		}
+		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
+	}
+	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude, visibility)
 }
 
-func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool) (*config.CredentialConfig, error) {
+func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	candidates := make([]candidateEntry, 0, len(r.credentials))
+	priorityCandidates, unprioritizedCandidates := r.splitPriorityRetryCandidatesLocked(modelID, minPriority, exclude, visibility)
+	cred, found, priorityRateLimitHit, err := r.selectPriorityRetryCandidateLocked(modelID, priorityCandidates)
+	if err != nil || found {
+		return cred, err
+	}
+	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
+}
+
+func (r *RoundRobin) nextUnprioritizedRetry(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, candidates := r.splitPriorityRetryCandidatesLocked(modelID, 1, exclude, visibility)
+	return r.selectUnprioritizedRetryCandidateLocked(modelID, candidates, false)
+}
+
+func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) ([]candidateEntry, []candidateEntry) {
+	priorityCandidates := make([]candidateEntry, 0, len(r.credentials))
+	unprioritizedCandidates := make([]candidateEntry, 0, len(r.credentials))
 	for i := range r.credentials {
 		cred := &r.credentials[i]
 		if len(exclude) > 0 && exclude[cred.Name] {
@@ -377,29 +471,46 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
-		if cred.FallbackPriority <= 0 || cred.FallbackPriority < minPriority {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+		if !cred.VisibleTo(visibility) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
 			continue
 		}
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-			if !r.modelChecker.HasModel(cred.Name, modelID) {
+			if !r.hasModel(cred.Name, modelID, visibility) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
 				continue
 			}
 		}
-		candidates = append(candidates, candidateEntry{absIdx: i, cred: cred})
+		if cred.FallbackPriority <= 0 {
+			unprioritizedCandidates = append(unprioritizedCandidates, candidateEntry{absIdx: i, cred: cred})
+			continue
+		}
+		if cred.FallbackPriority < minPriority {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+			continue
+		}
+		priorityCandidates = append(priorityCandidates, candidateEntry{absIdx: i, cred: cred})
 	}
+	return priorityCandidates, unprioritizedCandidates
+}
 
+func (r *RoundRobin) hasModel(credentialName, modelID string, visibility scope.Context) bool {
+	if scoped, ok := r.modelChecker.(interface {
+		HasModelScoped(credentialName, modelID string, visibility scope.Context) bool
+	}); ok {
+		return scoped.HasModelScoped(credentialName, modelID, visibility)
+	}
+	return r.modelChecker.HasModel(credentialName, modelID)
+}
+
+func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool, error) {
 	if len(candidates) == 0 {
-		return nil, ErrNoCredentialsAvailable
+		return nil, false, false, nil
 	}
 
 	live, rateLimitHit := r.liveCandidates(modelID, candidates)
 	if len(live) == 0 {
-		if rateLimitHit {
-			return nil, ErrRateLimitExceeded
-		}
-		return nil, ErrNoCredentialsAvailable
+		return nil, false, rateLimitHit, nil
 	}
 
 	selectedPriority := live[0].cred.FallbackPriority
@@ -417,9 +528,51 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 		bucket = append(bucket, c)
 	}
 
-	key := r.schedKeyFor(modelID, false, false, "", true)
+	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(bucket))
 	key.priority = selectedPriority
-	return r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
+	cred, err := r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
+	return cred, err == nil, rateLimitHit, err
+}
+
+func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, candidates []candidateEntry, priorRateLimitHit bool) (*config.CredentialConfig, error) {
+	if len(candidates) == 0 {
+		if priorRateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	live, rateLimitHit := r.liveCandidates(modelID, candidates)
+	rateLimitHit = rateLimitHit || priorRateLimitHit
+	if len(live) == 0 {
+		if rateLimitHit {
+			return nil, ErrRateLimitExceeded
+		}
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(candidates))
+	key.priority = -1
+	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+}
+
+func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
+	if len(exclude) == 0 {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for name, tried := range exclude {
+		if !tried {
+			continue
+		}
+		cred := r.getCredentialByName(name)
+		if cred != nil && cred.FallbackPriority > 0 && !cred.IsFallback && cred.Type != config.ProviderTypeProxy {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
@@ -440,7 +593,7 @@ func (r *RoundRobin) GetAvailableCount() int {
 
 	count := 0
 	for _, cred := range r.credentials {
-		if !r.fail2ban.HasAnyBan(cred.Name) {
+		if cred.VisibleTo(scope.AdminContext()) && !r.fail2ban.HasAnyBan(cred.Name) {
 			count++
 		}
 	}
@@ -464,6 +617,11 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	existing := make(map[string]config.CredentialConfig, len(r.credentials))
+	for _, credential := range r.credentials {
+		existing[credential.Name] = credential
+	}
+
 	// Build name set of static creds so we can skip duplicates from DB.
 	staticNames := make(map[string]bool, len(r.staticCreds))
 	for _, c := range r.staticCreds {
@@ -483,6 +641,9 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 	if len(newCreds) == 0 {
 		// Nothing to update — keep existing credentials to avoid empty-list panics.
 		return
+	}
+	for i := range newCreds {
+		preserveProviderScopeMetadata(&newCreds[i], existing[newCreds[i].Name])
 	}
 
 	// Upsert rate-limiter limits for all DB creds (not just new ones).
@@ -504,6 +665,22 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 
 	r.credentials = newCreds
 	r.credentialIndex = newIndex
+}
+
+func preserveProviderScopeMetadata(next *config.CredentialConfig, previous config.CredentialConfig) {
+	if next.Type != config.ProviderTypeProxy {
+		return
+	}
+	if next.SameProviderIdentity(previous) {
+		next.ProviderScopes = append([]string(nil), previous.ProviderScopes...)
+		next.ProviderDeniedScopes = append([]string(nil), previous.ProviderDeniedScopes...)
+		next.ProviderScopeExpression = scope.NormalizeExpression(previous.ProviderScopeExpression)
+		next.ProviderScopeKnown = previous.ProviderScopeKnown
+		return
+	}
+	if next.ProviderScopeExpression == nil && len(next.ProviderScopes) == 0 && len(next.ProviderDeniedScopes) == 0 {
+		next.ProviderScopeExpression = scope.FalseExpression()
+	}
 }
 
 // validateFallbackConfiguration validates fallback credential configuration

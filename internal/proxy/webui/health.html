@@ -25,6 +25,12 @@
         <span class="here">system health</span>
       </div>
       <div class="spacer"></div>
+      <label class="pill" style="display:flex;gap:6px;align-items:center;">
+        <span>api key</span>
+        <input id="apiKeyInput" type="password" autocomplete="off" style="width:180px;background:transparent;border:0;color:inherit;outline:0;">
+      </label>
+      <button class="pill" id="saveApiKey">use key</button>
+      <button class="pill" id="clearApiKey">clear</button>
       <span class="pill" id="countdown"></span>
       <button class="pill" onclick="toggleTheme()">theme</button>
     </div>
@@ -104,6 +110,7 @@
     let countdownSecs = 30;
     let countdownTimer = null;
     let modelsData = {};
+    const API_KEY_STORAGE = 'air:webui:api_key';
 
     // ── theme ──────────────────────────────────────────────────────────────────
     function toggleTheme() {
@@ -115,6 +122,30 @@
     (function initTheme() {
       document.documentElement.setAttribute('data-theme', localStorage.getItem('theme') || 'dark');
     })();
+
+    function authHeaders() {
+      const key = sessionStorage.getItem(API_KEY_STORAGE);
+      return key ? { Authorization: `Bearer ${key}` } : {};
+    }
+
+    function initApiKeyControls() {
+      const input = document.getElementById('apiKeyInput');
+      input.value = sessionStorage.getItem(API_KEY_STORAGE) || '';
+      document.getElementById('saveApiKey').addEventListener('click', () => {
+        const key = input.value.trim();
+        if (key) sessionStorage.setItem(API_KEY_STORAGE, key);
+        else sessionStorage.removeItem(API_KEY_STORAGE);
+        load(true);
+      });
+      document.getElementById('clearApiKey').addEventListener('click', () => {
+        input.value = '';
+        sessionStorage.removeItem(API_KEY_STORAGE);
+        load(true);
+      });
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') document.getElementById('saveApiKey').click();
+      });
+    }
 
     // ── model family extraction ────────────────────────────────────────────────
     function modelFamily(name) {
@@ -303,7 +334,7 @@
       clearInterval(countdownTimer);
 
       try {
-        const resp = await fetch('/health');
+        const resp = await fetch('/health', { headers: authHeaders() });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
 
@@ -362,6 +393,7 @@
       if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
     });
 
+    initApiKeyControls();
     load();
   </script>
 </body>

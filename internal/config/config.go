@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"gopkg.in/yaml.v3"
 )
 
@@ -565,15 +566,21 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name             string       `yaml:"name"`
-	Type             ProviderType `yaml:"type"`
-	APIKey           string       `yaml:"api_key"`
-	BaseURL          string       `yaml:"base_url"`
-	AuthType         string       `yaml:"auth_type,omitempty"`
-	RPM              int          `yaml:"rpm"`
-	TPM              int          `yaml:"tpm"`
-	Weight           int          `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
-	FallbackPriority int          `yaml:"fallback_priority,omitempty"`
+	Name                    string            `yaml:"name"`
+	Type                    ProviderType      `yaml:"type"`
+	APIKey                  string            `yaml:"api_key"`
+	BaseURL                 string            `yaml:"base_url"`
+	AuthType                string            `yaml:"auth_type,omitempty"`
+	RPM                     int               `yaml:"rpm"`
+	TPM                     int               `yaml:"tpm"`
+	Weight                  int               `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	FallbackPriority        int               `yaml:"fallback_priority,omitempty"`
+	Scopes                  []string          `yaml:"scopes,omitempty"`
+	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
+	ProviderScopes          []string          `yaml:"-"`
+	ProviderDeniedScopes    []string          `yaml:"-"`
+	ProviderScopeExpression *scope.Expression `yaml:"-"`
+	ProviderScopeKnown      bool              `yaml:"-"`
 
 	// Models associated with this credential (used for x-model-templates)
 	Models []ModelRPMConfig `yaml:"models,omitempty"`
@@ -586,6 +593,31 @@ type CredentialConfig struct {
 
 	// Proxy specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
+}
+
+func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
+	return visibility.AllowsExpression(c.ScopeExpression())
+}
+
+func (c CredentialConfig) ScopeExpression() *scope.Expression {
+	providerExpression := c.ProviderScopeExpression
+	if providerExpression == nil {
+		providerExpression = scope.FromScopes(c.ProviderScopes, c.ProviderDeniedScopes)
+	}
+	return scope.And(
+		scope.FromScopes(c.Scopes, c.DeniedScopes),
+		providerExpression,
+	)
+}
+
+// SameProviderIdentity reports whether learned provider metadata can be reused.
+func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
+	return c.Name == other.Name &&
+		c.Type == other.Type &&
+		c.BaseURL == other.BaseURL &&
+		c.APIKey == other.APIKey &&
+		c.AuthType == other.AuthType &&
+		c.IsFallback == other.IsFallback
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -601,6 +633,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		Scopes           []string         `yaml:"scopes,omitempty"`
+		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
+		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
 		ProjectID        string           `yaml:"project_id,omitempty"`
 		Location         string           `yaml:"location,omitempty"`
 		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
@@ -620,6 +655,8 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
 	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
+	c.Scopes = scope.NormalizeList(temp.Scopes)
+	c.DeniedScopes = scope.NormalizeList(append(temp.DeniedScopes, temp.ForbiddenScopes...))
 
 	// Resolve Vertex AI specific fields
 	c.ProjectID = resolveEnvString(temp.ProjectID)

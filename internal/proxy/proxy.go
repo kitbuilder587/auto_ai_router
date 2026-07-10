@@ -28,6 +28,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 	"go.opentelemetry.io/otel/attribute"
@@ -93,6 +94,7 @@ type RequestLogContext struct {
 	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
+	Scope                scope.Context
 }
 
 // HealthChecker provides cached database health status
@@ -519,7 +521,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, config.ProviderTypeProxy, triedCreds)
+				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, config.ProviderTypeProxy, triedCreds, logCtx.Scope)
 				if err != nil {
 					p.logger.DebugContext(r.Context(), "No more same-type proxy credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
@@ -858,7 +860,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			var nextReq credentialPreparedRequest
 			retryReady := false
 			for {
-				candidate, err := p.balancer.NextRetryForModelExcluding(modelID, cred, triedCreds)
+				candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, logCtx.Scope)
 				if err != nil {
 					p.logger.DebugContext(r.Context(), "No more retry credentials available",
 						"model", modelID, "attempt", attempt, "error", err)

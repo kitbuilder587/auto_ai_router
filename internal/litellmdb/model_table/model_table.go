@@ -11,6 +11,7 @@ import (
 	cryptoutils "github.com/mixaill76/auto_ai_router/internal/litellmdb/crypto_utils"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 
 	manager "github.com/mixaill76/auto_ai_router/internal/models"
 )
@@ -337,6 +338,10 @@ func convertCredentialTableToConfig(cred queries.CredentialTable) config.Credent
 	// Provider type from credential_info
 	if cred.CredentialInfo != nil && cred.CredentialInfo.CustomLLMProvider != nil {
 		cfg.Type = mapProviderType(*cred.CredentialInfo.CustomLLMProvider)
+	}
+	if cred.CredentialInfo != nil {
+		cfg.Scopes = scope.NormalizeList(cred.CredentialInfo.AirScopes)
+		cfg.DeniedScopes = scope.NormalizeList(append(cred.CredentialInfo.AirDeniedScopes, cred.CredentialInfo.AirForbiddenScopes...))
 	}
 
 	fillCredentialFromParams(&cfg, cred.CredentialParams)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -283,6 +284,31 @@ func TestSetCredentials_Overwrite(t *testing.T) {
 	}
 	manager.SetCredentials(creds2)
 	assert.Equal(t, creds2, manager.credentials)
+}
+
+func TestSetCredentials_PreservesProviderScopeForSameIdentity(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, nil)
+	credential := config.CredentialConfig{
+		Name: "proxy", Type: config.ProviderTypeProxy, BaseURL: "http://proxy.example", APIKey: "key",
+		ProviderScopeExpression: scope.FromScopes([]string{"team-a"}, nil),
+		ProviderScopeKnown:      true,
+	}
+	manager.SetCredentials([]config.CredentialConfig{credential})
+
+	fresh := credential
+	fresh.ProviderScopeExpression = nil
+	fresh.ProviderScopeKnown = false
+	manager.SetCredentials([]config.CredentialConfig{fresh})
+
+	assert.True(t, manager.credentials[0].ProviderScopeKnown)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(manager.credentials[0].ProviderScopeExpression))
+	assert.False(t, scope.NewContext([]string{"team-b"}, nil).AllowsExpression(manager.credentials[0].ProviderScopeExpression))
+
+	fresh.BaseURL = "http://new-proxy.example"
+	manager.SetCredentials([]config.CredentialConfig{fresh})
+	assert.False(t, manager.credentials[0].ProviderScopeKnown)
+	assert.False(t, scope.AdminContext().AllowsExpression(manager.credentials[0].ProviderScopeExpression))
 }
 
 // TestGetRemoteModels_NonProxyCredential returns nil for non-proxy credentials

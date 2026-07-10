@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
@@ -116,6 +117,69 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	fallbackStats := status.Credentials["fallback_cred"]
 	assert.Equal(t, "http://fallback.com", fallbackStats.BaseURL)
 	assert.Equal(t, true, fallbackStats.IsFallback)
+}
+
+func TestHealthCheckScoped_FiltersCredentials(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithMasterKey("test-key").
+		WithCredentials(
+			config.CredentialConfig{Name: "shared", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://shared.com", RPM: 100},
+			config.CredentialConfig{Name: "team-a", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
+			config.CredentialConfig{Name: "team-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://team-b.example", RPM: 100, Scopes: []string{"team-b"}},
+		).
+		Build()
+
+	healthy, status := prx.HealthCheckScoped(scope.NewContext([]string{"team-a"}, nil))
+
+	assert.True(t, healthy)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Contains(t, status.Credentials, "shared")
+	assert.Contains(t, status.Credentials, "team-a")
+	assert.NotContains(t, status.Credentials, "team-b")
+}
+
+func TestHealthCheck_ReportsIndependentScopeExpression(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:           "chained",
+			Type:           config.ProviderTypeProxy,
+			APIKey:         "key",
+			BaseURL:        "http://router.example",
+			RPM:            100,
+			Scopes:         []string{"team-a"},
+			ProviderScopes: []string{"team-b"},
+		}).
+		Build()
+
+	_, status := prx.HealthCheck()
+	stats := status.Credentials["chained"]
+
+	assert.True(t, scope.NewContext([]string{"team-a", "team-b"}, nil).AllowsExpression(stats.ScopeExpression))
+	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(stats.ScopeExpression))
+	assert.NotEmpty(t, stats.Scopes)
+}
+
+func TestHealthCheckScoped_FiltersModelsByScopeExpression(t *testing.T) {
+	prx := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:    "chained",
+			Type:    config.ProviderTypeProxy,
+			APIKey:  "key",
+			BaseURL: "http://router.example",
+			RPM:     100,
+		}).
+		Build()
+	prx.modelManager.ReplaceModelsForCredential("chained", []string{"team-a-model", "team-b-model"})
+	prx.modelManager.ReplaceModelScopesForCredential("chained", map[string]models.ScopeMetadata{
+		"team-a-model": {ScopeExpression: scope.FromScopes([]string{"team-a"}, nil)},
+		"team-b-model": {ScopeExpression: scope.FromScopes([]string{"team-b"}, nil)},
+	})
+
+	_, status := prx.HealthCheckScoped(scope.NewContext([]string{"team-a"}, nil))
+
+	assert.Contains(t, status.Models, "chained:team-a-model")
+	assert.NotContains(t, status.Models, "chained:team-b-model")
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(status.Models["chained:team-a-model"].ScopeExpression))
 }
 
 func TestHealthCheck_CredentialRateLimit(t *testing.T) {

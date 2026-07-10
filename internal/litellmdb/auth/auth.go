@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
@@ -168,6 +169,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var expires *time.Time
 	var blocked *bool
 	var tokenModels []string
+	var tokenMetadata []byte
 
 	// ============ User fields ============
 	var userIDCheck, userAlias, userEmail *string
@@ -211,6 +213,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&expires,
 		&blocked,
 		&tokenModels,
+		&tokenMetadata,
 
 		// User
 		&userIDCheck,
@@ -283,6 +286,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		info.Blocked = *blocked
 	}
 	info.Models = tokenModels
+	info.Metadata = decodeMetadata(tokenMetadata)
 
 	info.MaxBudget = tokenMaxBudget
 	info.Expires = expires
@@ -335,6 +339,20 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	)
 
 	return &info, nil
+}
+
+func decodeMetadata(raw []byte) map[string]interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }
 
 // InvalidateToken removes a token from cache

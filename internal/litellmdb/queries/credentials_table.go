@@ -18,7 +18,10 @@ type CredentialLiteLLMParams struct {
 }
 
 type CredentialLiteLLMInfo struct {
-	CustomLLMProvider *string `json:"custom_llm_provider,omitempty"`
+	CustomLLMProvider  *string  `json:"custom_llm_provider,omitempty"`
+	AirScopes          []string `json:"air_scopes,omitempty"`
+	AirDeniedScopes    []string `json:"air_denied_scopes,omitempty"`
+	AirForbiddenScopes []string `json:"air_forbidden_scopes,omitempty"`
 }
 
 type CredentialTable struct {

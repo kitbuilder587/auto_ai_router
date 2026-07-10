@@ -13,11 +13,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -216,4 +221,127 @@ func TestWeightedChain_RootUsesDownstreamHealthWeights(t *testing.T) {
 	assert.Equal(t, int32(20*cycles), atomic.LoadInt32(&heavyCalls))
 	assert.Equal(t, int32(1*cycles), atomic.LoadInt32(&lightCalls))
 	assert.Equal(t, int32(1*cycles), atomic.LoadInt32(&routerBCalls))
+}
+
+func TestChainPolling_RootUsesDownstreamProviderScopes(t *testing.T) {
+	var teamACalls, teamBCalls int32
+	teamAProvider := terminalServer(t, &teamACalls)
+	defer teamAProvider.Close()
+	teamBProvider := terminalServer(t, &teamBCalls)
+	defer teamBProvider.Close()
+
+	router2 := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:    "team-a-provider",
+				Type:    config.ProviderTypeOpenAI,
+				BaseURL: teamAProvider.URL,
+				APIKey:  "key-a",
+				RPM:     -1,
+				TPM:     -1,
+				Scopes:  []string{"team-a"},
+			},
+			config.CredentialConfig{
+				Name:    "team-b-provider",
+				Type:    config.ProviderTypeOpenAI,
+				BaseURL: teamBProvider.URL,
+				APIKey:  "key-b",
+				RPM:     -1,
+				TPM:     -1,
+				Scopes:  []string{"team-b"},
+			},
+		).
+		WithRequestTimeout(5 * time.Second).
+		Build()
+	registerTestModel(router2, "team-a-provider", "gpt-4")
+	registerTestModel(router2, "team-b-provider", "claude-3")
+	router2Srv := serveProxyWithHealth(t, router2)
+	defer router2Srv.Close()
+
+	rootCred := proxyCred("router2", router2Srv.URL, 1)
+	root := NewTestProxyBuilder().
+		WithCredentials(rootCred).
+		WithRequestTimeout(5 * time.Second).
+		Build()
+	root.modelManager.SetCredentials([]config.CredentialConfig{rootCred})
+
+	var updateMutex sync.Mutex
+	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &updateMutex)
+
+	teamAModels := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil)))
+	assert.True(t, teamAModels["gpt-4"])
+	assert.False(t, teamAModels["claude-3"])
+
+	teamBModels := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"team-b"}, nil)))
+	assert.False(t, teamBModels["gpt-4"])
+	assert.True(t, teamBModels["claude-3"])
+
+	cred, err := root.balancer.NextForModelScoped("gpt-4", scope.NewContext([]string{"team-a"}, nil))
+	require.NoError(t, err)
+	assert.Equal(t, "router2", cred.Name)
+
+	_, err = root.balancer.NextForModelScoped("gpt-4", scope.NewContext([]string{"team-b"}, nil))
+	assert.ErrorIs(t, err, balancer.ErrNoCredentialsAvailable)
+
+	_, err = root.balancer.NextForModelScoped("gpt-4", scope.PublicContext())
+	assert.ErrorIs(t, err, balancer.ErrNoCredentialsAvailable)
+}
+
+func TestThreeHopChain_PreservesCredentialAndModelScopeExpressions(t *testing.T) {
+	var teamACalls, teamBCalls int32
+	teamAProvider := terminalServer(t, &teamACalls)
+	defer teamAProvider.Close()
+	teamBProvider := terminalServer(t, &teamBCalls)
+	defer teamBProvider.Close()
+
+	leaf := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name: "team-a-provider", Type: config.ProviderTypeOpenAI, BaseURL: teamAProvider.URL,
+				APIKey: "key-a", RPM: -1, TPM: -1, Scopes: []string{"team-a"},
+			},
+			config.CredentialConfig{
+				Name: "team-b-provider", Type: config.ProviderTypeOpenAI, BaseURL: teamBProvider.URL,
+				APIKey: "key-b", RPM: -1, TPM: -1, Scopes: []string{"team-b"},
+			},
+		).
+		Build()
+	registerTestModel(leaf, "team-a-provider", "gpt-4")
+	registerTestModel(leaf, "team-b-provider", "claude-3")
+	leafServer := serveProxyWithHealth(t, leaf)
+	defer leafServer.Close()
+
+	middleCredential := proxyCred("leaf", leafServer.URL, 1)
+	middleCredential.Scopes = []string{"gateway"}
+	middle := NewTestProxyBuilder().WithCredentials(middleCredential).Build()
+	middle.modelManager.SetCredentials([]config.CredentialConfig{middleCredential})
+	var middleUpdateMutex sync.Mutex
+	modelupdate.UpdateAllProxyCredentials(context.Background(), middle.balancer, middle.rateLimiter, middle.logger, middle.modelManager, &middleUpdateMutex)
+	middleServer := serveProxyWithHealth(t, middle)
+	defer middleServer.Close()
+
+	rootCredential := proxyCred("middle", middleServer.URL, 1)
+	root := NewTestProxyBuilder().WithCredentials(rootCredential).Build()
+	root.modelManager.SetCredentials([]config.CredentialConfig{rootCredential})
+	var rootUpdateMutex sync.Mutex
+	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &rootUpdateMutex)
+
+	teamA := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"gateway", "team-a"}, nil)))
+	assert.True(t, teamA["gpt-4"])
+	assert.False(t, teamA["claude-3"])
+
+	teamB := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"gateway", "team-b"}, nil)))
+	assert.False(t, teamB["gpt-4"])
+	assert.True(t, teamB["claude-3"])
+
+	missingGateway := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil)))
+	assert.Empty(t, missingGateway)
+}
+
+func modelIDSet(response models.ModelsResponse) map[string]bool {
+	result := make(map[string]bool, len(response.Data))
+	for _, model := range response.Data {
+		result[model.ID] = true
+	}
+	return result
 }

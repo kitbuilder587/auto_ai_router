@@ -235,7 +235,7 @@ func TestWeighted_ExcludingDoesNotPrunePrimaryCycle(t *testing.T) {
 	_, err := bal.NextForModel("")
 	require.NoError(t, err)
 
-	primary := bal.swrr[schedKey{}]
+	primary := bal.swrr[schedKey{scopeKey: "cred1\x00cred2\x00cred3"}]
 	require.NotNil(t, primary)
 	require.Contains(t, primary.nodes, "cred2")
 

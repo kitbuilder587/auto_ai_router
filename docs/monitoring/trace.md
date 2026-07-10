@@ -8,6 +8,13 @@ Returns a recursive snapshot of the full router chain in JSON format:
 curl http://localhost:8080/trace
 ```
 
+When credential scopes are configured, pass an API key to see the route graph visible
+to that key:
+
+```bash
+curl -H "Authorization: Bearer sk-your-key" http://localhost:8080/trace
+```
+
 Each node in the response contains:
 
 - `router_id` — identifier of the router (hostname by default)
@@ -83,7 +90,7 @@ Features:
 
 ## Notes
 
-- Trace endpoints do not require authentication
+- Trace endpoints do not require authentication. Missing, invalid, or temporarily unverifiable API keys use the public view, which only includes credentials without `scopes`
 - The depth parameter is capped at 10 to prevent runaway recursion
 - A 15-second request timeout is applied to the full chain traversal
 - Upstream fetches are rate-limited to one request per 100 ms per credential

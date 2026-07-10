@@ -7,6 +7,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -262,6 +263,17 @@ func TestGetAvailableCount(t *testing.T) {
 
 	// Should have 2 available
 	assert.Equal(t, 2, bal.GetAvailableCount())
+}
+
+func TestGetAvailableCount_ExcludesCredentialsWithoutProviderRoute(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	bal := New([]config.CredentialConfig{
+		{Name: "available", RPM: 100},
+		{Name: "no-route", RPM: 100, ProviderScopeExpression: scope.FalseExpression()},
+	}, f2b, rl)
+
+	assert.Equal(t, 1, bal.GetAvailableCount())
 }
 
 func TestGetBannedCount(t *testing.T) {
@@ -999,6 +1011,53 @@ func TestNextRetryForModelExcluding_FallbackPriorityOrder(t *testing.T) {
 	assert.Equal(t, "grant", cred.Name)
 }
 
+func TestNextRetryForModelExcluding_FallbackPriorityFallsBackToUnprioritized(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
+		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
+		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	tried := map[string]bool{"cheapgpt": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cometapi", cred.Name)
+
+	tried["cometapi"] = true
+	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cloudru", cred.Name)
+}
+
+func TestNextRetryForModelExcluding_UnprioritizedTailContinuesAcrossTypes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
+		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
+		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100},
+		{Name: "yandex", Type: config.ProviderTypeAnthropic, APIKey: "key4", BaseURL: "http://yandex.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	tried := map[string]bool{"cheapgpt": true, "cometapi": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[1], tried)
+	require.NoError(t, err)
+	assert.Equal(t, "cloudru", cred.Name)
+
+	tried["cloudru"] = true
+	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	require.NoError(t, err)
+	assert.Equal(t, "yandex", cred.Name)
+}
+
 func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -1282,6 +1341,48 @@ func TestNextSpecific_RespectsModelCheckerBanAndRateLimit(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
 
+func TestNextForModelScoped_FiltersCredentialScopes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "shared", APIKey: "key1", BaseURL: "http://shared.com", RPM: -1},
+		{Name: "team-a", APIKey: "key2", BaseURL: "http://team-a.example", RPM: -1, Scopes: []string{"team-a"}},
+		{Name: "team-b", APIKey: "key3", BaseURL: "http://team-b.example", RPM: -1, Scopes: []string{"team-b"}},
+		{Name: "blocked", APIKey: "key4", BaseURL: "http://blocked.com", RPM: -1, Scopes: []string{"team-a"}, DeniedScopes: []string{"team-a"}},
+	}
+	bal := New(credentials, f2b, rl)
+	teamAScope := scope.NewContext([]string{"team-a"}, nil)
+
+	for i := 0; i < 8; i++ {
+		cred, err := bal.NextForModelScoped("", teamAScope)
+		require.NoError(t, err)
+		assert.Contains(t, []string{"shared", "team-a"}, cred.Name)
+	}
+
+	_, err := bal.NextSpecificScoped("team-b", "", teamAScope)
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+	_, err = bal.NextSpecificScoped("blocked", "", teamAScope)
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+}
+
+func TestNextForModelScoped_SharesCycleForSameVisiblePool(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "shared-a", APIKey: "key1", BaseURL: "http://a.com", RPM: -1},
+		{Name: "shared-b", APIKey: "key2", BaseURL: "http://b.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	first, err := bal.NextForModelScoped("", scope.NewContext([]string{"team-a"}, nil))
+	require.NoError(t, err)
+	second, err := bal.NextForModelScoped("", scope.NewContext([]string{"team-b"}, nil))
+	require.NoError(t, err)
+
+	assert.Equal(t, "shared-a", first.Name)
+	assert.Equal(t, "shared-b", second.Name)
+}
+
 func TestSetLogger(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{500})
 	rl := ratelimit.New()
@@ -1448,6 +1549,41 @@ func TestUpdateDBCredentials(t *testing.T) {
 	assert.True(t, bal.rateLimiter.AllowTokens("db-2"))
 }
 
+func TestUpdateDBCredentials_PreservesProviderScopeMetadata(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	staticProxy := config.CredentialConfig{
+		Name: "yaml-proxy", Type: config.ProviderTypeProxy, BaseURL: "http://yaml.example", APIKey: "key", RPM: -1,
+	}
+	bal := New([]config.CredentialConfig{staticProxy}, f2b, rl)
+	teamA := scope.FromScopes([]string{"team-a"}, nil)
+	require.True(t, bal.UpdateProviderScopes(staticProxy, []string{"team-a"}, nil, teamA, true))
+
+	bal.UpdateDBCredentials(nil)
+
+	staticSnapshot := bal.GetCredentialsSnapshot()[0]
+	assert.True(t, staticSnapshot.ProviderScopeKnown)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(staticSnapshot.ProviderScopeExpression))
+	assert.False(t, scope.NewContext([]string{"team-b"}, nil).AllowsExpression(staticSnapshot.ProviderScopeExpression))
+
+	dbProxy := config.CredentialConfig{
+		Name: "db-proxy", Type: config.ProviderTypeProxy, BaseURL: "http://db.example", APIKey: "key", RPM: -1,
+	}
+	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
+	require.True(t, bal.UpdateProviderScopes(dbProxy, []string{"team-a"}, nil, teamA, true))
+	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
+
+	dbSnapshot := bal.GetCredentialsSnapshot()[1]
+	assert.True(t, dbSnapshot.ProviderScopeKnown)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(dbSnapshot.ProviderScopeExpression))
+
+	dbProxy.IsFallback = true
+	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
+	dbSnapshot = bal.GetCredentialsSnapshot()[1]
+	assert.False(t, dbSnapshot.ProviderScopeKnown)
+	assert.False(t, scope.AdminContext().AllowsExpression(dbSnapshot.ProviderScopeExpression))
+}
+
 func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -1461,7 +1597,8 @@ func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 	_, err := bal.NextForModel("")
 	require.NoError(t, err)
 
-	state := bal.swrr[schedKey{}]
+	key := schedKey{scopeKey: "yaml-1\x00yaml-2"}
+	state := bal.swrr[key]
 	require.NotNil(t, state)
 	beforeYAML1 := state.currentOf("yaml-1")
 	beforeYAML2 := state.currentOf("yaml-2")
@@ -1470,7 +1607,7 @@ func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 		{Name: "db-1", APIKey: "dbkey1", BaseURL: "http://db1.com", RPM: -1},
 	})
 
-	assert.Same(t, state, bal.swrr[schedKey{}], "DB sync should not reset existing SWRR cycles")
+	assert.Same(t, state, bal.swrr[key], "DB sync should not reset existing SWRR cycles")
 	assert.Equal(t, beforeYAML1, state.currentOf("yaml-1"))
 	assert.Equal(t, beforeYAML2, state.currentOf("yaml-2"))
 }

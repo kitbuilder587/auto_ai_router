@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
 const defaultTraceDepth = 25
@@ -19,7 +20,11 @@ const defaultTraceDepth = 25
 // TraceCheck builds a recursive trace of this router and all reachable downstream proxy routers.
 // depth controls how many hops to follow (0 = local only).
 func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceResponse {
-	_, health := p.HealthCheck()
+	return p.TraceCheckScoped(ctx, depth, scope.AdminContext())
+}
+
+func (p *Proxy) TraceCheckScoped(ctx context.Context, depth int, visibility scope.Context) *httputil.ProxyTraceResponse {
+	_, health := p.HealthCheckScoped(visibility)
 
 	status := "healthy"
 	if health.CredentialsAvailable == 0 {
@@ -40,7 +45,7 @@ func (p *Proxy) TraceCheck(ctx context.Context, depth int) *httputil.ProxyTraceR
 	}
 
 	var proxyCreds []config.CredentialConfig
-	for _, cred := range p.balancer.GetCredentialsSnapshot() {
+	for _, cred := range visibleCredentials(p.balancer.GetCredentialsSnapshot(), visibility) {
 		if cred.Type == config.ProviderTypeProxy {
 			proxyCreds = append(proxyCreds, cred)
 		}
@@ -105,6 +110,10 @@ func (p *Proxy) fetchUpstreamHealth(ctx context.Context, cred *config.Credential
 
 // HandleTrace returns the full trace tree as JSON.
 func (p *Proxy) HandleTrace(w http.ResponseWriter, r *http.Request) {
+	p.HandleTraceScoped(w, r, scope.AdminContext())
+}
+
+func (p *Proxy) HandleTraceScoped(w http.ResponseWriter, r *http.Request, visibility scope.Context) {
 	depth := defaultTraceDepth
 	if d := r.URL.Query().Get("depth"); d != "" {
 		if n, err := strconv.Atoi(d); err == nil && n >= 0 && n <= 10 {
@@ -115,7 +124,7 @@ func (p *Proxy) HandleTrace(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	trace := p.TraceCheck(ctx, depth)
+	trace := p.TraceCheckScoped(ctx, depth, visibility)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(trace); err != nil {

@@ -24,6 +24,15 @@ const (
 	defaultIdleConnTimeout     = 90 * time.Second
 )
 
+// ProxyStatusError reports a non-success response from a proxied endpoint.
+type ProxyStatusError struct {
+	StatusCode int
+}
+
+func (e *ProxyStatusError) Error() string {
+	return fmt.Sprintf("proxy returned status %d", e.StatusCode)
+}
+
 // HTTPClientConfig holds configuration for HTTP client creation
 type HTTPClientConfig struct {
 	Timeout             time.Duration
@@ -197,7 +206,7 @@ func FetchFromProxy(
 			"status", resp.StatusCode,
 			"response_preview", preview,
 		)
-		return nil, fmt.Errorf("proxy returned status %d", resp.StatusCode)
+		return nil, &ProxyStatusError{StatusCode: resp.StatusCode}
 	}
 
 	// Read body with size limit
