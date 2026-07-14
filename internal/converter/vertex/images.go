@@ -293,6 +293,13 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 			"generation_config": genConfig,
 		},
 	}
+	if rawSeed := strings.TrimSpace(fields["seed"]); rawSeed != "" {
+		seed, err := strconv.ParseInt(rawSeed, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid image edit seed %q", rawSeed)
+		}
+		chatReq.Seed = &seed
+	}
 	if n := parsePositiveInt(fields["n"]); n > 0 {
 		n = clampImageCount(n)
 		chatReq.N = &n

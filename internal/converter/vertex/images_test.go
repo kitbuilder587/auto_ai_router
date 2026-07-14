@@ -133,7 +133,7 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 }
 
 func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
-	buildMultipart := func(t *testing.T, model, size string) ([]byte, string) {
+	buildMultipart := func(t *testing.T, model, size, seed string) ([]byte, string) {
 		t.Helper()
 
 		var buf bytes.Buffer
@@ -142,6 +142,9 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		require.NoError(t, writer.WriteField("prompt", "Make the object blue"))
 		require.NoError(t, writer.WriteField("n", "2"))
 		require.NoError(t, writer.WriteField("size", size))
+		if seed != "" {
+			require.NoError(t, writer.WriteField("seed", seed))
+		}
 
 		part, err := writer.CreatePart(textproto.MIMEHeader{
 			"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
@@ -156,7 +159,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 	}
 
 	t.Run("multipart edit request converts to multimodal chat request", func(t *testing.T) {
-		body, contentType := buildMultipart(t, "gemini-2.5-flash-image-preview", "1792x1024")
+		body, contentType := buildMultipart(t, "gemini-2.5-flash-image-preview", "1792x1024", "0")
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.NoError(t, err)
 
@@ -165,6 +168,8 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		assert.Equal(t, "gemini-2.5-flash-image-preview", chatReq.Model)
 		require.NotNil(t, chatReq.N)
 		assert.Equal(t, 2, *chatReq.N)
+		require.NotNil(t, chatReq.Seed)
+		assert.Equal(t, int64(0), *chatReq.Seed)
 		require.Len(t, chatReq.Messages, 1)
 
 		blocks, ok := chatReq.Messages[0].Content.([]interface{})
@@ -189,7 +194,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 	})
 
 	t.Run("multipart edit uses model size profile", func(t *testing.T) {
-		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1792x2400")
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1792x2400", "42")
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.NoError(t, err)
 
@@ -199,6 +204,16 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		imageConfig := genConfig["image_config"].(map[string]interface{})
 		assert.Equal(t, "3:4", imageConfig["aspectRatio"])
 		assert.Equal(t, "2K", imageConfig["imageSize"])
+		require.NotNil(t, chatReq.Seed)
+		assert.Equal(t, int64(42), *chatReq.Seed)
+	})
+
+	t.Run("invalid seed returns error", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", "invalid")
+		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "invalid image edit seed")
 	})
 
 	t.Run("missing model returns error", func(t *testing.T) {

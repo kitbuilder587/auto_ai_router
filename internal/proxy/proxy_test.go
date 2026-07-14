@@ -671,7 +671,9 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 		err := json.NewDecoder(r.Body).Decode(&bodyMap)
 		assert.NoError(t, err)
 		assert.NotNil(t, bodyMap["contents"])
-		assert.NotNil(t, bodyMap["generationConfig"])
+		generationConfig, ok := bodyMap["generationConfig"].(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, float64(42), generationConfig["seed"])
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aW1n","mimeType":"image/png"}}],"role":"model"}}]}`))
@@ -686,6 +688,7 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 	writer := multipart.NewWriter(&buf)
 	assert.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
 	assert.NoError(t, writer.WriteField("prompt", "Edit this image"))
+	assert.NoError(t, writer.WriteField("seed", "42"))
 	part, err := writer.CreatePart(textproto.MIMEHeader{
 		"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
 		"Content-Type":        []string{"image/png"},
