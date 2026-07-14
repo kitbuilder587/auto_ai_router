@@ -150,11 +150,12 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 
 		// /v1/images/edits uses multipart/form-data.  Rewrite the multipart to:
-		//   1. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
-		//   2. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
+		//   1. Replace model aliases with the provider-facing model name.
+		//   2. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
+		//   3. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
 		if c.mode.IsImageEdit && strings.Contains(strings.ToLower(c.mode.ContentType), "multipart/form-data") {
 			stripRF := openaiconv.IsGptImage1Model(c.mode.ModelID)
-			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, stripRF)
+			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, c.mode.ModelID, stripRF)
 			// Only replace when something actually changed (boundary or content differs).
 			if newCT != c.mode.ContentType {
 				c.rewrittenContentType = newCT
