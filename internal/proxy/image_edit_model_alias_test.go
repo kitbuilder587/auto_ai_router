@@ -26,9 +26,9 @@ func TestProxyRequest_ImageEditReplacesModelAlias(t *testing.T) {
 		receivedModel = r.FormValue("model")
 		file, _, err := r.FormFile("image")
 		require.NoError(t, err)
-		defer file.Close()
 		receivedImage, err = io.ReadAll(file)
 		require.NoError(t, err)
+		require.NoError(t, file.Close())
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"created":1,"data":[{"b64_json":"aW1hZ2U="}]}`)
