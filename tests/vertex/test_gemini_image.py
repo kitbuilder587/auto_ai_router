@@ -122,16 +122,29 @@ class TestGeminiImageGeneration:
         assert len(resp.data) >= 1
         _assert_image_item(resp.data[0])
 
-    def test_generation_respects_square_size(self, openai_client):
-        """1024x1024 is forwarded to Gemini as a 1:1 1K image config."""
-        model = "gemini-3.1-flash-image-preview"
+    @pytest.mark.parametrize(
+        ("model", "size", "expected_dimensions"),
+        [
+            ("gemini-2.5-flash-image", "896x1152", (896, 1152)),
+            ("gemini-3-pro-image-preview", "1792x2400", (1792, 2400)),
+            ("gemini-3.1-flash-image-preview", "1024x1024", (1024, 1024)),
+            ("gemini-3.1-flash-image-preview", "3:4", (896, 1200)),
+            ("gemini-3.1-flash-image-preview", "1792x2400", (1792, 2400)),
+            ("gemini-3.1-flash-image-preview", "896x1152", (928, 1152)),
+            ("gemini-3.1-flash-image-preview", "640x1024", (848, 1264)),
+        ],
+    )
+    def test_generation_respects_size_profile(
+        self, openai_client, model, size, expected_dimensions
+    ):
+        """Size is mapped through the selected Gemini model's output grid."""
         try:
             resp = openai_client.images.generate(
                 model=model,
                 prompt="A mountain landscape at sunset",
                 response_format="b64_json",
                 n=1,
-                size="1024x1024",
+                size=size,
             )
         except Exception as e:
             _skip_on_error(e, model)
@@ -139,7 +152,7 @@ class TestGeminiImageGeneration:
         assert resp.data, "Response data is empty"
         b64 = resp.data[0].b64_json
         assert b64, "Model did not return b64_json"
-        assert _image_dimensions(b64) == (1024, 1024)
+        assert _image_dimensions(b64) == expected_dimensions
 
     @pytest.mark.parametrize("model", TestModels.GEMINI_IMAGE_MODELS)
     def test_generation_count(self, openai_client, model):
