@@ -74,7 +74,9 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 	}
 
 	// Generation config.
-	vr.GenerationConfig = buildGenConfig(req, model)
+	if generationConfig := buildGenConfig(req, model); generationConfig != nil {
+		vr.GenerationConfig = &vertex.VertexGenerationConfig{GenerationConfig: generationConfig}
+	}
 
 	return vr, nil
 }

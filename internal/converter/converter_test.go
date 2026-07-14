@@ -125,6 +125,48 @@ func TestProviderConverter_RequestFrom_VertexImageGeneration_Imagen(t *testing.T
 	}
 }
 
+func TestProviderConverter_RequestFrom_GeminiImageGeneration_Size(t *testing.T) {
+	tests := []struct {
+		size        string
+		aspectRatio string
+		imageSize   string
+	}{
+		{size: "1024x1024", aspectRatio: "1:1", imageSize: "1K"},
+		{size: "1x1", aspectRatio: "1:1", imageSize: "1K"},
+		{size: "1792x1024", aspectRatio: "16:9", imageSize: "1K"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.size, func(t *testing.T) {
+			body := mustJSON(t, openai.OpenAIImageRequest{
+				Model:  "gemini-3.1-flash-image-preview",
+				Prompt: "make image",
+				Size:   tt.size,
+			})
+			c := New(config.ProviderTypeGemini, RequestMode{
+				IsImageGeneration: true,
+				ModelID:           "gemini-3.1-flash-image-preview",
+			})
+
+			got, err := c.RequestFrom(body)
+			if err != nil {
+				t.Fatalf("RequestFrom error: %v", err)
+			}
+
+			req := mustUnmarshal[vertex.VertexRequest](t, got)
+			if req.GenerationConfig == nil || req.GenerationConfig.ImageConfig == nil {
+				t.Fatalf("missing generationConfig.imageConfig in %s", got)
+			}
+			if req.GenerationConfig.ImageConfig.AspectRatio != tt.aspectRatio {
+				t.Fatalf("expected aspectRatio %q, got %q", tt.aspectRatio, req.GenerationConfig.ImageConfig.AspectRatio)
+			}
+			if req.GenerationConfig.ImageConfig.ImageSize != tt.imageSize {
+				t.Fatalf("expected imageSize %q, got %q", tt.imageSize, req.GenerationConfig.ImageConfig.ImageSize)
+			}
+		})
+	}
+}
+
 func TestProviderConverter_RequestFrom_VertexChat(t *testing.T) {
 	body := mustJSON(t, minimalOpenAIChatRequest())
 	c := New(config.ProviderTypeVertexAI, RequestMode{ModelID: "gemini-1.5-flash"})
