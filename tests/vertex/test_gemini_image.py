@@ -63,6 +63,41 @@ def _assert_b64_valid(b64: str) -> None:
     )
 
 
+def _image_dimensions(b64: str) -> tuple[int, int]:
+    raw = base64.b64decode(b64)
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return struct.unpack(">II", raw[16:24])
+
+    if raw.startswith(b"\xff\xd8"):
+        offset = 2
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        while offset + 4 <= len(raw):
+            if raw[offset] != 0xFF:
+                offset += 1
+                continue
+            while offset < len(raw) and raw[offset] == 0xFF:
+                offset += 1
+            if offset >= len(raw):
+                break
+            marker = raw[offset]
+            offset += 1
+            if marker in sof_markers:
+                height = int.from_bytes(raw[offset + 3:offset + 5], "big")
+                width = int.from_bytes(raw[offset + 5:offset + 7], "big")
+                return width, height
+            if marker == 0xD9 or marker == 0xDA:
+                break
+            segment_length = int.from_bytes(raw[offset:offset + 2], "big")
+            if segment_length < 2:
+                break
+            offset += segment_length
+
+    raise AssertionError("Unable to determine generated image dimensions")
+
+
 # ---------------------------------------------------------------------------
 # Text-to-Image Generation
 # ---------------------------------------------------------------------------
@@ -86,6 +121,25 @@ class TestGeminiImageGeneration:
         assert resp is not None
         assert len(resp.data) >= 1
         _assert_image_item(resp.data[0])
+
+    def test_generation_respects_square_size(self, openai_client):
+        """1024x1024 is forwarded to Gemini as a 1:1 1K image config."""
+        model = "gemini-3.1-flash-image-preview"
+        try:
+            resp = openai_client.images.generate(
+                model=model,
+                prompt="A mountain landscape at sunset",
+                response_format="b64_json",
+                n=1,
+                size="1024x1024",
+            )
+        except Exception as e:
+            _skip_on_error(e, model)
+
+        assert resp.data, "Response data is empty"
+        b64 = resp.data[0].b64_json
+        assert b64, "Model did not return b64_json"
+        assert _image_dimensions(b64) == (1024, 1024)
 
     @pytest.mark.parametrize("model", TestModels.GEMINI_IMAGE_MODELS)
     def test_generation_count(self, openai_client, model):
