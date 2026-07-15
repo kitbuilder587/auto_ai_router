@@ -20,6 +20,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -128,6 +129,7 @@ func main() {
 	}
 
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
+	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 
 	// ==================== Initialize Balancer & Model Manager (YAML-only) ====================
 	// IMPORTANT: Do NOT modify cfg.Credentials or cfg.Models here.
@@ -212,6 +214,7 @@ func main() {
 		Version:                    Version,
 		Commit:                     Commit,
 		LiteLLMDB:                  litellmDBManager,
+		KafkaLog:                   kafkaLogManager,
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
 		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
@@ -234,6 +237,9 @@ func main() {
 
 	startMetricsUpdater(cfg, log, bgCtx, bal, rateLimiter, metrics, &wg, &updateMutex)
 	startProxyStatsUpdater(log, bgCtx, bal, rateLimiter, modelManager, &wg, &updateMutex)
+	if kafkaLogManager.IsEnabled() {
+		startKafkaMetricsUpdater(cfg, log, bgCtx, kafkaLogManager, metrics, &wg)
+	}
 
 	if respStore != nil {
 		startResponseStoreCleanup(log, bgCtx, respStore, &wg)
@@ -369,6 +375,16 @@ func main() {
 		defer dbShutdownCancel()
 		if err := litellmDBManager.Shutdown(dbShutdownCtx); err != nil {
 			log.Error("LiteLLM DB shutdown error", "error", err)
+		}
+	}
+
+	// Shutdown Kafka spend-log publisher
+	if kafkaLogManager.IsEnabled() {
+		log.Info("Shutting down Kafka spend-log publisher...")
+		kafkaShutdownCtx, kafkaShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer kafkaShutdownCancel()
+		if err := kafkaLogManager.Shutdown(kafkaShutdownCtx); err != nil {
+			log.Error("Kafka spend-log publisher shutdown error", "error", err)
 		}
 	}
 
@@ -691,17 +707,18 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 	log.Info("Initializing LiteLLM DB integration...", "is_required", cfg.LiteLLMDB.IsRequired)
 
 	litellmCfg := &litellmdb.Config{
-		DatabaseURL:         cfg.LiteLLMDB.DatabaseURL,
-		MaxConns:            int32(cfg.LiteLLMDB.MaxConns),
-		MinConns:            int32(cfg.LiteLLMDB.MinConns),
-		HealthCheckInterval: cfg.LiteLLMDB.HealthCheckInterval,
-		ConnectTimeout:      cfg.LiteLLMDB.ConnectTimeout,
-		AuthCacheTTL:        cfg.LiteLLMDB.AuthCacheTTL,
-		AuthCacheSize:       cfg.LiteLLMDB.AuthCacheSize,
-		LogQueueSize:        cfg.LiteLLMDB.LogQueueSize,
-		LogBatchSize:        cfg.LiteLLMDB.LogBatchSize,
-		LogFlushInterval:    cfg.LiteLLMDB.LogFlushInterval,
-		Logger:              log,
+		DatabaseURL:           cfg.LiteLLMDB.DatabaseURL,
+		MaxConns:              int32(cfg.LiteLLMDB.MaxConns),
+		MinConns:              int32(cfg.LiteLLMDB.MinConns),
+		HealthCheckInterval:   cfg.LiteLLMDB.HealthCheckInterval,
+		ConnectTimeout:        cfg.LiteLLMDB.ConnectTimeout,
+		AuthCacheTTL:          cfg.LiteLLMDB.AuthCacheTTL,
+		AuthCacheSize:         cfg.LiteLLMDB.AuthCacheSize,
+		LogQueueSize:          cfg.LiteLLMDB.LogQueueSize,
+		LogBatchSize:          cfg.LiteLLMDB.LogBatchSize,
+		LogFlushInterval:      cfg.LiteLLMDB.LogFlushInterval,
+		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
+		Logger:                log,
 	}
 
 	manager, err := litellmdb.New(litellmCfg)
@@ -722,6 +739,62 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		return litellmdb.NewNoopManager()
 	}
 	log.Info("LiteLLM DB integration initialized successfully")
+	return manager
+}
+
+// initializeKafkaLog sets up the Kafka spend-log publisher (internal/kafkalog),
+// an independent analytics write-path alongside (not instead of) LiteLLM
+// Postgres. There is no "is_required" flag here: broker unavailability never
+// blocks startup or request processing on its own — it only keeps
+// kafkalog.Manager.IsHealthy() false until connectivity is established (see
+// auto_ai_router_kafka_spend_log_tz.md section 6). The one exception is
+// Kafka-only mode (litellm_db.disable_spend_logs_write=true): there, Kafka is
+// the *only* spend-log write-path, so degrading to NoopManager would silently
+// drop every spend event with no write-path left at all — that case is fatal.
+func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager litellmdb.Manager) kafkalog.Manager {
+	if !cfg.Kafka.Enabled {
+		log.Info("Kafka spend-log publishing disabled - using NoopManager")
+		return kafkalog.NewNoopManager()
+	}
+
+	log.Info("Initializing Kafka spend-log publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.Topic)
+
+	kafkaCfg := &kafkalog.Config{
+		Brokers:          cfg.Kafka.Brokers,
+		Topic:            cfg.Kafka.Topic,
+		ClientID:         cfg.Kafka.ClientID,
+		LogQueueSize:     cfg.Kafka.LogQueueSize,
+		LogBatchSize:     cfg.Kafka.LogBatchSize,
+		LogFlushInterval: cfg.Kafka.LogFlushInterval,
+		TLSEnabled:       cfg.Kafka.TLSEnabled,
+		SASLMechanism:    cfg.Kafka.SASLMechanism,
+		SASLUsername:     cfg.Kafka.SASLUsername,
+		SASLPassword:     cfg.Kafka.SASLPassword,
+		Logger:           log,
+		// Flags a batch's underlying LiteLLM_SpendLogs rows for later re-send
+		// when the batch is dropped from the in-memory DLQ after a sustained
+		// Kafka outage (see kafkalog.Config.FallbackNotifier doc comment).
+		FallbackNotifier: litellmDBManager.MarkSpendLogKafkaFallback,
+	}
+
+	manager, err := kafkalog.New(kafkaCfg)
+	if err != nil {
+		if cfg.LiteLLMDB.DisableSpendLogsWrite {
+			log.Error("CRITICAL: Failed to initialize Kafka spend-log publisher in Kafka-only mode",
+				"error", err,
+				"reason", "litellm_db.disable_spend_logs_write=true leaves Kafka as the only spend-log write-path",
+				"action", "Fix Kafka connectivity/credentials or re-enable litellm_db spend log writes",
+			)
+			os.Exit(1)
+		}
+
+		log.Warn("Failed to initialize Kafka spend-log publisher, degrading to NoopManager",
+			"error", err,
+			"impact", "Spend events will not be published to Kafka/ClickHouse; Postgres logging is unaffected",
+		)
+		return kafkalog.NewNoopManager()
+	}
+	log.Info("Kafka spend-log publisher initialized successfully")
 	return manager
 }
 
@@ -820,6 +893,42 @@ func startMetricsUpdater(
 	}()
 
 	log.Info("Metrics updater started (updates every 10 seconds)")
+}
+
+// startKafkaMetricsUpdater periodically publishes internal/kafkalog producer
+// statistics (queue/DLQ counters, broker health) as Prometheus metrics.
+// Without this, kafkalog.Manager.Stats()/IsHealthy() are only reachable from
+// tests — this is what makes them observable in production.
+func startKafkaMetricsUpdater(
+	cfg *config.Config,
+	log *slog.Logger,
+	bgCtx context.Context,
+	kafkaLogManager kafkalog.Manager,
+	metrics *monitoring.Metrics,
+	wg *sync.WaitGroup,
+) {
+	if !cfg.MetricsCollectionEnabled() {
+		return
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				stats := kafkaLogManager.Stats()
+				metrics.UpdateKafkaSpendLoggerStats(stats.Queued, stats.Produced, stats.Dropped, stats.Errors, stats.DLQSize, stats.Healthy)
+			}
+		}
+	}()
+
+	log.Info("Kafka spend logger metrics updater started (updates every 10 seconds)")
 }
 
 func updateMetrics(

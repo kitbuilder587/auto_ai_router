@@ -22,6 +22,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -74,6 +75,7 @@ func (logCtx *RequestLogContext) Context() context.Context {
 type RequestLogContext struct {
 	RequestID            string                   // Request ID (UUID)
 	StartTime            time.Time                // Request start time
+	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request
 	Token                string                   // Auth token (raw, will be hashed)
 	ModelID              string                   // Model alias name (what client requested)
@@ -120,6 +122,7 @@ type Config struct {
 	Version                    string
 	Commit                     string
 	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
+	KafkaLog                   kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
 	MaxProviderRetries         int                        // Max same-type credential retries (default: 2)
@@ -146,6 +149,7 @@ type Proxy struct {
 	routerID             string                     // Identifier for this router used in /trace responses
 	modelManager         *models.Manager            // Model manager for getting configured models
 	LiteLLMDB            litellmdb.Manager          // LiteLLM database integration
+	kafkaLog             kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	healthChecker        HealthChecker              // Cached DB health status (optional)
 	priceRegistry        *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries   int                        // Max same-type credential retries on provider errors
@@ -208,6 +212,7 @@ func New(cfg *Config) *Proxy {
 		tokenManager:         cfg.TokenManager,
 		modelManager:         cfg.ModelManager,
 		LiteLLMDB:            cfg.LiteLLMDB,
+		kafkaLog:             cfg.KafkaLog,
 		healthChecker:        cfg.HealthChecker,
 		priceRegistry:        cfg.PriceRegistry,
 		maxProviderRetries:   cfg.MaxProviderRetries,
@@ -696,7 +701,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					tokenizerModelID = modelID
 				}
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
-				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, modelID, tokenizerModelID)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, modelID, tokenizerModelID, logCtx)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
