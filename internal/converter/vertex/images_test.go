@@ -154,6 +154,9 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 		require.Len(t, chatReq.Messages, 1)
 		assert.Equal(t, "user", chatReq.Messages[0].Role)
 		assert.Equal(t, "A cat sitting on a mat", chatReq.Messages[0].Content)
+		assert.Nil(t, chatReq.Seed)
+		assert.Nil(t, chatReq.Temperature)
+		assert.Nil(t, chatReq.TopP)
 
 		// Check extra_body has generation_config with IMAGE modality
 		require.NotNil(t, chatReq.ExtraBody)
@@ -163,6 +166,46 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 		require.True(t, ok)
 		assert.Contains(t, modalities, "IMAGE")
 	})
+
+	t.Run("request forwards sampling parameters", func(t *testing.T) {
+		input := `{"model":"gemini-3.1-flash-image-preview","prompt":"A landscape","seed":42,"temperature":0.7,"top_p":0.9}`
+		result, err := ImageRequestToOpenAIChatRequest([]byte(input))
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		require.NotNil(t, chatReq.Seed)
+		assert.Equal(t, int64(42), *chatReq.Seed)
+		require.NotNil(t, chatReq.Temperature)
+		assert.Equal(t, 0.7, *chatReq.Temperature)
+		require.NotNil(t, chatReq.TopP)
+		assert.Equal(t, 0.9, *chatReq.TopP)
+	})
+
+	t.Run("zero sampling parameters remain set", func(t *testing.T) {
+		input := `{"model":"gemini-3.1-flash-image-preview","prompt":"A landscape","seed":0,"temperature":0,"top_p":0}`
+		result, err := ImageRequestToOpenAIChatRequest([]byte(input))
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		require.NotNil(t, chatReq.Seed)
+		assert.Equal(t, int64(0), *chatReq.Seed)
+		require.NotNil(t, chatReq.Temperature)
+		assert.Equal(t, float64(0), *chatReq.Temperature)
+		require.NotNil(t, chatReq.TopP)
+		assert.Equal(t, float64(0), *chatReq.TopP)
+	})
+
+	for _, seed := range []string{"2147483648", "-2147483649"} {
+		t.Run("out of range seed returns error "+seed, func(t *testing.T) {
+			input := fmt.Sprintf(`{"model":"gemini-3.1-flash-image-preview","prompt":"A landscape","seed":%s}`, seed)
+			result, err := ImageRequestToOpenAIChatRequest([]byte(input))
+			assert.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "invalid image generation seed")
+		})
+	}
 
 	t.Run("request with size includes aspect ratio and image size", func(t *testing.T) {
 		input := `{"model": "gemini-3-pro-image", "prompt": "A landscape", "size": "1792x1024"}`

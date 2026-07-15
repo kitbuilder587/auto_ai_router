@@ -161,7 +161,9 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 
 	// Convert to OpenAI chat request format
 	chatReq := openai.OpenAIRequest{
-		Model: imageReq.Model,
+		Model:       imageReq.Model,
+		Temperature: imageReq.Temperature,
+		TopP:        imageReq.TopP,
 		Messages: []openai.OpenAIMessage{
 			{
 				Role:    "user",
@@ -171,6 +173,12 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 		ExtraBody: map[string]interface{}{
 			"generation_config": genConfig,
 		},
+	}
+	if imageReq.Seed != nil {
+		if *imageReq.Seed < math.MinInt32 || *imageReq.Seed > math.MaxInt32 {
+			return nil, fmt.Errorf("invalid image generation seed %d", *imageReq.Seed)
+		}
+		chatReq.Seed = imageReq.Seed
 	}
 	if imageReq.N != nil && *imageReq.N > 0 {
 		n := clampImageCount(*imageReq.N)
