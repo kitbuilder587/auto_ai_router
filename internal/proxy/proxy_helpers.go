@@ -258,9 +258,10 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	// kafkaFallbackReason is set by the caller when publishing this event's
 	// Kafka copy failed (e.g. queue full after the 5s backpressure wait, see
 	// kafkalog.ErrQueueFull). Flagging it here — in the row that's about to be
-	// inserted anyway — lets a background job find it later by
-	// metadata->>'kafka_fallback' and re-publish it, instead of the event
-	// being lost entirely when Kafka is degraded.
+	// inserted anyway — lets it be found later via metadata->>'kafka_fallback'
+	// (e.g. by a DBA script) and re-published to Kafka, instead of the event
+	// being lost entirely when Kafka is degraded. AIR intentionally does not
+	// run its own resend job — see internal/litellmdb.Manager.MarkSpendLogKafkaFallback.
 	if kafkaFallbackReason != "" {
 		metadata["kafka_fallback"] = true
 		metadata["kafka_fallback_reason"] = kafkaFallbackReason

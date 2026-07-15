@@ -27,8 +27,10 @@ type Manager interface {
 
 	// MarkSpendLogKafkaFallback flags an existing LiteLLM_SpendLogs row's
 	// metadata (metadata.kafka_fallback=true, metadata.kafka_fallback_reason)
-	// so a background job can find it later and re-publish it to Kafka. Used
-	// for failures kafkalog can't flag synchronously at insert time (e.g. a
+	// so it can be found later (e.g. by a DBA script querying
+	// metadata->>'kafka_fallback') and re-published to Kafka. AIR intentionally
+	// does not run its own resend job for this - flagging is as far as it goes.
+	// Used for failures kafkalog can't flag synchronously at insert time (e.g. a
 	// DLQ batch dropped after a sustained Kafka outage). Best-effort: callers
 	// only log a non-nil error, never treat it as fatal.
 	MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error
@@ -213,11 +215,12 @@ func (m *DefaultManager) LogSpend(entry *models.SpendLogEntry) error {
 	return m.spendLogger.Log(entry)
 }
 
-// MarkSpendLogKafkaFallback flags an existing spend log row's metadata so a
-// background job can find and re-publish it to Kafka later. request_id is
-// the table's primary key, so this is a single targeted update — it's a
-// no-op (rows affected = 0, no error) if the row doesn't exist, which can
-// happen if litellm_db writes are disabled for this request.
+// MarkSpendLogKafkaFallback flags an existing spend log row's metadata so it
+// can be found and re-published to Kafka later (by external/DBA tooling, not
+// by AIR itself). request_id is the table's primary key, so this is a single
+// targeted update — it's a no-op (rows affected = 0, no error) if the row
+// doesn't exist, which can happen if litellm_db writes are disabled for this
+// request.
 func (m *DefaultManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
 	const query = `
 		UPDATE "LiteLLM_SpendLogs"

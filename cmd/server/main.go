@@ -239,12 +239,6 @@ func main() {
 	startProxyStatsUpdater(log, bgCtx, bal, rateLimiter, modelManager, &wg, &updateMutex)
 	if kafkaLogManager.IsEnabled() {
 		startKafkaMetricsUpdater(cfg, log, bgCtx, kafkaLogManager, metrics, &wg)
-		// Only meaningful in dual-write mode: the resend loop re-publishes
-		// LiteLLM_SpendLogs rows that kafkalog flagged as kafka_fallback, so
-		// it needs those rows to exist (litellm_db enabled) and a live pool.
-		if litellmDBManager.IsEnabled() {
-			startKafkaFallbackResendLoop(log, bgCtx, litellmDBManager.GetPool(), kafkaLogManager, &wg)
-		}
 	}
 
 	if respStore != nil {
