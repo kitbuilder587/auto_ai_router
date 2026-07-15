@@ -1,4 +1,4 @@
-package proxy
+package modelutils
 
 import (
 	"bufio"
@@ -15,9 +15,24 @@ const (
 	maxQwenSSELineBytes     = 1 << 20
 )
 
+// NormalizeCompletionUsage applies model-specific response usage fixes. It
+// intentionally fails open: malformed or ambiguous payloads are returned
+// byte-for-byte unchanged.
+func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
+	return normalizeQwenCompletionUsage(body, modelID)
+}
+
+// NewUsageNormalizingReadCloser wraps streaming responses when a model-specific
+// SSE usage normalizer exists.
+func NewUsageNormalizingReadCloser(source io.ReadCloser, modelID string) (io.ReadCloser, bool) {
+	if source == nil || !isQwenReasoningUsageModel(modelID) {
+		return source, false
+	}
+	return newQwenUsageNormalizingReadCloser(source, modelID), true
+}
+
 // normalizeQwenCompletionUsage fixes the overlapping text/reasoning token
-// breakdown observed for qwen3.6-35b-a3b. It intentionally fails open: malformed
-// or ambiguous payloads are returned byte-for-byte unchanged.
+// breakdown observed for qwen3.6-35b-a3b.
 func normalizeQwenCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	if !isQwenReasoningUsageModel(modelID) {
 		return body, false

@@ -1,4 +1,4 @@
-package proxy
+package modelutils
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestNormalizeQwenCompletionUsage_IncidentResponses(t *testing.T) {
+func TestNormalizeCompletionUsage_IncidentResponses(t *testing.T) {
 	tests := []struct {
 		name             string
 		modelID          string
@@ -55,7 +55,7 @@ func TestNormalizeQwenCompletionUsage_IncidentResponses(t *testing.T) {
 				}
 			}`)
 
-			normalized, changed := normalizeQwenCompletionUsage(body, tt.modelID)
+			normalized, changed := NormalizeCompletionUsage(body, tt.modelID)
 			if !changed {
 				t.Fatal("expected usage to be normalized")
 			}
@@ -97,7 +97,7 @@ func TestNormalizeQwenCompletionUsage_IncidentResponses(t *testing.T) {
 	}
 }
 
-func TestNormalizeQwenCompletionUsage_AmbiguousOrUnrelatedPayloadsStayUnchanged(t *testing.T) {
+func TestNormalizeCompletionUsage_AmbiguousOrUnrelatedPayloadsStayUnchanged(t *testing.T) {
 	validOverlap := `{"usage":{"completion_tokens":100,"completion_tokens_details":{"text_tokens":100,"reasoning_tokens":75}}}`
 	tests := []struct {
 		name    string
@@ -124,7 +124,7 @@ func TestNormalizeQwenCompletionUsage_AmbiguousOrUnrelatedPayloadsStayUnchanged(
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			original := []byte(tt.body)
-			normalized, changed := normalizeQwenCompletionUsage(original, tt.modelID)
+			normalized, changed := NormalizeCompletionUsage(original, tt.modelID)
 			if changed {
 				t.Fatal("ambiguous or unrelated response must not be normalized")
 			}
@@ -164,7 +164,10 @@ func TestQwenUsageNormalizingReadCloser_PreservesSSEFramingAcrossFragmentedReads
 	}, "")
 
 	source := &oneByteReadCloser{reader: strings.NewReader(input)}
-	wrapped := newQwenUsageNormalizingReadCloser(source, "proxy/qwen3.6-35b-a3b-20260415")
+	wrapped, ok := NewUsageNormalizingReadCloser(source, "proxy/qwen3.6-35b-a3b-20260415")
+	if !ok {
+		t.Fatal("expected Qwen stream to be wrapped")
+	}
 	got, err := readWithSmallBuffer(wrapped, 7)
 	if err != nil {
 		t.Fatalf("read normalized SSE: %v", err)
@@ -183,7 +186,10 @@ func TestQwenUsageNormalizingReadCloser_PreservesSSEFramingAcrossFragmentedReads
 func TestQwenUsageNormalizingReadCloser_OtherModelStaysByteForByteUnchanged(t *testing.T) {
 	input := "data: {\"usage\":{\"completion_tokens\":100,\"completion_tokens_details\":{\"text_tokens\":100,\"reasoning_tokens\":75}}}\r\n\r\n"
 	source := &oneByteReadCloser{reader: strings.NewReader(input)}
-	wrapped := newQwenUsageNormalizingReadCloser(source, "gpt-5-mini")
+	wrapped, ok := NewUsageNormalizingReadCloser(source, "gpt-5-mini")
+	if ok {
+		t.Fatal("unrelated model must not be wrapped")
+	}
 	if wrapped != source {
 		t.Fatal("unrelated model must not be wrapped or line-buffered")
 	}
@@ -249,8 +255,12 @@ func TestQwenUsageNormalizingReadCloser_OversizedUnterminatedLinePassesThrough(t
 	}
 }
 
-func TestNewQwenUsageNormalizingReadCloser_NilSource(t *testing.T) {
-	if got := newQwenUsageNormalizingReadCloser(nil, qwenReasoningUsageModel); got != nil {
+func TestNewUsageNormalizingReadCloser_NilSource(t *testing.T) {
+	got, ok := NewUsageNormalizingReadCloser(nil, qwenReasoningUsageModel)
+	if ok {
+		t.Fatal("nil source must not report wrapper")
+	}
+	if got != nil {
 		t.Fatalf("nil source returned %T, want nil", got)
 	}
 }

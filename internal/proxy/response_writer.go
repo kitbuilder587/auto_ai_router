@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
 // writeProxyResponse writes raw upstream proxy response to client.
@@ -20,7 +21,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	responseBody := resp.Body
 	responseBodyChanged := false
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		if normalizedBody, changed := normalizeQwenCompletionUsage(responseBody, modelID); changed {
+		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
 			responseBody = normalizedBody
 			responseBodyChanged = true
 		}
@@ -112,10 +113,12 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	streamBody := resp.StreamBody
-	normalizeStream := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices &&
-		isQwenReasoningUsageModel(modelID)
-	if normalizeStream {
-		streamBody = newQwenUsageNormalizingReadCloser(streamBody, modelID)
+	normalizeStream := false
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		if normalizedStreamBody, wrapped := modelutils.NewUsageNormalizingReadCloser(streamBody, modelID); wrapped {
+			streamBody = normalizedStreamBody
+			normalizeStream = true
+		}
 	}
 	defer func() {
 		if closeErr := streamBody.Close(); closeErr != nil {
