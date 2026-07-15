@@ -58,6 +58,10 @@ type Config struct {
 	LogBatchSize     int           // Batch size for INSERT (default: 100)
 	LogFlushInterval time.Duration // Flush interval (default: 5s)
 
+	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
+	// Postgres while leaving auth (ValidateToken) untouched (default: false).
+	DisableSpendLogsWrite bool
+
 	// Logger
 	Logger *slog.Logger
 }

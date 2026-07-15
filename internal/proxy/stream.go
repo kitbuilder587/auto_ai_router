@@ -449,7 +449,7 @@ func (p *Proxy) handleTransformedStreaming(
 		}
 	}()
 
-	if err := p.streamToClient(respCtx(resp), w, pr, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, pr, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleTransformedStreaming", err,
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
@@ -525,7 +525,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		rememberLastStreamDataChunk(&lastChunk, chunk)
 	}
 
-	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
@@ -766,6 +766,7 @@ func (p *Proxy) streamToClient(
 	endpoint string,
 	onChunk func([]byte),
 	onWriteErr func(),
+	logCtx *RequestLogContext,
 ) error {
 	_, ok := w.(http.Flusher)
 	if !ok {
@@ -780,6 +781,9 @@ func (p *Proxy) streamToClient(
 	for {
 		n, err := reader.Read(*buf)
 		if n > 0 {
+			if logCtx != nil && logCtx.CompletionStartTime.IsZero() {
+				logCtx.CompletionStartTime = time.Now()
+			}
 			if onChunk != nil {
 				onChunk((*buf)[:n])
 			}
@@ -1043,7 +1047,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		}
 	}
 
-	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {

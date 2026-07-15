@@ -152,16 +152,28 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
-// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table
-// Returns error if the log entry cannot be queued (e.g., queue full)
+// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table and, if enabled,
+// publishes an expanded copy of the same event to Kafka for ClickHouse
+// analytics (internal/kafkalog). The two write-paths are independent: either
+// can be enabled/disabled on its own (see litellm_db.disable_spend_logs_write
+// and kafka.enabled). Returns error only for the Postgres write — Kafka
+// publish failures are logged but never affect the caller.
 func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
+	litellmEnabled := p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled()
+	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
+	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
 
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
 		return nil
 	}
+
+	// Marks entry into the logging path itself, used below to compute the
+	// Kafka event's overhead_ms as the cost of this function (cost lookup +
+	// metadata/event building), distinct from duration_ms (full request
+	// lifetime) — see logSpendToKafka call below.
+	spendLogFnStart := time.Now()
 
 	// Fallback to request ID if session ID not provided
 	if logCtx.SessionID == "" {
@@ -260,28 +272,47 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		teamID = credName
 	}
 
-	return p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
-		RequestID:         logCtx.RequestID,
-		StartTime:         logCtx.StartTime,
-		EndTime:           utils.NowUTC(),
-		CallType:          logCtx.Request.URL.Path,
-		APIBase:           apiBase,
-		Model:             logCtx.ModelID,    // Model name
-		ModelID:           modelIDFormatted,  // credential.name:model_name
-		ModelGroup:        logCtx.ModelID,    // Model name
-		CustomLLMProvider: customLLMProvider, // Provider type as string
-		PromptTokens:      logCtx.TokenUsage.PromptTokens,
-		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
-		TotalTokens:       logCtx.TokenUsage.Total(),
-		Metadata:          metadata,
-		Spend:             cost, // Calculated cost based on model pricing and token usage
-		APIKey:            hashedToken,
-		UserID:            userID,
-		TeamID:            teamID,
-		OrganizationID:    organizationID,
-		EndUser:           endUser,
-		RequesterIP:       getClientIP(logCtx.Request),
-		Status:            status,
-		SessionID:         logCtx.SessionID,
-	})
+	endTime := utils.NowUTC()
+
+	var pgErr error
+	if litellmEnabled {
+		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
+			RequestID:         logCtx.RequestID,
+			StartTime:         logCtx.StartTime,
+			EndTime:           endTime,
+			CallType:          logCtx.Request.URL.Path,
+			APIBase:           apiBase,
+			Model:             logCtx.ModelID,    // Model name
+			ModelID:           modelIDFormatted,  // credential.name:model_name
+			ModelGroup:        logCtx.ModelID,    // Model name
+			CustomLLMProvider: customLLMProvider, // Provider type as string
+			PromptTokens:      logCtx.TokenUsage.PromptTokens,
+			CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
+			TotalTokens:       logCtx.TokenUsage.Total(),
+			Metadata:          metadata,
+			Spend:             cost, // Calculated cost based on model pricing and token usage
+			APIKey:            hashedToken,
+			UserID:            userID,
+			TeamID:            teamID,
+			OrganizationID:    organizationID,
+			EndUser:           endUser,
+			RequesterIP:       requesterIP,
+			Status:            status,
+			SessionID:         logCtx.SessionID,
+		})
+	}
+
+	if kafkaEnabled {
+		// Deliberately distinct from the Postgres metadata's overheadMs (which
+		// measures full elapsed time since the request started, near-identical
+		// to duration_ms): kafkaOverheadMs measures only the cost of this
+		// logging function itself, matching the ТЗ's intent for overhead_ms to
+		// be a small, separate figure from duration_ms.
+		kafkaOverheadMs := float64(time.Since(spendLogFnStart).Microseconds()) / 1000.0
+		p.logSpendToKafka(logCtx, credName, modelIDFormatted, hashedToken,
+			userID, teamID, organizationID, endUser, apiBase, status,
+			cost, tokenCosts, kafkaOverheadMs, endTime)
+	}
+
+	return pgErr
 }

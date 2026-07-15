@@ -129,6 +129,7 @@ type Config struct {
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 	Redis       RedisConfig        `yaml:"redis,omitempty"`
 	OTEL        OTELConfig         `yaml:"otel,omitempty"`
+	Kafka       KafkaConfig        `yaml:"kafka,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -155,6 +156,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
 		Redis          RedisConfig            `yaml:"redis,omitempty"`
 		OTEL           OTELConfig             `yaml:"otel,omitempty"`
+		Kafka          KafkaConfig            `yaml:"kafka,omitempty"`
 		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -173,6 +175,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
+	c.Kafka = raw.Kafka
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -734,6 +737,38 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+
+	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
+	// Postgres while leaving auth (ValidateToken) untouched. Intended for setups
+	// where Kafka (see KafkaConfig) is the sole spend-analytics write-path.
+	DisableSpendLogsWrite bool `yaml:"disable_spend_logs_write"` // default: false
+}
+
+// KafkaConfig holds configuration for the Kafka spend-log analytics write-path
+// (internal/kafkalog). When Enabled=false (default) no producer is started and
+// spend events are only written to LiteLLM Postgres (unless disabled there too).
+type KafkaConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Brokers is the list of Kafka bootstrap broker addresses (host:port).
+	Brokers []string `yaml:"brokers"`
+
+	// Topic is the Kafka topic spend events are published to.
+	Topic string `yaml:"topic"` // default: "air.spend_logs"
+
+	// ClientID identifies this producer to the Kafka cluster.
+	ClientID string `yaml:"client_id"` // default: "auto_ai_router"
+
+	// Async producer queue/batch settings (mirrors litellm_db.log_*).
+	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 5000
+	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
+	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+
+	// TLS/SASL — optional, for production clusters.
+	TLSEnabled    bool   `yaml:"tls_enabled,omitempty"`
+	SASLMechanism string `yaml:"sasl_mechanism,omitempty"` // "" | "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512"
+	SASLUsername  string `yaml:"sasl_username,omitempty"`
+	SASLPassword  string `yaml:"sasl_password,omitempty"`
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -913,6 +948,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize          string `yaml:"log_queue_size"`
 		LogBatchSize          string `yaml:"log_batch_size"`
 		LogFlushInterval      string `yaml:"log_flush_interval"`
+		DisableSpendLogsWrite string `yaml:"disable_spend_logs_write"`
 	}
 
 	var temp tempConfig
@@ -932,6 +968,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.LoadLitellmDBModels, err = parseField(temp.LoadLitellmDBModels, false, strconv.ParseBool, "litellm_db.load_db_models"); err != nil {
+		return err
+	}
+	if l.DisableSpendLogsWrite, err = parseField(temp.DisableSpendLogsWrite, false, strconv.ParseBool, "litellm_db.disable_spend_logs_write"); err != nil {
 		return err
 	}
 
@@ -967,6 +1006,64 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
 		return err
 	}
+
+	return nil
+}
+
+// UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
+func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled          string   `yaml:"enabled"`
+		Brokers          []string `yaml:"brokers"`
+		Topic            string   `yaml:"topic"`
+		ClientID         string   `yaml:"client_id"`
+		LogQueueSize     string   `yaml:"log_queue_size"`
+		LogBatchSize     string   `yaml:"log_batch_size"`
+		LogFlushInterval string   `yaml:"log_flush_interval"`
+		TLSEnabled       string   `yaml:"tls_enabled,omitempty"`
+		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
+		SASLUsername     string   `yaml:"sasl_username,omitempty"`
+		SASLPassword     string   `yaml:"sasl_password,omitempty"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	var err error
+
+	if k.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "kafka.enabled"); err != nil {
+		return err
+	}
+
+	// Resolve env variables in each broker address
+	k.Brokers = make([]string, 0, len(temp.Brokers))
+	for _, broker := range temp.Brokers {
+		k.Brokers = append(k.Brokers, resolveEnvString(broker))
+	}
+
+	// Topic and ClientID are not mandatory here — defaults are applied by
+	// ApplyDefaults()/kafkalog.Config.ApplyDefaults(), not during unmarshaling.
+	k.Topic = resolveEnvString(temp.Topic)
+	k.ClientID = resolveEnvString(temp.ClientID)
+
+	if k.LogQueueSize, err = parseField(temp.LogQueueSize, 5000, strconv.Atoi, "kafka.log_queue_size"); err != nil {
+		return err
+	}
+	if k.LogBatchSize, err = parseField(temp.LogBatchSize, 100, strconv.Atoi, "kafka.log_batch_size"); err != nil {
+		return err
+	}
+	if k.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "kafka.log_flush_interval"); err != nil {
+		return err
+	}
+
+	if k.TLSEnabled, err = parseField(temp.TLSEnabled, false, strconv.ParseBool, "kafka.tls_enabled"); err != nil {
+		return err
+	}
+	k.SASLMechanism = resolveEnvString(temp.SASLMechanism)
+	k.SASLUsername = resolveEnvString(temp.SASLUsername)
+	k.SASLPassword = resolveEnvString(temp.SASLPassword)
 
 	return nil
 }
@@ -1043,6 +1140,10 @@ func Load(path string) (*Config, error) {
 
 	if !hasMappingKey(&root, "otel") {
 		cfg.OTEL = defaultOTELConfig()
+	}
+
+	if !hasMappingKey(&root, "kafka") {
+		cfg.Kafka = defaultKafkaConfig()
 	}
 
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
@@ -1154,6 +1255,18 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		LogQueueSize:          5000,
 		LogBatchSize:          100,
 		LogFlushInterval:      5 * time.Second,
+	}
+}
+
+func defaultKafkaConfig() KafkaConfig {
+	return KafkaConfig{
+		Enabled:          false,
+		Brokers:          nil,
+		Topic:            "air.spend_logs",
+		ClientID:         "auto_ai_router",
+		LogQueueSize:     5000,
+		LogBatchSize:     100,
+		LogFlushInterval: 5 * time.Second,
 	}
 }
 
@@ -1411,6 +1524,23 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgres://") && !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgresql://") {
 			return fmt.Errorf("litellm_db.database_url must start with postgres:// or postgresql://, got: %s", c.LiteLLMDB.DatabaseURL)
 		}
+	}
+
+	// Validate Kafka config
+	if c.Kafka.Enabled {
+		if len(c.Kafka.Brokers) == 0 {
+			return fmt.Errorf("kafka.brokers is required when kafka is enabled")
+		}
+		if c.Kafka.Topic == "" {
+			return fmt.Errorf("kafka.topic is required when kafka is enabled")
+		}
+	}
+
+	// kafka.enabled and litellm_db.disable_spend_logs_write are independent flags,
+	// but this specific combination drops spend data entirely: it would neither
+	// be written to Postgres (disabled) nor to Kafka (not enabled).
+	if !c.Kafka.Enabled && c.LiteLLMDB.DisableSpendLogsWrite {
+		return fmt.Errorf("invalid config: litellm_db.disable_spend_logs_write=true requires kafka.enabled=true, otherwise spend logs are lost entirely")
 	}
 
 	return nil

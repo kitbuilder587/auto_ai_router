@@ -93,6 +93,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	credName string,
 	modelID string,
 	tokenizerModelID string,
+	logCtx *RequestLogContext,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
@@ -150,6 +151,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			endpointFromRequest(clientReq),
 			onChunk,
 			nil,
+			logCtx,
 		)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.

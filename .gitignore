@@ -38,3 +38,5 @@ bedrock_docs/
 skills/
 server
 conf*.json
+_LiteLLM_SpendLogs__*.sql
+*.xlsx

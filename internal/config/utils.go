@@ -184,9 +184,32 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.LiteLLMDB.LogQueueSize,
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
+			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
+	}
+
+	// Kafka spend-log config
+	if cfg.Kafka.Enabled {
+		saslPassword := ""
+		if cfg.Kafka.SASLPassword != "" {
+			saslPassword = "***REDACTED***"
+		}
+		logger.Info("kafka (ENABLED)",
+			"brokers", cfg.Kafka.Brokers,
+			"topic", cfg.Kafka.Topic,
+			"client_id", cfg.Kafka.ClientID,
+			"log_queue_size", cfg.Kafka.LogQueueSize,
+			"log_batch_size", cfg.Kafka.LogBatchSize,
+			"log_flush_interval", cfg.Kafka.LogFlushInterval.String(),
+			"tls_enabled", cfg.Kafka.TLSEnabled,
+			"sasl_mechanism", cfg.Kafka.SASLMechanism,
+			"sasl_username", cfg.Kafka.SASLUsername,
+			"sasl_password", saslPassword,
+		)
+	} else {
+		logger.Info("kafka", "status", "DISABLED")
 	}
 
 	// OTEL config

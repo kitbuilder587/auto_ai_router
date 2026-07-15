@@ -153,6 +153,52 @@ var (
 			Help: "Total number of times fallback to local backend occurred due to Redis errors",
 		},
 	)
+
+	// Kafka spend-log publisher metrics (internal/kafkalog). These mirror
+	// kafkalog.Stats snapshots (cumulative queue/DLQ counters), so gauges are
+	// used even for monotonic counts rather than prometheus.Counter, which
+	// would double-count on every periodic poll.
+	KafkaSpendLoggerQueuedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_spend_logger_queued_total",
+			Help: "Cumulative number of spend events queued for Kafka publishing",
+		},
+	)
+
+	KafkaSpendLoggerProducedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_spend_logger_produced_total",
+			Help: "Cumulative number of spend events successfully produced to Kafka",
+		},
+	)
+
+	KafkaSpendLoggerDroppedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_spend_logger_dropped_total",
+			Help: "Cumulative number of spend events dropped because the producer queue was full",
+		},
+	)
+
+	KafkaSpendLoggerErrorsTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_spend_logger_errors_total",
+			Help: "Cumulative number of spend events that failed to produce after all retries",
+		},
+	)
+
+	KafkaSpendLoggerDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_spend_logger_dlq_size",
+			Help: "Current number of batches held in the Kafka spend logger's dead letter queue",
+		},
+	)
+
+	KafkaSpendLoggerHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_spend_logger_healthy",
+			Help: "Kafka broker connectivity for spend-log publishing (1 = healthy, 0 = unhealthy)",
+		},
+	)
 )
 
 type Metrics struct {
@@ -265,4 +311,23 @@ func (m *Metrics) RecordRedisFallback() {
 		return
 	}
 	RedisFallbackEventsTotal.Inc()
+}
+
+// UpdateKafkaSpendLoggerStats publishes a kafkalog producer Stats snapshot
+// (queue/DLQ counters, broker health) as Prometheus metrics. Intended to be
+// called periodically from a background updater, not per-request.
+func (m *Metrics) UpdateKafkaSpendLoggerStats(queued, produced, dropped, errors uint64, dlqSize int, healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	KafkaSpendLoggerQueuedTotal.Set(float64(queued))
+	KafkaSpendLoggerProducedTotal.Set(float64(produced))
+	KafkaSpendLoggerDroppedTotal.Set(float64(dropped))
+	KafkaSpendLoggerErrorsTotal.Set(float64(errors))
+	KafkaSpendLoggerDLQSize.Set(float64(dlqSize))
+	h := 0.0
+	if healthy {
+		h = 1.0
+	}
+	KafkaSpendLoggerHealthy.Set(h)
 }
