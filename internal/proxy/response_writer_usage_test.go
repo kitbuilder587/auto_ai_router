@@ -119,6 +119,7 @@ func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
 		"test",
 		"gateway/qwen3.6-35b-a3b-20260415",
 		"qwen3.6-35b-a3b",
+		nil,
 	)
 
 	require.NoError(t, err)
@@ -172,7 +173,7 @@ func TestWriteProxyStreamingResponseQwenDrainCapturesUsage(t *testing.T) {
 	w := newFailAfterNBytesWriter(10)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	usage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, req, "test", "qwen3.6-35b-a3b", "qwen3.6-35b-a3b")
+	usage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, req, "test", "qwen3.6-35b-a3b", "qwen3.6-35b-a3b", nil)
 
 	require.Error(t, err)
 	require.NotNil(t, usage)
