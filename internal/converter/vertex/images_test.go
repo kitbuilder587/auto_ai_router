@@ -3,6 +3,7 @@ package vertex
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/textproto"
 	"testing"
@@ -38,6 +39,86 @@ func TestMapGeminiImageSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config, err := mapGeminiImageSize(tt.model, tt.size)
+			require.NoError(t, err)
+			require.NotNil(t, config)
+			assert.Equal(t, tt.aspectRatio, config.aspectRatio)
+			assert.Equal(t, tt.imageSize, config.imageSize)
+		})
+	}
+}
+
+func TestMapGeminiImageSizeOfficialGrid(t *testing.T) {
+	tests := []struct {
+		aspectRatio string
+		imageSize   string
+		width       int
+		height      int
+	}{
+		{aspectRatio: "1:1", imageSize: "512", width: 512, height: 512},
+		{aspectRatio: "1:1", imageSize: "1K", width: 1024, height: 1024},
+		{aspectRatio: "1:1", imageSize: "2K", width: 2048, height: 2048},
+		{aspectRatio: "1:1", imageSize: "4K", width: 4096, height: 4096},
+		{aspectRatio: "1:4", imageSize: "512", width: 256, height: 1024},
+		{aspectRatio: "1:4", imageSize: "1K", width: 512, height: 2048},
+		{aspectRatio: "1:4", imageSize: "2K", width: 1024, height: 4096},
+		{aspectRatio: "1:4", imageSize: "4K", width: 2048, height: 8192},
+		{aspectRatio: "1:8", imageSize: "512", width: 192, height: 1536},
+		{aspectRatio: "1:8", imageSize: "1K", width: 384, height: 3072},
+		{aspectRatio: "1:8", imageSize: "2K", width: 768, height: 6144},
+		{aspectRatio: "1:8", imageSize: "4K", width: 1536, height: 12288},
+		{aspectRatio: "2:3", imageSize: "512", width: 424, height: 632},
+		{aspectRatio: "2:3", imageSize: "1K", width: 848, height: 1264},
+		{aspectRatio: "2:3", imageSize: "2K", width: 1696, height: 2528},
+		{aspectRatio: "2:3", imageSize: "4K", width: 3392, height: 5056},
+		{aspectRatio: "3:2", imageSize: "512", width: 632, height: 424},
+		{aspectRatio: "3:2", imageSize: "1K", width: 1264, height: 848},
+		{aspectRatio: "3:2", imageSize: "2K", width: 2528, height: 1696},
+		{aspectRatio: "3:2", imageSize: "4K", width: 5056, height: 3392},
+		{aspectRatio: "3:4", imageSize: "512", width: 448, height: 600},
+		{aspectRatio: "3:4", imageSize: "1K", width: 896, height: 1200},
+		{aspectRatio: "3:4", imageSize: "2K", width: 1792, height: 2400},
+		{aspectRatio: "3:4", imageSize: "4K", width: 3584, height: 4800},
+		{aspectRatio: "4:1", imageSize: "512", width: 1024, height: 256},
+		{aspectRatio: "4:1", imageSize: "1K", width: 2048, height: 512},
+		{aspectRatio: "4:1", imageSize: "2K", width: 4096, height: 1024},
+		{aspectRatio: "4:1", imageSize: "4K", width: 8192, height: 2048},
+		{aspectRatio: "4:3", imageSize: "512", width: 600, height: 448},
+		{aspectRatio: "4:3", imageSize: "1K", width: 1200, height: 896},
+		{aspectRatio: "4:3", imageSize: "2K", width: 2400, height: 1792},
+		{aspectRatio: "4:3", imageSize: "4K", width: 4800, height: 3584},
+		{aspectRatio: "4:5", imageSize: "512", width: 464, height: 576},
+		{aspectRatio: "4:5", imageSize: "1K", width: 928, height: 1152},
+		{aspectRatio: "4:5", imageSize: "2K", width: 1856, height: 2304},
+		{aspectRatio: "4:5", imageSize: "4K", width: 3712, height: 4608},
+		{aspectRatio: "5:4", imageSize: "512", width: 576, height: 464},
+		{aspectRatio: "5:4", imageSize: "1K", width: 1152, height: 928},
+		{aspectRatio: "5:4", imageSize: "2K", width: 2304, height: 1856},
+		{aspectRatio: "5:4", imageSize: "4K", width: 4608, height: 3712},
+		{aspectRatio: "8:1", imageSize: "512", width: 1536, height: 192},
+		{aspectRatio: "8:1", imageSize: "1K", width: 3072, height: 384},
+		{aspectRatio: "8:1", imageSize: "2K", width: 6144, height: 768},
+		{aspectRatio: "8:1", imageSize: "4K", width: 12288, height: 1536},
+		{aspectRatio: "9:16", imageSize: "512", width: 384, height: 688},
+		{aspectRatio: "9:16", imageSize: "1K", width: 768, height: 1376},
+		{aspectRatio: "9:16", imageSize: "2K", width: 1536, height: 2752},
+		{aspectRatio: "9:16", imageSize: "4K", width: 3072, height: 5504},
+		{aspectRatio: "16:9", imageSize: "512", width: 688, height: 384},
+		{aspectRatio: "16:9", imageSize: "1K", width: 1376, height: 768},
+		{aspectRatio: "16:9", imageSize: "2K", width: 2752, height: 1536},
+		{aspectRatio: "16:9", imageSize: "4K", width: 5504, height: 3072},
+		{aspectRatio: "21:9", imageSize: "512", width: 792, height: 168},
+		{aspectRatio: "21:9", imageSize: "1K", width: 1584, height: 672},
+		{aspectRatio: "21:9", imageSize: "2K", width: 3168, height: 1344},
+		{aspectRatio: "21:9", imageSize: "4K", width: 6336, height: 2688},
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("%s/%s", tt.aspectRatio, tt.imageSize)
+		t.Run(name, func(t *testing.T) {
+			config, err := mapGeminiImageSize(
+				"gemini-3.1-flash-image-preview",
+				fmt.Sprintf("%dx%d", tt.width, tt.height),
+			)
 			require.NoError(t, err)
 			require.NotNil(t, config)
 			assert.Equal(t, tt.aspectRatio, config.aspectRatio)

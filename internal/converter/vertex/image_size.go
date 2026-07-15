@@ -8,11 +8,17 @@ import (
 )
 
 type geminiImageRatio struct {
-	value              string
-	ratioWidth         int
-	ratioHeight        int
-	resolution1KWidth  int
-	resolution1KHeight int
+	value               string
+	ratioWidth          int
+	ratioHeight         int
+	resolution1KWidth   int
+	resolution1KHeight  int
+	resolutionOverrides map[string]geminiImageDimensions
+}
+
+type geminiImageDimensions struct {
+	width  int
+	height int
 }
 
 type geminiImageResolution struct {
@@ -70,7 +76,16 @@ var gemini31FlashImageRatios = []geminiImageRatio{
 	{value: "8:1", ratioWidth: 8, ratioHeight: 1, resolution1KWidth: 3072, resolution1KHeight: 384},
 	{value: "9:16", ratioWidth: 9, ratioHeight: 16, resolution1KWidth: 768, resolution1KHeight: 1376},
 	{value: "16:9", ratioWidth: 16, ratioHeight: 9, resolution1KWidth: 1376, resolution1KHeight: 768},
-	{value: "21:9", ratioWidth: 21, ratioHeight: 9, resolution1KWidth: 1584, resolution1KHeight: 672},
+	{
+		value:              "21:9",
+		ratioWidth:         21,
+		ratioHeight:        9,
+		resolution1KWidth:  1584,
+		resolution1KHeight: 672,
+		resolutionOverrides: map[string]geminiImageDimensions{
+			"512": {width: 792, height: 168},
+		},
+	},
 }
 
 var (
@@ -115,6 +130,12 @@ func mapGeminiImageSize(model, size string) (*geminiImageConfig, error) {
 	}
 
 	profile := geminiImageProfileForModel(model)
+	if !ratioOnly {
+		if config, ok := exactGeminiImageConfig(profile, width, height); ok {
+			return config, nil
+		}
+	}
+
 	ratio := nearestGeminiImageRatio(profile.ratios, width, height)
 	resolution := defaultGeminiImageResolution(profile.resolutions)
 	if !ratioOnly {
@@ -122,6 +143,28 @@ func mapGeminiImageSize(model, size string) (*geminiImageConfig, error) {
 	}
 
 	return &geminiImageConfig{aspectRatio: ratio.value, imageSize: resolution.value}, nil
+}
+
+func exactGeminiImageConfig(profile geminiImageProfile, width, height int) (*geminiImageConfig, bool) {
+	for _, ratio := range profile.ratios {
+		for _, resolution := range profile.resolutions {
+			dimensions := geminiImageDimensions{
+				width:  int(math.Round(float64(ratio.resolution1KWidth) * resolution.scale)),
+				height: int(math.Round(float64(ratio.resolution1KHeight) * resolution.scale)),
+			}
+			if override, ok := ratio.resolutionOverrides[resolution.value]; ok {
+				dimensions = override
+			}
+			if dimensions.width == width && dimensions.height == height {
+				return &geminiImageConfig{
+					aspectRatio: ratio.value,
+					imageSize:   resolution.value,
+				}, true
+			}
+		}
+	}
+
+	return nil, false
 }
 
 func parseGeminiImageSize(size string) (int, int, bool, error) {
