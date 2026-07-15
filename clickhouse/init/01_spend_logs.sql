@@ -71,6 +71,23 @@ SETTINGS
     kafka_num_consumers = 2,
     kafka_handle_error_mode = 'stream';   -- невалидные сообщения не теряются молча
 
+-- Plain MergeTree is correct here because docker-compose.kafka.yml stands up
+-- a single, unreplicated ClickHouse node (no Keeper/ZooKeeper, no {shard}/
+-- {replica} macros configured) -- ReplicatedMergeTree would either fail to
+-- create or provide zero actual redundancy with one replica.
+--
+-- For a production cluster with more than one ClickHouse replica, swap the
+-- engine for ReplicatedMergeTree (or use a `Replicated` database engine so
+-- every table under it is replicated automatically) so a node failure
+-- doesn't lose spend/billing data. Typical form, once Keeper and macros are
+-- configured on the cluster:
+--
+--   ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/air/spend_logs', '{replica}')
+--
+-- This is exactly the kind of cluster-topology decision the TZ (section 8,
+-- decision 11.3) leaves to whoever operates the target ClickHouse cluster --
+-- AIR's reference DDL intentionally stays engine-agnostic about it beyond
+-- this comment.
 CREATE TABLE air.spend_logs
 (
     LIKE air.spend_logs_kafka

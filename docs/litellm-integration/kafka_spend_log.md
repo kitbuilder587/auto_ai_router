@@ -77,6 +77,8 @@ A reference DDL — a `Kafka`-engine table reading `air.spend_logs`, a `MergeTre
 
 This DDL is a reference/example for local development and for DBAs setting up a production ClickHouse cluster — Auto AI Router itself does not create, own, or administer this schema. Retention (`TTL`) and Kafka topic partitioning are likewise left to whoever operates the target cluster; the router's only responsibility is producing well-formed events to the topic.
 
+**Replication:** the `air.spend_logs` table uses plain `MergeTree` because `docker-compose.kafka.yml` runs a single, unreplicated ClickHouse node. For a production cluster with more than one replica, swap it for `ReplicatedMergeTree` (or a `Replicated` database engine) once Keeper/ZooKeeper and `{shard}`/`{replica}` macros are set up — otherwise a node failure loses spend/billing data. See the comment above the `CREATE TABLE air.spend_logs` statement in `clickhouse/init/01_spend_logs.sql` for the exact engine syntax.
+
 ## Running locally
 
 A self-contained Kafka (KRaft, single node) + ClickHouse stack for local development is provided in `docker-compose.kafka.yml` at the repository root. It auto-applies the ClickHouse schema above on first start via the standard `docker-entrypoint-initdb.d` mechanism.
