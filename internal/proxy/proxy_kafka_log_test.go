@@ -196,10 +196,11 @@ func TestLogSpendToKafka_PublishesBuiltEvent(t *testing.T) {
 	prx.kafkaLog = stub
 
 	logCtx := testLogCtx(t)
-	prx.logSpendToKafka(logCtx, "cred", "cred:model", "hash",
+	err := prx.logSpendToKafka(logCtx, "cred", "cred:model", "hash",
 		"user-1", "team-1", "org-1", "end-user", "api.openai.com", "success",
 		0.001, nil, 1.0, logCtx.StartTime.Add(time.Second))
 
+	require.NoError(t, err)
 	require.Len(t, stub.events, 1)
 	assert.Equal(t, "req-123", stub.events[0].RequestID)
 }
@@ -210,10 +211,12 @@ func TestLogSpendToKafka_PublishFailureDoesNotPanic(t *testing.T) {
 	prx.kafkaLog = stub
 
 	logCtx := testLogCtx(t)
+	var err error
 	assert.NotPanics(t, func() {
-		prx.logSpendToKafka(logCtx, "cred", "cred:model", "hash",
+		err = prx.logSpendToKafka(logCtx, "cred", "cred:model", "hash",
 			"", "", "", "", "api.openai.com", "success",
 			0, nil, 0, logCtx.StartTime)
 	})
+	assert.ErrorIs(t, err, assert.AnError, "the manager's error should be surfaced to the caller")
 	assert.Len(t, stub.events, 1, "event should still be attempted even though the manager returns an error")
 }

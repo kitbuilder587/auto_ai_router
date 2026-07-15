@@ -1,6 +1,7 @@
 package kafkalog
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,14 @@ type Config struct {
 	SASLPassword  string
 
 	Logger *slog.Logger
+
+	// FallbackNotifier, if set, is called (best-effort) for every event in a
+	// batch evicted from the in-memory DLQ due to overflow (a sustained Kafka
+	// outage that outlasts dlqMaxSize retries) so the caller can flag the
+	// event's existing durable record (e.g. its LiteLLM_SpendLogs Postgres row)
+	// for later re-send, instead of the batch being silently dropped. Never
+	// blocks producing/retrying; a non-nil error is only logged.
+	FallbackNotifier func(ctx context.Context, requestID, reason string) error
 }
 
 // DefaultConfig returns configuration with default values.

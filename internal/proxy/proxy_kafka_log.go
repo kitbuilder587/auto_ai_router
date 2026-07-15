@@ -8,11 +8,14 @@ import (
 )
 
 // logSpendToKafka publishes an expanded copy of the spend entry to Kafka
-// (internal/kafkalog) for downstream ClickHouse analytics. Best-effort:
-// publish failures are logged but never propagated — Kafka availability must
-// never affect request processing (kafkalog.Manager.IsHealthy reflects
-// broker connectivity independently, see auto_ai_router_kafka_spend_log_tz.md
-// section 6).
+// (internal/kafkalog) for downstream ClickHouse analytics. Best-effort in the
+// sense that Kafka availability never affects request processing or blocks
+// the caller beyond kafkalog's own bounded wait (kafkalog.Manager.IsHealthy
+// reflects broker connectivity independently, see
+// auto_ai_router_kafka_spend_log_tz.md section 6) — but the returned error is
+// still surfaced to the caller (logSpendToLiteLLMDB) so a queue-full failure
+// can be flagged on the request's Postgres row for later re-send, instead of
+// being silently dropped.
 func (p *Proxy) logSpendToKafka(
 	logCtx *RequestLogContext,
 	credName, modelIDFormatted, hashedToken string,
@@ -21,7 +24,7 @@ func (p *Proxy) logSpendToKafka(
 	tokenCosts *converter.TokenCosts,
 	overheadMs float64,
 	endTime time.Time,
-) {
+) error {
 	event := p.buildKafkaSpendEvent(logCtx, credName, modelIDFormatted, hashedToken,
 		userID, teamID, organizationID, endUser, apiBase, status,
 		cost, tokenCosts, overheadMs, endTime)
@@ -31,7 +34,9 @@ func (p *Proxy) logSpendToKafka(
 			"error", err,
 			"request_id", logCtx.RequestID,
 		)
+		return err
 	}
+	return nil
 }
 
 // buildKafkaSpendEvent maps a RequestLogContext plus the values already

@@ -393,8 +393,37 @@ func (l *Logger) appendToDLQLocked(dlb *deadLetterBatch) {
 			"dropped_at", dropped.failedAt,
 			"dlq_size", len(l.dlq),
 		)
+		l.notifyFallback(dropped.batch, "dlq_overflow")
 	}
 	l.dlq = append(l.dlq, dlb)
+}
+
+// notifyFallback calls config.FallbackNotifier for every event in batch,
+// fire-and-forget, so a batch permanently dropped from the DLQ doesn't block
+// the caller (holding dlqMu) on Postgres round-trips. Request IDs are copied
+// upfront since dropped.batch's backing array must not be retained/mutated
+// after appendToDLQLocked returns.
+func (l *Logger) notifyFallback(batch []*SpendEvent, reason string) {
+	if l.config.FallbackNotifier == nil || len(batch) == 0 {
+		return
+	}
+	requestIDs := make([]string, len(batch))
+	for i, event := range batch {
+		requestIDs[i] = event.RequestID
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, requestID := range requestIDs {
+			if err := l.config.FallbackNotifier(ctx, requestID, reason); err != nil {
+				l.logger.Warn("[Kafka] Failed to flag spend log row for fallback resend",
+					"request_id", requestID,
+					"reason", reason,
+					"error", err,
+				)
+			}
+		}
+	}()
 }
 
 func (l *Logger) addToDLQ(batch []*SpendEvent, lastErr error, attempts int) {

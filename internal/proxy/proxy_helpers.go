@@ -134,7 +134,7 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 }
 
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64) string {
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
 		userID = tokenInfo.UserID
@@ -253,6 +253,17 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"error_class":   mapHTTPStatusToErrorClass(httpStatus),
 		}
 		metadata["status"] = "failure"
+	}
+
+	// kafkaFallbackReason is set by the caller when publishing this event's
+	// Kafka copy failed (e.g. queue full after the 5s backpressure wait, see
+	// kafkalog.ErrQueueFull). Flagging it here — in the row that's about to be
+	// inserted anyway — lets a background job find it later by
+	// metadata->>'kafka_fallback' and re-publish it, instead of the event
+	// being lost entirely when Kafka is degraded.
+	if kafkaFallbackReason != "" {
+		metadata["kafka_fallback"] = true
+		metadata["kafka_fallback_reason"] = kafkaFallbackReason
 	}
 
 	jsonBytes, err := json.Marshal(metadata)

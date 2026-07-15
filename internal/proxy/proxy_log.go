@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -258,11 +259,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
-	// Build metadata with usage, cost breakdown, requester IP, and optional error
-	requesterIP := getClientIP(logCtx.Request)
-	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs)
-
 	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
 	if customLLMProvider == "proxy" {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
@@ -273,6 +269,34 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	}
 
 	endTime := utils.NowUTC()
+
+	// Publish to Kafka *before* building/inserting the Postgres row (not
+	// after) so a queue-full failure can be flagged in the same row's
+	// metadata at insert time, instead of needing a separate update later —
+	// see buildMetadata's kafkaFallbackReason parameter below.
+	var kafkaFallbackReason string
+	if kafkaEnabled {
+		// Deliberately distinct from the Postgres metadata's overheadMs (which
+		// measures full elapsed time since the request started, near-identical
+		// to duration_ms): kafkaOverheadMs measures only the cost of this
+		// logging function itself, matching the ТЗ's intent for overhead_ms to
+		// be a small, separate figure from duration_ms.
+		kafkaOverheadMs := float64(time.Since(spendLogFnStart).Microseconds()) / 1000.0
+		if err := p.logSpendToKafka(logCtx, credName, modelIDFormatted, hashedToken,
+			userID, teamID, organizationID, endUser, apiBase, status,
+			cost, tokenCosts, kafkaOverheadMs, endTime); err != nil {
+			if errors.Is(err, kafkalog.ErrQueueFull) {
+				kafkaFallbackReason = "queue_full"
+			} else {
+				kafkaFallbackReason = "publish_error"
+			}
+		}
+	}
+
+	// Build metadata with usage, cost breakdown, requester IP, and optional error
+	requesterIP := getClientIP(logCtx.Request)
+	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, kafkaFallbackReason)
 
 	var pgErr error
 	if litellmEnabled {
@@ -300,18 +324,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			Status:            status,
 			SessionID:         logCtx.SessionID,
 		})
-	}
-
-	if kafkaEnabled {
-		// Deliberately distinct from the Postgres metadata's overheadMs (which
-		// measures full elapsed time since the request started, near-identical
-		// to duration_ms): kafkaOverheadMs measures only the cost of this
-		// logging function itself, matching the ТЗ's intent for overhead_ms to
-		// be a small, separate figure from duration_ms.
-		kafkaOverheadMs := float64(time.Since(spendLogFnStart).Microseconds()) / 1000.0
-		p.logSpendToKafka(logCtx, credName, modelIDFormatted, hashedToken,
-			userID, teamID, organizationID, endUser, apiBase, status,
-			cost, tokenCosts, kafkaOverheadMs, endTime)
 	}
 
 	return pgErr

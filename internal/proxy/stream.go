@@ -26,6 +26,13 @@ const streamChunkWriteTimeout = 60 * time.Second
 // so we keep reading to capture the real usage chunk.
 const streamDrainTimeout = 60 * time.Second
 
+// streamTTFTDetectionLimit caps how many bytes streamToClient accumulates while
+// looking for the first real content delta (for CompletionStartTime/ttft_ms).
+// Streams that never produce a detectable content delta within this many bytes
+// (error-only or keep-alive-only streams) stop being scanned; CompletionStartTime
+// stays zero, matching existing "never reached" semantics.
+const streamTTFTDetectionLimit = 64 * 1024
+
 var streamBufPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 8192)
@@ -778,11 +785,30 @@ func (p *Proxy) streamToClient(
 
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
+
+	// TTFT detection buffer: separate from the bytes forwarded to the client via
+	// onChunk (forwarding must stay byte-for-byte immediate for latency). A real
+	// content/tool/reasoning delta can straddle multiple Read calls, or be
+	// preceded by content-free SSE events (ping, role-only delta) that arrive in
+	// their own Read — so bytes accumulate here across reads until
+	// extractCompletionDeltaText finds actual content, rather than stamping
+	// CompletionStartTime on the first non-empty Read regardless of content.
+	var ttftBuf []byte
+	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
+
 	for {
 		n, err := reader.Read(*buf)
 		if n > 0 {
-			if logCtx != nil && logCtx.CompletionStartTime.IsZero() {
-				logCtx.CompletionStartTime = time.Now()
+			if ttftPending {
+				ttftBuf = append(ttftBuf, (*buf)[:n]...)
+				if extractCompletionDeltaText(ttftBuf) != "" {
+					logCtx.CompletionStartTime = time.Now()
+					ttftPending = false
+					ttftBuf = nil
+				} else if len(ttftBuf) > streamTTFTDetectionLimit {
+					ttftPending = false
+					ttftBuf = nil
+				}
 			}
 			if onChunk != nil {
 				onChunk((*buf)[:n])

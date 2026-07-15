@@ -75,7 +75,7 @@ func (logCtx *RequestLogContext) Context() context.Context {
 type RequestLogContext struct {
 	RequestID            string                   // Request ID (UUID)
 	StartTime            time.Time                // Request start time
-	CompletionStartTime  time.Time                // Timestamp of the first streamed chunk written to the client (TTFT); zero if not streamed or never reached
+	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request
 	Token                string                   // Auth token (raw, will be hashed)
 	ModelID              string                   // Model alias name (what client requested)

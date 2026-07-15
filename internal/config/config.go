@@ -1037,10 +1037,20 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	// Resolve env variables in each broker address
+	// Resolve env variables in each broker address. A single YAML entry can
+	// resolve to a comma-separated list (documented KAFKA_BROKERS usage, e.g.
+	// "kafka1:9092,kafka2:9092") -- franz-go's kgo.SeedBrokers is variadic and
+	// does not split on commas itself, so each resolved value must be split
+	// and trimmed here before being treated as one or more seed addresses.
 	k.Brokers = make([]string, 0, len(temp.Brokers))
 	for _, broker := range temp.Brokers {
-		k.Brokers = append(k.Brokers, resolveEnvString(broker))
+		resolved := resolveEnvString(broker)
+		for part := range strings.SplitSeq(resolved, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				k.Brokers = append(k.Brokers, part)
+			}
+		}
 	}
 
 	// Topic and ClientID are not mandatory here — defaults are applied by
@@ -1526,13 +1536,34 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate Kafka config
+	// Validate Kafka config. Mirrors kafkalog.Config.Validate() so malformed
+	// Kafka config (bad SASL settings, non-positive queue/batch/flush values)
+	// fails fast at startup instead of surfacing only when kafkalog.New runs
+	// (see initializeKafkaLog, which degrades to NoopManager on that failure --
+	// silently dropping spend data if litellm_db.disable_spend_logs_write=true).
 	if c.Kafka.Enabled {
 		if len(c.Kafka.Brokers) == 0 {
 			return fmt.Errorf("kafka.brokers is required when kafka is enabled")
 		}
 		if c.Kafka.Topic == "" {
 			return fmt.Errorf("kafka.topic is required when kafka is enabled")
+		}
+		if c.Kafka.LogQueueSize <= 0 {
+			return fmt.Errorf("kafka.log_queue_size must be positive, got: %d", c.Kafka.LogQueueSize)
+		}
+		if c.Kafka.LogBatchSize <= 0 {
+			return fmt.Errorf("kafka.log_batch_size must be positive, got: %d", c.Kafka.LogBatchSize)
+		}
+		if c.Kafka.LogFlushInterval <= 0 {
+			return fmt.Errorf("kafka.log_flush_interval must be positive, got: %s", c.Kafka.LogFlushInterval)
+		}
+		switch c.Kafka.SASLMechanism {
+		case "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512":
+		default:
+			return fmt.Errorf("kafka.sasl_mechanism unsupported, got: %s", c.Kafka.SASLMechanism)
+		}
+		if c.Kafka.SASLMechanism != "" && (c.Kafka.SASLUsername == "" || c.Kafka.SASLPassword == "") {
+			return fmt.Errorf("kafka.sasl_username and kafka.sasl_password are required when kafka.sasl_mechanism is set")
 		}
 	}
 
