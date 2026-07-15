@@ -138,6 +138,7 @@ func TestProviderConverter_RequestFrom_GeminiImageGeneration_Size(t *testing.T) 
 		{size: "1792x2400", aspectRatio: "3:4", imageSize: "2K"},
 		{size: "896x1152", aspectRatio: "4:5", imageSize: "1K"},
 		{size: "640x1024", aspectRatio: "2:3", imageSize: "1K"},
+		{size: "792x168", aspectRatio: "21:9", imageSize: "512"},
 	}
 
 	for _, tt := range tests {
