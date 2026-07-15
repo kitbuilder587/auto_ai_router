@@ -42,7 +42,8 @@ type StreamUsageInfo struct {
 	CachedTokens        int // Tokens from cached prompt content (prompt_caching feature)
 	AudioInputTokens    int // Audio tokens in the request
 	AudioOutputTokens   int // Audio tokens in the response
-	ImageTokens         int // Image/video tokens (if reported)
+	ImageTokens         int // Input image/video tokens (if reported)
+	OutputImageTokens   int // Generated image/video tokens (if reported)
 	ReasoningTokens     int // Reasoning/thoughts tokens (output)
 	CacheCreationTokens int // Tokens created for cache (billed at different rate)
 	CacheReadTokens     int // Tokens read from cache (billed at cheaper rate)
@@ -98,10 +99,12 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
 				AudioTokens         int `json:"audio_tokens,omitempty"`
+				ImageTokens         int `json:"image_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AudioTokens     int `json:"audio_tokens,omitempty"`
 				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+				ImageTokens     int `json:"image_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
@@ -126,6 +129,8 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		CacheCreationTokens: cacheCreationTokens,
 		AudioInputTokens:    data.Usage.PromptTokensDetails.AudioTokens,
 		AudioOutputTokens:   data.Usage.CompletionTokensDetails.AudioTokens,
+		ImageTokens:         data.Usage.PromptTokensDetails.ImageTokens,
+		OutputImageTokens:   data.Usage.CompletionTokensDetails.ImageTokens,
 		ReasoningTokens:     data.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 }
@@ -169,6 +174,8 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		CacheCreationTokens: cacheCreationTokens,
 		AudioInputTokens:    usage.InputTokensDetails.AudioTokens,
 		AudioOutputTokens:   usage.OutputTokensDetails.AudioTokens,
+		ImageTokens:         usage.InputTokensDetails.ImageTokens,
+		OutputImageTokens:   usage.OutputTokensDetails.ImageTokens,
 		ReasoningTokens:     usage.OutputTokensDetails.ReasoningTokens,
 	}
 }
@@ -182,10 +189,12 @@ type responsesAPIUsage struct {
 		CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 		CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
 		AudioTokens         int `json:"audio_tokens,omitempty"`
+		ImageTokens         int `json:"image_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		ImageTokens     int `json:"image_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
 }
 
@@ -597,6 +606,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			if usageInfo.ImageTokens > 0 {
 				logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
 			}
+			if usageInfo.OutputImageTokens > 0 {
+				logCtx.TokenUsage.OutputImageTokens = usageInfo.OutputImageTokens
+			}
 			if usageInfo.ReasoningTokens > 0 {
 				logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
 			}
@@ -613,6 +625,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"audio_input_tokens", usageInfo.AudioInputTokens,
 				"audio_output_tokens", usageInfo.AudioOutputTokens,
 				"image_tokens", usageInfo.ImageTokens,
+				"output_image_tokens", usageInfo.OutputImageTokens,
 				"reasoning_tokens", usageInfo.ReasoningTokens,
 			)
 		}

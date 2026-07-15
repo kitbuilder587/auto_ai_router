@@ -266,6 +266,17 @@ func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfi
 	cfg := &genai.GenerationConfig{}
 	hasParams := false
 
+	// OpenAI exposes image generation as a built-in Responses tool. Vertex does
+	// not have an equivalent tool object; Gemini image models select generated
+	// image output through generationConfig.responseModalities instead.
+	for _, tool := range req.Tools {
+		if tool.Type == "image_generation" {
+			cfg.ResponseModalities = []genai.Modality{genai.Modality("IMAGE")}
+			hasParams = true
+			break
+		}
+	}
+
 	if req.MaxOutputTokens != nil {
 		cfg.MaxOutputTokens = int32(*req.MaxOutputTokens)
 		hasParams = true

@@ -133,6 +133,7 @@ type CompletionTokenDetails struct {
 	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 	AudioTokens              int `json:"audio_tokens,omitempty"`
 	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+	ImageTokens              int `json:"image_tokens,omitempty"`
 }
 
 type OpenAIUsage struct {
