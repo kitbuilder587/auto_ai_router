@@ -40,7 +40,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
-	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - usage.CacheCreationTokens
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - usage.CacheCreationTokens - usage.ImageTokens
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
@@ -61,7 +61,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Calculate "regular" output tokens by subtracting specialized token types
 	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
-		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens
+		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens - usage.OutputImageTokens
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}
@@ -139,16 +139,25 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Rejected prediction tokens count as regular output tokens
 	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
 
-	// Image cost calculation: supports both per-image and per-image-token pricing
-	// Priority: 1) Per-image cost if available (typical for image generation APIs)
-	//           2) Per-image-token cost as fallback (rarely used for image generation)
-	//           3) Default: $0 if neither is configured
-	if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
-		// Per-image cost (e.g., $0.02 per image)
-		costs.ImageCost = float64(usage.ImageCount) * price.OutputCostPerImage
-	} else if usage.ImageCount > 0 && price.OutputCostPerImageToken > 0 {
-		// Per-image-token cost fallback (rarely used for image generation)
-		costs.ImageCost = float64(usage.ImageCount) * price.OutputCostPerImageToken
+	// Input image tokens are part of PromptTokens. Price them separately when a
+	// modality-specific rate exists, otherwise keep the regular input rate.
+	inputImageCost := price.InputCostPerImageToken
+	if inputImageCost == 0 {
+		inputImageCost = inputCostPerToken
+	}
+	costs.ImageCost = float64(usage.ImageTokens) * inputImageCost
+
+	// Generated image tokens are part of CompletionTokens and must not also be
+	// charged as text. Prefer the token-based image rate when the provider reports
+	// a token breakdown; otherwise use the per-image price for Imagen-style APIs.
+	if usage.OutputImageTokens > 0 {
+		outputImageCost := price.OutputCostPerImageToken
+		if outputImageCost == 0 {
+			outputImageCost = outputCostPerToken
+		}
+		costs.ImageCost += float64(usage.OutputImageTokens) * outputImageCost
+	} else if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
+		costs.ImageCost += float64(usage.ImageCount) * price.OutputCostPerImage
 	}
 
 	// Calculate total

@@ -162,9 +162,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	var usageObject interface{}
 	if usage != nil {
 		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
+		promptTokensDetails["image_tokens"] = usage.ImageTokens
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
+		completionTokensDetails["image_tokens"] = usage.OutputImageTokens
 		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
 		completionTokensDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
 		completionTokensDetails["rejected_prediction_tokens"] = usage.RejectedPredictionTokens
@@ -180,11 +182,13 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	additionalUsage := map[string]interface{}{
 		"prompt_tokens_details": map[string]interface{}{
 			"audio_tokens":          promptTokensDetails["audio_tokens"],
+			"image_tokens":          promptTokensDetails["image_tokens"],
 			"cached_tokens":         promptTokensDetails["cached_tokens"],
 			"cache_creation_tokens": promptTokensDetails["cache_creation_tokens"],
 		},
 		"completion_tokens_details": map[string]interface{}{
 			"audio_tokens":               completionTokensDetails["audio_tokens"],
+			"image_tokens":               completionTokensDetails["image_tokens"],
 			"reasoning_tokens":           completionTokensDetails["reasoning_tokens"],
 			"accepted_prediction_tokens": completionTokensDetails["accepted_prediction_tokens"],
 			"rejected_prediction_tokens": completionTokensDetails["rejected_prediction_tokens"],
