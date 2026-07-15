@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -160,7 +161,9 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 
 	// Convert to OpenAI chat request format
 	chatReq := openai.OpenAIRequest{
-		Model: imageReq.Model,
+		Model:       imageReq.Model,
+		Temperature: imageReq.Temperature,
+		TopP:        imageReq.TopP,
 		Messages: []openai.OpenAIMessage{
 			{
 				Role:    "user",
@@ -170,6 +173,12 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 		ExtraBody: map[string]interface{}{
 			"generation_config": genConfig,
 		},
+	}
+	if imageReq.Seed != nil {
+		if *imageReq.Seed < math.MinInt32 || *imageReq.Seed > math.MaxInt32 {
+			return nil, fmt.Errorf("invalid image generation seed %d", *imageReq.Seed)
+		}
+		chatReq.Seed = imageReq.Seed
 	}
 	if imageReq.N != nil && *imageReq.N > 0 {
 		n := clampImageCount(*imageReq.N)
@@ -300,6 +309,20 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 		}
 		chatReq.Seed = &seed
 	}
+	if rawTemperature := strings.TrimSpace(fields["temperature"]); rawTemperature != "" {
+		temperature, err := parseImageEditFloat(rawTemperature, "temperature")
+		if err != nil {
+			return nil, err
+		}
+		chatReq.Temperature = &temperature
+	}
+	if rawTopP := strings.TrimSpace(fields["top_p"]); rawTopP != "" {
+		topP, err := parseImageEditFloat(rawTopP, "top_p")
+		if err != nil {
+			return nil, err
+		}
+		chatReq.TopP = &topP
+	}
 	if n := parsePositiveInt(fields["n"]); n > 0 {
 		n = clampImageCount(n)
 		chatReq.N = &n
@@ -397,6 +420,14 @@ func parsePositiveInt(raw string) int {
 		return 0
 	}
 	return n
+}
+
+func parseImageEditFloat(raw, name string) (float64, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("invalid image edit %s %q", name, raw)
+	}
+	return value, nil
 }
 
 func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {
