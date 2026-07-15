@@ -214,7 +214,7 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 }
 
 func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
-	buildMultipart := func(t *testing.T, model, size, seed string) ([]byte, string) {
+	buildMultipart := func(t *testing.T, model, size string, fields map[string]string) ([]byte, string) {
 		t.Helper()
 
 		var buf bytes.Buffer
@@ -223,8 +223,8 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		require.NoError(t, writer.WriteField("prompt", "Make the object blue"))
 		require.NoError(t, writer.WriteField("n", "2"))
 		require.NoError(t, writer.WriteField("size", size))
-		if seed != "" {
-			require.NoError(t, writer.WriteField("seed", seed))
+		for name, value := range fields {
+			require.NoError(t, writer.WriteField(name, value))
 		}
 
 		part, err := writer.CreatePart(textproto.MIMEHeader{
@@ -240,7 +240,11 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 	}
 
 	t.Run("multipart edit request converts to multimodal chat request", func(t *testing.T) {
-		body, contentType := buildMultipart(t, "gemini-2.5-flash-image-preview", "1792x1024", "0")
+		body, contentType := buildMultipart(t, "gemini-2.5-flash-image-preview", "1792x1024", map[string]string{
+			"seed":        "0",
+			"temperature": "0",
+			"top_p":       "0",
+		})
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.NoError(t, err)
 
@@ -251,6 +255,10 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		assert.Equal(t, 2, *chatReq.N)
 		require.NotNil(t, chatReq.Seed)
 		assert.Equal(t, int64(0), *chatReq.Seed)
+		require.NotNil(t, chatReq.Temperature)
+		assert.Equal(t, float64(0), *chatReq.Temperature)
+		require.NotNil(t, chatReq.TopP)
+		assert.Equal(t, float64(0), *chatReq.TopP)
 		require.Len(t, chatReq.Messages, 1)
 
 		blocks, ok := chatReq.Messages[0].Content.([]interface{})
@@ -275,7 +283,11 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 	})
 
 	t.Run("multipart edit uses model size profile", func(t *testing.T) {
-		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1792x2400", "42")
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1792x2400", map[string]string{
+			"seed":        "42",
+			"temperature": "2",
+			"top_p":       "1",
+		})
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.NoError(t, err)
 
@@ -287,15 +299,55 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		assert.Equal(t, "2K", imageConfig["imageSize"])
 		require.NotNil(t, chatReq.Seed)
 		assert.Equal(t, int64(42), *chatReq.Seed)
+		require.NotNil(t, chatReq.Temperature)
+		assert.Equal(t, float64(2), *chatReq.Temperature)
+		require.NotNil(t, chatReq.TopP)
+		assert.Equal(t, float64(1), *chatReq.TopP)
+	})
+
+	t.Run("omitted sampling parameters remain unset", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", nil)
+		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		assert.Nil(t, chatReq.Temperature)
+		assert.Nil(t, chatReq.TopP)
 	})
 
 	t.Run("invalid seed returns error", func(t *testing.T) {
-		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", "invalid")
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", map[string]string{
+			"seed": "invalid",
+		})
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		assert.Error(t, err)
 		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "invalid image edit seed")
 	})
+
+	for _, test := range []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "invalid temperature", field: "temperature", value: "invalid"},
+		{name: "NaN temperature", field: "temperature", value: "NaN"},
+		{name: "infinite temperature", field: "temperature", value: "+Inf"},
+		{name: "invalid top_p", field: "top_p", value: "invalid"},
+		{name: "NaN top_p", field: "top_p", value: "NaN"},
+		{name: "infinite top_p", field: "top_p", value: "+Inf"},
+	} {
+		t.Run(test.name+" returns error", func(t *testing.T) {
+			body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", map[string]string{
+				test.field: test.value,
+			})
+			result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+			assert.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "invalid image edit "+test.field)
+		})
+	}
 
 	t.Run("missing model returns error", func(t *testing.T) {
 		var buf bytes.Buffer

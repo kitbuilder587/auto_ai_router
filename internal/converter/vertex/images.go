@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -300,6 +301,20 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 		}
 		chatReq.Seed = &seed
 	}
+	if rawTemperature := strings.TrimSpace(fields["temperature"]); rawTemperature != "" {
+		temperature, err := parseImageEditFloat(rawTemperature, "temperature")
+		if err != nil {
+			return nil, err
+		}
+		chatReq.Temperature = &temperature
+	}
+	if rawTopP := strings.TrimSpace(fields["top_p"]); rawTopP != "" {
+		topP, err := parseImageEditFloat(rawTopP, "top_p")
+		if err != nil {
+			return nil, err
+		}
+		chatReq.TopP = &topP
+	}
 	if n := parsePositiveInt(fields["n"]); n > 0 {
 		n = clampImageCount(n)
 		chatReq.N = &n
@@ -397,6 +412,14 @@ func parsePositiveInt(raw string) int {
 		return 0
 	}
 	return n
+}
+
+func parseImageEditFloat(raw, name string) (float64, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("invalid image edit %s %q", name, raw)
+	}
+	return value, nil
 }
 
 func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {
