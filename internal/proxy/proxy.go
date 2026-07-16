@@ -158,6 +158,7 @@ type Proxy struct {
 	sessionStore         *SessionStore              // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl  bool                       // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	bedrockDailyQuota    *bedrockDailyQuotaTracker
 	version              string
 	commit               string
 }
@@ -221,6 +222,7 @@ func New(cfg *Config) *Proxy {
 		sessionStore:         sessionStore,
 		stickyAutoCacheCtrl:  cfg.SessionStickyAutoCacheCtrl,
 		drainUpstreamOnAbort: cfg.DrainUpstreamOnAbort,
+		bedrockDailyQuota:    newBedrockDailyQuotaTracker(),
 		client:               httputil.NewHTTPClient(httpClientCfg),
 		version:              cfg.Version,
 		commit:               cfg.Commit,
@@ -1142,7 +1144,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 		// Debug: log response headers
@@ -1156,7 +1157,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			"headers", debugRespHeaders)
 
 		isStreamingResp = IsStreamingResponse(resp)
+		// Bedrock HTTP errors must be buffered even when the content type is an
+		// event stream so the provider-specific error body can be classified.
+		if cred.Type == config.ProviderTypeBedrock && resp.StatusCode >= http.StatusBadRequest {
+			isStreamingResp = false
+		}
 		if isStreamingResp {
+			p.recordProviderResponse(r.Context(), cred, modelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses
 			logCtx.TargetURL = targetURL
 			break
@@ -1170,6 +1177,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		bodyReadTimer.Stop()
 		if readErr != nil {
 			closeBody()
+			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
 				// Response too large — fatal, another credential won't help
 				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
@@ -1191,6 +1199,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			transportErr = readErr
 			continue
 		}
+
+		p.recordProviderResponse(r.Context(), cred, modelID, resp.StatusCode, resp.Header, responseBody)
 
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = ShouldRetryWithFallback(resp.StatusCode, responseBody)
