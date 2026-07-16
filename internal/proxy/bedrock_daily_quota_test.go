@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +44,14 @@ func TestParseRetryAfter(t *testing.T) {
 	deadline, ok = parseRetryAfter(wantDate.Format(http.TimeFormat), now)
 	require.True(t, ok)
 	assert.Equal(t, wantDate, deadline)
+
+	deadline, ok = parseRetryAfter("999999999999", now)
+	require.True(t, ok)
+	assert.Equal(t, now.Add(bedrockDailyQuotaRetryAfterMax), deadline)
+
+	deadline, ok = parseRetryAfter(now.Add(7*24*time.Hour).Format(http.TimeFormat), now)
+	require.True(t, ok)
+	assert.Equal(t, now.Add(bedrockDailyQuotaRetryAfterMax), deadline)
 
 	for _, value := range []string{"", "invalid", "-1", "0", now.Add(-time.Minute).Format(http.TimeFormat)} {
 		_, ok = parseRetryAfter(value, now)
@@ -156,6 +166,30 @@ func TestBedrockDailyQuotaTrackerRetryAfterDuplicateAndReset(t *testing.T) {
 	assert.Equal(t, time.Date(2026, time.January, 16, 0, 1, 0, 0, time.UTC), afterSuccess.BanUntil)
 }
 
+func TestDecodeResponseBodyPrefixLimitsCompressedBody(t *testing.T) {
+	body := []byte(`{"__type":"ThrottlingException","message":"Too many tokens per day"}` + strings.Repeat("x", bedrockDailyQuotaBodyScanLimit*8))
+	var compressed bytes.Buffer
+	gz := gzip.NewWriter(&compressed)
+	_, err := gz.Write(body)
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+
+	decoded := decodeResponseBodyPrefix(compressed.Bytes(), "gzip", bedrockDailyQuotaBodyScanLimit)
+	require.Len(t, decoded, bedrockDailyQuotaBodyScanLimit)
+	assert.True(t, isBedrockDailyTokenQuotaError(config.ProviderTypeBedrock, http.StatusTooManyRequests, decoded))
+
+	lateMarker := []byte(strings.Repeat("x", bedrockDailyQuotaBodyScanLimit) + `{"__type":"ThrottlingException","message":"Too many tokens per day"}`)
+	compressed.Reset()
+	gz = gzip.NewWriter(&compressed)
+	_, err = gz.Write(lateMarker)
+	require.NoError(t, err)
+	require.NoError(t, gz.Close())
+
+	decoded = decodeResponseBodyPrefix(compressed.Bytes(), "gzip", bedrockDailyQuotaBodyScanLimit)
+	require.Len(t, decoded, bedrockDailyQuotaBodyScanLimit)
+	assert.False(t, isBedrockDailyTokenQuotaError(config.ProviderTypeBedrock, http.StatusTooManyRequests, decoded))
+}
+
 func TestBedrockDailyQuotaTrackerConcurrentDuplicatesShareDeadline(t *testing.T) {
 	tracker := newBedrockDailyQuotaTracker()
 	now := time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC)
@@ -190,7 +224,7 @@ func TestRecordProviderResponseBansOnlyBedrockCredentialModelPair(t *testing.T) 
 	proxy := NewTestProxyBuilder().WithCredentials(credentials...).Build()
 	body := []byte(`{"__type":"ThrottlingException","message":"Too many tokens per day"}`)
 
-	matched := proxy.recordProviderResponse(context.Background(), &credentials[0], "claude-opus", http.StatusTooManyRequests,
+	matched := proxy.recordProviderResponse(context.Background(), &credentials[0], "claude-opus", "anthropic.claude-opus-v1:0", http.StatusTooManyRequests,
 		http.Header{"Retry-After": []string{"3600"}}, body)
 
 	assert.True(t, matched)
@@ -208,10 +242,47 @@ func TestRecordProviderResponseBansOnlyBedrockCredentialModelPair(t *testing.T) 
 
 	// A regular Bedrock 429 follows the existing generic rules and is not
 	// mistaken for the daily token quota error.
-	matched = proxy.recordProviderResponse(context.Background(), &credentials[1], "claude-sonnet", http.StatusTooManyRequests,
+	matched = proxy.recordProviderResponse(context.Background(), &credentials[1], "claude-sonnet", "anthropic.claude-sonnet-v1:0", http.StatusTooManyRequests,
 		nil, []byte(`{"__type":"ThrottlingException","message":"Rate exceeded"}`))
 	assert.False(t, matched)
 	assert.False(t, proxy.balancer.IsBanned("bedrock-b", "claude-sonnet"))
+}
+
+func TestRecordProviderResponseBansAliasesForSameBedrockModelID(t *testing.T) {
+	credential := config.CredentialConfig{
+		Name: "bedrock-a", Type: config.ProviderTypeBedrock, BaseURL: "https://bedrock-a.example", APIKey: "a", RPM: 100,
+	}
+	builder := NewTestProxyBuilder().WithCredentials(credential)
+	builder.config.ModelManager = models.New(builder.config.Logger, 50, []config.ModelRPMConfig{
+		{Name: "opus-primary", Model: "anthropic.claude-opus-v1:0", Credential: "bedrock-a"},
+		{Name: "opus-secondary", Model: "anthropic.claude-opus-v1:0", Credential: "bedrock-a"},
+		{Name: "sonnet", Model: "anthropic.claude-sonnet-v1:0", Credential: "bedrock-a"},
+	})
+	builder.config.ModelManager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	proxy := builder.Build()
+
+	matched := proxy.recordProviderResponse(
+		context.Background(),
+		&credential,
+		"opus-primary",
+		"anthropic.claude-opus-v1:0",
+		http.StatusTooManyRequests,
+		http.Header{"Retry-After": []string{"3600"}},
+		[]byte(`{"__type":"ThrottlingException","message":"Too many tokens per day"}`),
+	)
+
+	require.True(t, matched)
+	assert.True(t, proxy.balancer.IsBanned("bedrock-a", "opus-primary"))
+	assert.True(t, proxy.balancer.IsBanned("bedrock-a", "opus-secondary"))
+	assert.False(t, proxy.balancer.IsBanned("bedrock-a", "sonnet"))
+
+	decision := proxy.bedrockDailyQuota.nextBan(
+		"bedrock-a",
+		"anthropic.claude-opus-v1:0",
+		time.Now().UTC(),
+		"",
+	)
+	assert.Equal(t, bedrockDailyQuotaPhaseRetryAfter, decision.Phase)
 }
 
 func TestProxyRequest_BedrockDailyQuotaStreamingErrorBansPairAndRetries(t *testing.T) {

@@ -24,6 +24,7 @@ const (
 	bedrockDailyQuotaDeadlineHeuristic  = "heuristic"
 
 	bedrockDailyQuotaBodyScanLimit = 8 * 1024
+	bedrockDailyQuotaRetryAfterMax = 24 * time.Hour
 )
 
 var bedrockDailyQuotaResetHours = [...]int{4, 5, 6, 7, 8}
@@ -76,7 +77,11 @@ func parseRetryAfter(value string, now time.Time) (time.Time, bool) {
 		if seconds <= 0 {
 			return time.Time{}, false
 		}
-		return now.UTC().Add(time.Duration(seconds) * time.Second), true
+		maxSeconds := int64(bedrockDailyQuotaRetryAfterMax / time.Second)
+		if seconds > maxSeconds {
+			return now.UTC().Add(bedrockDailyQuotaRetryAfterMax), true
+		}
+		return capRetryAfterDeadline(now.UTC().Add(time.Duration(seconds)*time.Second), now), true
 	}
 
 	deadline, err := http.ParseTime(value)
@@ -87,7 +92,15 @@ func parseRetryAfter(value string, now time.Time) (time.Time, bool) {
 	if !deadline.After(now.UTC()) {
 		return time.Time{}, false
 	}
-	return deadline, true
+	return capRetryAfterDeadline(deadline, now), true
+}
+
+func capRetryAfterDeadline(deadline, now time.Time) time.Time {
+	maxDeadline := now.UTC().Add(bedrockDailyQuotaRetryAfterMax)
+	if deadline.After(maxDeadline) {
+		return maxDeadline
+	}
+	return deadline
 }
 
 func (t *bedrockDailyQuotaTracker) nextBan(credential, model string, now time.Time, retryAfter string) bedrockDailyQuotaDecision {
@@ -174,6 +187,7 @@ func (p *Proxy) recordProviderResponse(
 	ctx context.Context,
 	credential *config.CredentialConfig,
 	model string,
+	providerModel string,
 	statusCode int,
 	headers http.Header,
 	body []byte,
@@ -184,26 +198,32 @@ func (p *Proxy) recordProviderResponse(
 
 	classificationBody := body
 	if len(body) > 0 && headers != nil {
-		classificationBody = []byte(decodeResponseBody(body, headers.Get("Content-Encoding")))
+		classificationBody = decodeResponseBodyPrefix(body, headers.Get("Content-Encoding"), bedrockDailyQuotaBodyScanLimit)
 	}
 	if isBedrockDailyTokenQuotaError(credential.Type, statusCode, classificationBody) {
 		retryAfter := ""
 		if headers != nil {
 			retryAfter = headers.Get("Retry-After")
 		}
-		decision := p.bedrockDailyQuota.nextBan(credential.Name, model, utils.NowUTC(), retryAfter)
-		p.balancer.BanUntil(
-			credential.Name,
-			model,
-			statusCode,
-			decision.BanUntil,
-			bedrockDailyQuotaProviderError,
-		)
+		providerKey := bedrockDailyQuotaProviderModelKey(model, providerModel)
+		decision := p.bedrockDailyQuota.nextBan(credential.Name, providerKey, utils.NowUTC(), retryAfter)
+		bannedModels := p.bedrockDailyQuotaBanModels(credential.Name, model, providerKey)
+		for _, bannedModel := range bannedModels {
+			p.balancer.BanUntil(
+				credential.Name,
+				bannedModel,
+				statusCode,
+				decision.BanUntil,
+				bedrockDailyQuotaProviderError,
+			)
+		}
 		p.logger.ErrorContext(ctx, "Bedrock daily token quota exhausted; route banned",
 			"error_code", statusCode,
 			"credential", credential.Name,
 			"provider", string(credential.Type),
 			"model", model,
+			"provider_model", providerKey,
+			"banned_models", bannedModels,
 			"provider_error", bedrockDailyQuotaProviderError,
 			"recovery_phase", decision.Phase,
 			"deadline_source", decision.Source,
@@ -213,10 +233,33 @@ func (p *Proxy) recordProviderResponse(
 	}
 
 	if credential.Type == config.ProviderTypeBedrock && statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
-		p.bedrockDailyQuota.reset(credential.Name, model)
+		p.bedrockDailyQuota.reset(credential.Name, bedrockDailyQuotaProviderModelKey(model, providerModel))
 	}
 	p.balancer.RecordResponse(credential.Name, model, statusCode)
 	return false
+}
+
+func bedrockDailyQuotaProviderModelKey(model, providerModel string) string {
+	if providerModel != "" {
+		return providerModel
+	}
+	return model
+}
+
+func (p *Proxy) bedrockDailyQuotaBanModels(credentialName, model, providerModel string) []string {
+	banned := []string{model}
+	seen := map[string]struct{}{model: {}}
+	if p.modelManager == nil || providerModel == "" {
+		return banned
+	}
+	for _, alias := range p.modelManager.GetAliasesForCredentialRealModel(credentialName, providerModel) {
+		if _, ok := seen[alias]; ok {
+			continue
+		}
+		seen[alias] = struct{}{}
+		banned = append(banned, alias)
+	}
+	return banned
 }
 
 func nextBedrockDailyQuotaResetCheckpoint(now time.Time) (time.Time, bool) {

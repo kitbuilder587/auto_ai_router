@@ -1163,7 +1163,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			isStreamingResp = false
 		}
 		if isStreamingResp {
-			p.recordProviderResponse(r.Context(), cred, modelID, resp.StatusCode, resp.Header, nil)
+			p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses
 			logCtx.TargetURL = targetURL
 			break
@@ -1200,7 +1200,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		p.recordProviderResponse(r.Context(), cred, modelID, resp.StatusCode, resp.Header, responseBody)
+		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = ShouldRetryWithFallback(resp.StatusCode, responseBody)
