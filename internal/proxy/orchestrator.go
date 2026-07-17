@@ -73,6 +73,25 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
+	// Enforce the key's model allow-list now that the model is known. The master
+	// key (admin scope) bypasses this. Previously IsModelAllowed was never checked
+	// in prod because auth ran before the body/model was parsed (todo P0.3).
+	if !logCtx.Scope.Admin && logCtx.TokenInfo != nil && !logCtx.TokenInfo.IsModelAllowed(modelID) {
+		p.logger.WarnContext(r.Context(), "Model not allowed for this API key",
+			"error_code", http.StatusForbidden, "model", modelID)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusForbidden
+		logCtx.ErrorMsg = "model not allowed for this key"
+		WriteErrorForbidden(w, "Model not allowed for this API key")
+		return nil, false
+	}
+
+	// Atomic Redis budget reservation + per-key/team/org RPM/TPM enforcement
+	// (no-op when Redis is disabled; admin bypasses). Runs after the model is known.
+	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
+		return nil, false
+	}
+
 	// proxyBody: body with the original alias restored.
 	// Proxy credentials handle their own model routing, so they must receive the
 	// alias ("anthropic/claude-sonnet-4.6"), not the provider-specific real name
@@ -343,7 +362,7 @@ func (p *Proxy) authenticateRequest(
 	}
 	logCtx.Token = token
 
-	if token == p.masterKey {
+	if p.isMasterKey(token) {
 		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
 		logCtx.Scope = scope.AdminContext()
 		return true

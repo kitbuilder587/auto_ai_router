@@ -201,6 +201,89 @@ func TestTokenInfo_IsModelAllowed_ModelNotInList(t *testing.T) {
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
+// ==================== IsModelAllowed sentinel tests ====================
+// LiteLLM stores "all-proxy-models" / "all-team-models" inside
+// VerificationToken.models instead of real model names (confirmed against a
+// production LiteLLM_VerificationToken dump: 178 keys use all-proxy-models,
+// 42 use all-team-models).
+
+func TestTokenInfo_IsModelAllowed_AllProxyModels_AnyModelAllowed(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"all-proxy-models"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.True(t, token.IsModelAllowed("claude-3"))
+	assert.True(t, token.IsModelAllowed("anything"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllProxyModels_MixedWithRealNames(t *testing.T) {
+	// Sentinel can appear alongside real model names in the array - still unrestricted.
+	token := &TokenInfo{
+		Models: []string{"gpt-4", "all-proxy-models"},
+	}
+
+	assert.True(t, token.IsModelAllowed("claude-3"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModels_NoTeam_Unrestricted(t *testing.T) {
+	// No team to inherit from -> falls back to unrestricted, same as empty Models.
+	token := &TokenInfo{
+		Models: []string{"all-team-models"},
+		TeamID: "",
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.True(t, token.IsModelAllowed("claude-3"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModels_UsesTeamAllowList(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{"all-team-models"},
+		TeamID:     "team1",
+		TeamModels: []string{"gpt-4"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("claude-3"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModels_TeamHasEmptyList_Unrestricted(t *testing.T) {
+	// Team itself has no restriction (empty models = all allowed).
+	token := &TokenInfo{
+		Models:     []string{"all-team-models"},
+		TeamID:     "team1",
+		TeamModels: nil,
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.True(t, token.IsModelAllowed("claude-3"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModels_TeamAlsoAllowsAllProxyModels(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{"all-team-models"},
+		TeamID:     "team1",
+		TeamModels: []string{"all-proxy-models"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.True(t, token.IsModelAllowed("claude-3"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModels_KeyTeamModelsIgnoredWithoutSentinel(t *testing.T) {
+	// TeamModels must only apply when the "all-team-models" sentinel is present -
+	// a key with its own explicit model list is not implicitly widened by the team's list.
+	token := &TokenInfo{
+		Models:     []string{"gpt-4"},
+		TeamID:     "team1",
+		TeamModels: []string{"claude-3"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("claude-3"))
+}
+
 // ==================== Budget Check Helper Tests ====================
 
 func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {
@@ -477,4 +560,17 @@ func TestTokenInfo_ComplexValidation(t *testing.T) {
 	token.TeamMemberSpend = &newMemberSpend
 	err = token.Validate("gpt-4")
 	assert.ErrorIs(t, err, ErrBudgetExceeded)
+}
+
+func TestTokenInfo_Validate_AllTeamModelsSentinel_ResolvedThroughFullValidate(t *testing.T) {
+	token := &TokenInfo{
+		Token:      "test-token",
+		UserID:     "user1",
+		TeamID:     "team1",
+		Models:     []string{"all-team-models"},
+		TeamModels: []string{"gpt-4"},
+	}
+
+	assert.NoError(t, token.Validate("gpt-4"))
+	assert.ErrorIs(t, token.Validate("claude-3"), ErrModelNotAllowed)
 }

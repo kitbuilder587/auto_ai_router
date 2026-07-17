@@ -243,6 +243,7 @@ func (sl *Logger) Stats() models.SpendLoggerStats {
 		QueueFullCount:      atomic.LoadUint64(&sl.queueFullCount),
 		AggregationCount:    atomic.LoadUint64(&sl.aggregationCount),
 		AggregationErrors:   atomic.LoadUint64(&sl.aggregationErrors),
+		DLQDropped:          atomic.LoadUint64(&sl.dlqOverflow),
 		LastAggregationTime: lastAgg,
 	}
 }
@@ -516,10 +517,12 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 		sl.dlq = sl.dlq[1:]
 		atomic.AddUint64(&sl.dlqOverflow, 1)
 
-		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped",
-			"dropped_batch_size", len(dropped.batch),
+		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped (billing data loss)",
+			"dropped_records", len(dropped.batch),
 			"dropped_at", dropped.failedAt,
 			"dlq_size", len(sl.dlq),
+			"total_dropped", atomic.LoadUint64(&sl.dlqOverflow),
+			"sample_request_ids", getSampleRequestIDs(dropped.batch, 3),
 			"reason", "dlq_full",
 		)
 	}
