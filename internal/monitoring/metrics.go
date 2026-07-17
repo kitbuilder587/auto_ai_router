@@ -2,11 +2,14 @@ package monitoring
 
 import (
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+var shadowSpendAggregationOldestUnixNano atomic.Int64
 
 var (
 	RequestsTotal = promauto.NewCounterVec(
@@ -154,10 +157,8 @@ var (
 		},
 	)
 
-	// Kafka spend-log publisher metrics (internal/kafkalog). These mirror
-	// kafkalog.Stats snapshots (cumulative queue/DLQ counters), so gauges are
-	// used even for monotonic counts rather than prometheus.Counter, which
-	// would double-count on every periodic poll.
+	// Kafka publisher stats are snapshots of cumulative counters, so gauges avoid
+	// double-counting when the periodic updater publishes a new snapshot.
 	KafkaSpendLoggerQueuedTotal = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_spend_logger_queued_total",
@@ -189,7 +190,7 @@ var (
 	KafkaSpendLoggerDLQSize = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_spend_logger_dlq_size",
-			Help: "Current number of batches held in the Kafka spend logger's dead letter queue",
+			Help: "Current number of batches held in the Kafka spend logger dead letter queue",
 		},
 	)
 
@@ -199,7 +200,183 @@ var (
 			Help: "Kafka broker connectivity for spend-log publishing (1 = healthy, 0 = unhealthy)",
 		},
 	)
+
+	ShadowSpendSinkHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_sink_healthy",
+			Help: "Whether the isolated shadow spend sink passed startup guard and is healthy (1=yes)",
+		},
+	)
+
+	ShadowSpendSinkStartupFailuresTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_sink_startup_failures_total",
+			Help: "Critical shadow sink startup failures; proxy traffic remains fail-open",
+		},
+		[]string{"reason"},
+	)
+
+	ShadowSpendQueueDepth = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_queue_depth",
+			Help: "Current number of spend entries waiting in the input channel",
+		},
+	)
+
+	ShadowSpendPendingEntries = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_pending_entries",
+			Help: "Accepted spend entries not yet resolved by the writer or DLQ",
+		},
+	)
+
+	ShadowSpendPendingAggregationDepth = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_pending_aggregation_depth",
+			Help: "Inserted spend batches waiting for or undergoing daily aggregation",
+		},
+	)
+
+	ShadowSpendDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_dlq_size",
+			Help: "Current number of batches in the in-memory spend dead letter queue",
+		},
+	)
+
+	ShadowSpendAggregationLagSeconds = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_aggregation_lag_seconds",
+			Help: "Age in seconds of the oldest outstanding daily aggregation batch",
+		},
+		func() float64 {
+			oldest := shadowSpendAggregationOldestUnixNano.Load()
+			if oldest == 0 {
+				return 0
+			}
+			lag := time.Since(time.Unix(0, oldest)).Seconds()
+			if lag < 0 {
+				return 0
+			}
+			return lag
+		},
+	)
+
+	ShadowSpendComparisonWindowValid = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_shadow_spend_comparison_window_valid",
+			Help: "Whether the current process-lifetime comparison window is transport-complete and fully aggregated",
+		},
+	)
+
+	ShadowSpendDroppedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_dropped_total",
+			Help: "Total spend entries dropped before persistence",
+		},
+	)
+
+	ShadowSpendDLQOverflowTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_dlq_overflow_total",
+			Help: "Total spend batches lost because the in-memory DLQ was full",
+		},
+	)
+
+	ShadowSpendDuplicatesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_duplicates_total",
+			Help: "Total raw rows ignored by request_id ON CONFLICT",
+		},
+	)
+
+	ShadowSpendAggregationErrorsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_aggregation_errors_total",
+			Help: "Total terminal atomic accounting failures with an ambiguous commit outcome",
+		},
+	)
+
+	ShadowSpendPendingAggregationOverflowTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_pending_aggregation_overflow_total",
+			Help: "Total inserted spend batches that could not enter the daily aggregation queue",
+		},
+	)
+
+	ShadowSpendComparisonRowsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_comparison_rows_total",
+			Help: "Newly persisted shadow rows by comparison eligibility",
+		},
+		[]string{"eligibility"},
+	)
 )
+
+// ShadowSpendSnapshot contains instantaneous spend writer state. Loss/error
+// counters are recorded separately so repeated snapshots cannot double count.
+type ShadowSpendSnapshot struct {
+	QueueDepth            int
+	PendingEntries        int
+	PendingAggregation    int
+	DLQSize               int
+	AggregationLag        time.Duration
+	ComparisonWindowValid bool
+}
+
+func ObserveShadowSpendSnapshot(snapshot ShadowSpendSnapshot) {
+	ShadowSpendQueueDepth.Set(float64(snapshot.QueueDepth))
+	ShadowSpendPendingEntries.Set(float64(snapshot.PendingEntries))
+	ShadowSpendPendingAggregationDepth.Set(float64(snapshot.PendingAggregation))
+	ShadowSpendDLQSize.Set(float64(snapshot.DLQSize))
+	if snapshot.PendingAggregation == 0 {
+		shadowSpendAggregationOldestUnixNano.Store(0)
+	} else {
+		shadowSpendAggregationOldestUnixNano.Store(time.Now().Add(-snapshot.AggregationLag).UnixNano())
+	}
+	if snapshot.ComparisonWindowValid {
+		ShadowSpendComparisonWindowValid.Set(1)
+	} else {
+		ShadowSpendComparisonWindowValid.Set(0)
+	}
+}
+
+func addCounter(counter prometheus.Counter, count uint64) {
+	if count > 0 {
+		counter.Add(float64(count))
+	}
+}
+
+func RecordShadowSpendDropped(count uint64) {
+	addCounter(ShadowSpendDroppedTotal, count)
+}
+
+func RecordShadowSpendDLQOverflow(count uint64) {
+	addCounter(ShadowSpendDLQOverflowTotal, count)
+}
+
+func RecordShadowSpendDuplicates(count uint64) {
+	addCounter(ShadowSpendDuplicatesTotal, count)
+}
+
+func RecordShadowSpendAggregationErrors(count uint64) {
+	addCounter(ShadowSpendAggregationErrorsTotal, count)
+}
+
+func RecordShadowSpendPendingAggregationOverflow(count uint64) {
+	addCounter(ShadowSpendPendingAggregationOverflowTotal, count)
+}
+
+func RecordShadowSpendComparisonRows(eligible bool, count uint64) {
+	if count == 0 {
+		return
+	}
+	label := "ineligible"
+	if eligible {
+		label = "eligible"
+	}
+	ShadowSpendComparisonRowsTotal.WithLabelValues(label).Add(float64(count))
+}
 
 type Metrics struct {
 	enabled bool
@@ -250,6 +427,32 @@ func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {
 		return
 	}
 	AbortedRequestsTotal.WithLabelValues(credential, model, endpoint).Inc()
+}
+
+func (m *Metrics) SetShadowSpendSinkHealthy(healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	SetShadowSpendSinkHealthy(healthy)
+}
+
+// SetShadowSpendSinkHealthy publishes live health transitions from the
+// isolated shadow connection pool. Registration/export remains controlled by
+// the configured Prometheus/OTEL sinks.
+func SetShadowSpendSinkHealthy(healthy bool) {
+	if healthy {
+		ShadowSpendSinkHealthy.Set(1)
+		return
+	}
+	ShadowSpendSinkHealthy.Set(0)
+}
+
+func (m *Metrics) RecordShadowSpendSinkStartupFailure(reason string) {
+	if !m.isEnabled() {
+		return
+	}
+	SetShadowSpendSinkHealthy(false)
+	ShadowSpendSinkStartupFailuresTotal.WithLabelValues(reason).Inc()
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {

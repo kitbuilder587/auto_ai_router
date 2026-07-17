@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
 
@@ -32,7 +31,7 @@ type aggregateOrgKey struct {
 // Returns error on any database operation failure.
 func aggregateDailyOrganizationSpendLogs(
 	ctx context.Context,
-	conn *pgxpool.Conn,
+	conn dailySpendExecer,
 	logger *slog.Logger,
 	records []spendLogRecord,
 ) error {

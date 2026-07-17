@@ -19,7 +19,8 @@ COPY . .
 # Build the application
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}" -o auto_ai_router ./cmd/server
+RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}" -o auto_ai_router ./cmd/server && \
+    go build -ldflags="-s -w" -o shadow-compare ./cmd/shadow-compare
 
 # Final stage
 FROM alpine:latest
@@ -35,6 +36,7 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/auto_ai_router .
+COPY --from=builder /app/shadow-compare .
 
 # Change ownership
 RUN chown -R appuser:appuser /app

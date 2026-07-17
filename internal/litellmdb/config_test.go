@@ -137,6 +137,8 @@ func TestErrorExports(t *testing.T) {
 	assert.NotNil(t, ErrModuleDisabled)
 	assert.NotNil(t, ErrTokenNotFound)
 	assert.NotNil(t, ErrTokenBlocked)
+	assert.NotNil(t, ErrTeamBlocked)
+	assert.NotNil(t, ErrProjectBlocked)
 	assert.NotNil(t, ErrTokenExpired)
 	assert.NotNil(t, ErrBudgetExceeded)
 	assert.NotNil(t, ErrModelNotAllowed)
