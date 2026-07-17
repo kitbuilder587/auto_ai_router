@@ -9,8 +9,8 @@ const (
 	tokenTiering272kThreshold = 272_000
 )
 
-// CalculateTokenCosts computes costs based on token usage and model pricing
-// Returns nil if price is nil (model not found in pricing database)
+// CalculateTokenCosts preserves the production cost-calculation contract.
+// Returns nil if price is nil (model not found in pricing database).
 //
 // IMPORTANT: Handles two token counting semantics:
 //  1. Vertex/OpenAI: Audio/Cached/Reasoning tokens are INCLUDED in PromptTokens/CompletionTokens
@@ -23,6 +23,17 @@ const (
 // - Vertex/OpenAI: 100 - 5 - 20 = 75 regular, then add audio and cached separately
 // - Anthropic: 100 - 0 - 0 = 100 regular (since those tokens are in separate fields)
 func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *converter.TokenCosts {
+	return calculateTokenCosts(usage, price, false)
+}
+
+// CalculateShadowTokenCosts calculates the isolated LiteLLM-parity spend. It
+// can evolve independently while comparison data is collected, without
+// changing the production billing calculation.
+func CalculateShadowTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *converter.TokenCosts {
+	return calculateTokenCosts(usage, price, true)
+}
+
+func calculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice, isolatedSpend bool) *converter.TokenCosts {
 	if usage == nil || price == nil {
 		return nil
 	}
@@ -40,7 +51,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
-	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - usage.CacheCreationTokens - usage.ImageTokens
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens -
+		usage.CacheCreationTokens - usage.ImageTokens
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
@@ -62,6 +74,9 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Calculate "regular" output tokens by subtracting specialized token types
 	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
 		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens - usage.OutputImageTokens
+	if isolatedSpend {
+		regularOutputTokens -= usage.CachedOutputTokens
+	}
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}
@@ -139,25 +154,42 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Rejected prediction tokens count as regular output tokens
 	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
 
-	// Input image tokens are part of PromptTokens. Price them separately when a
-	// modality-specific rate exists, otherwise keep the regular input rate.
-	inputImageCost := price.InputCostPerImageToken
-	if inputImageCost == 0 {
-		inputImageCost = inputCostPerToken
-	}
-	costs.ImageCost = float64(usage.ImageTokens) * inputImageCost
-
-	// Generated image tokens are part of CompletionTokens and must not also be
-	// charged as text. Prefer the token-based image rate when the provider reports
-	// a token breakdown; otherwise use the per-image price for Imagen-style APIs.
-	if usage.OutputImageTokens > 0 {
-		outputImageCost := price.OutputCostPerImageToken
-		if outputImageCost == 0 {
-			outputImageCost = outputCostPerToken
+	if isolatedSpend {
+		// The isolated calculation exposes image directions separately and
+		// follows LiteLLM's per-image precedence for image-generation calls.
+		inputImagePrice := price.InputCostPerImageToken
+		if inputImagePrice == 0 {
+			inputImagePrice = price.InputCostPerToken
 		}
-		costs.ImageCost += float64(usage.OutputImageTokens) * outputImageCost
-	} else if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
-		costs.ImageCost += float64(usage.ImageCount) * price.OutputCostPerImage
+		costs.InputImageCost = float64(usage.ImageTokens) * inputImagePrice
+
+		if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
+			costs.OutputImageCost = float64(usage.ImageCount) * price.OutputCostPerImage
+		} else {
+			outputImagePrice := price.OutputCostPerImageToken
+			if outputImagePrice == 0 {
+				outputImagePrice = price.OutputCostPerToken
+			}
+			costs.OutputImageCost = float64(usage.OutputImageTokens) * outputImagePrice
+		}
+		costs.ImageCost = costs.InputImageCost + costs.OutputImageCost
+	} else {
+		// Preserve the existing production precedence and aggregate image field.
+		inputImagePrice := price.InputCostPerImageToken
+		if inputImagePrice == 0 {
+			inputImagePrice = inputCostPerToken
+		}
+		costs.ImageCost = float64(usage.ImageTokens) * inputImagePrice
+
+		if usage.OutputImageTokens > 0 {
+			outputImagePrice := price.OutputCostPerImageToken
+			if outputImagePrice == 0 {
+				outputImagePrice = outputCostPerToken
+			}
+			costs.ImageCost += float64(usage.OutputImageTokens) * outputImagePrice
+		} else if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
+			costs.ImageCost += float64(usage.ImageCount) * price.OutputCostPerImage
+		}
 	}
 
 	// Calculate total
@@ -187,4 +219,9 @@ func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
 // CalculateCosts returns the full cost breakdown for all token types.
 func (p *ModelPrice) CalculateCosts(usage *converter.TokenUsage) *converter.TokenCosts {
 	return CalculateTokenCosts(usage, p)
+}
+
+// CalculateShadowCosts returns the isolated LiteLLM-parity cost breakdown.
+func (p *ModelPrice) CalculateShadowCosts(usage *converter.TokenUsage) *converter.TokenCosts {
+	return CalculateShadowTokenCosts(usage, p)
 }

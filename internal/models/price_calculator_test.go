@@ -57,6 +57,64 @@ func TestCalculateTokenCosts_ImagenUsesPerImageRate(t *testing.T) {
 	assert.InDelta(t, 0.036, costs.TotalCost, 1e-12)
 }
 
+func TestCalculateShadowTokenCosts_ImageInputTokensUseImageRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens: 100,
+		ImageTokens:  40,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:      0.01,
+		InputCostPerImageToken: 0.03,
+	}
+
+	costs := CalculateShadowTokenCosts(usage, price)
+
+	assert.InDelta(t, 0.6, costs.InputCost, 1e-12)
+	assert.InDelta(t, 1.2, costs.InputImageCost, 1e-12)
+	assert.Zero(t, costs.OutputImageCost)
+	assert.InDelta(t, 1.2, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 1.8, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateShadowTokenCosts_ImageOutputTokensUseImageRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		CompletionTokens:  100,
+		OutputImageTokens: 80,
+	}
+	price := &ModelPrice{
+		OutputCostPerToken:      0.02,
+		OutputCostPerImageToken: 0.05,
+	}
+
+	costs := CalculateShadowTokenCosts(usage, price)
+
+	assert.InDelta(t, 0.4, costs.OutputCost, 1e-12)
+	assert.Zero(t, costs.InputImageCost)
+	assert.InDelta(t, 4.0, costs.OutputImageCost, 1e-12)
+	assert.InDelta(t, 4.0, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 4.4, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateShadowTokenCosts_PerImagePriceTakesPriorityForOutput(t *testing.T) {
+	usage := &converter.TokenUsage{
+		CompletionTokens:  100,
+		OutputImageTokens: 80,
+		ImageCount:        2,
+	}
+	price := &ModelPrice{
+		OutputCostPerToken:      0.02,
+		OutputCostPerImageToken: 0.05,
+		OutputCostPerImage:      1.5,
+	}
+
+	costs := CalculateShadowTokenCosts(usage, price)
+
+	assert.InDelta(t, 0.4, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 3.0, costs.OutputImageCost, 1e-12)
+	assert.InDelta(t, 3.0, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 3.4, costs.TotalCost, 1e-12)
+}
+
 func TestCalculateTokenCosts_Vertex_WithAudioAndCached(t *testing.T) {
 	// Vertex semantic: audio and cached are INCLUDED in totals
 	// promptTokenCount=100 includes AudioInputTokens=5 and CachedInputTokens=20
@@ -218,6 +276,40 @@ func TestCalculateTokenCosts_CachedFallbackToRegularPrice(t *testing.T) {
 
 	// Total: 1.0
 	assert.Equal(t, 1.0, costs.TotalCost)
+}
+
+func TestCalculateShadowTokenCosts_CachedOutputIsNotDoubleCounted(t *testing.T) {
+	usage := &converter.TokenUsage{
+		CompletionTokens:   100,
+		CachedOutputTokens: 20,
+	}
+	price := &ModelPrice{
+		OutputCostPerToken:       0.02,
+		OutputCostPerCachedToken: 0.005,
+	}
+
+	costs := CalculateShadowTokenCosts(usage, price)
+
+	assert.InDelta(t, 1.6, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 0.1, costs.CachedOutputCost, 1e-12)
+	assert.InDelta(t, 1.7, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_PreservesProductionCachedOutputSemantics(t *testing.T) {
+	usage := &converter.TokenUsage{
+		CompletionTokens:   100,
+		CachedOutputTokens: 20,
+	}
+	price := &ModelPrice{
+		OutputCostPerToken:       0.02,
+		OutputCostPerCachedToken: 0.005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 2.0, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 0.1, costs.CachedOutputCost, 1e-12)
+	assert.InDelta(t, 2.1, costs.TotalCost, 1e-12)
 }
 
 func TestCalculateTokenCosts_SafetyNegativeTokens(t *testing.T) {
