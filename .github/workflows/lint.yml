@@ -128,5 +128,5 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
-    - name: Run spend-log integration tests
-      run: go test -race -tags=integration ./internal/shadowspend
+    - name: Run spend-pipeline integration tests
+      run: go test -race -tags=integration ./internal/shadowspend ./internal/proxy

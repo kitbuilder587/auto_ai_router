@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
@@ -69,4 +72,43 @@ func TestInjectStreamOptions_InvalidJSON(t *testing.T) {
 	if !bytes.Equal(modified, body) {
 		t.Fatalf("expected invalid json to be returned as-is")
 	}
+}
+
+func TestExtractSpendRequestFieldsPreservesJSONValuesAndTags(t *testing.T) {
+	body := []byte(`{
+		"model":"openai/gpt-4o-mini",
+		"metadata":{
+			"null_value":null,
+			"false_value":false,
+			"zero_value":0,
+			"empty_string":"",
+			"empty_array":[],
+			"empty_object":{},
+			"shape":{"nested":[true,0,"",null,false]}
+		},
+		"tags":["identity","", "identity","request"]
+	}`)
+
+	metadata, tags := extractSpendRequestFields(body, "application/json; charset=utf-8")
+	require.NotNil(t, metadata)
+	assert.Nil(t, metadata["null_value"])
+	assert.Equal(t, false, metadata["false_value"])
+	zero, ok := metadata["zero_value"].(json.Number)
+	require.True(t, ok, "zero must remain a JSON number")
+	assert.Equal(t, "0", zero.String())
+	assert.Equal(t, "", metadata["empty_string"])
+	assert.Empty(t, metadata["empty_array"])
+	assert.Empty(t, metadata["empty_object"])
+	encoded, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"null_value":null,
+		"false_value":false,
+		"zero_value":0,
+		"empty_string":"",
+		"empty_array":[],
+		"empty_object":{},
+		"shape":{"nested":[true,0,"",null,false]}
+	}`, string(encoded))
+	assert.Equal(t, []string{"identity", "", "identity", "request"}, tags)
 }

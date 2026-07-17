@@ -23,7 +23,7 @@ func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
 	if !ok {
 		return scope.PublicContext(), errInvalidScopeAuth
 	}
-	if token == p.masterKey {
+	if p.isMasterKey(token) {
 		return scope.AdminContext(), nil
 	}
 	if !p.isLiteLLMHealthy() {
@@ -69,6 +69,13 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 	)
 
 	return scope.NewContext(allowed, denied)
+}
+
+// ScopeContextFromTokenInfo derives the model/credential visibility scope from
+// an identity that has already passed the shared client authentication path.
+// Public endpoints use this to avoid validating the same token twice.
+func ScopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
+	return scopeContextFromTokenInfo(info)
 }
 
 func isLiteLLMMasterTokenInfo(info *dbmodels.TokenInfo) bool {

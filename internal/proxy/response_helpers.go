@@ -166,6 +166,44 @@ func extractMetadataFromBody(body []byte, contentType string) (string, bool, str
 	return model, stream, sessionID, modifiedBody
 }
 
+// extractSpendRequestFields captures client-provided metadata and tags before
+// provider conversions can remove or reshape them. UseNumber keeps JSON numeric
+// values as numbers (instead of lossy float64 conversions) while nested
+// null/false/zero/empty values are retained verbatim by json.Marshal.
+// Non-object metadata and non-string tag arrays are ignored; request validation
+// remains responsible for deciding whether a particular endpoint accepts them.
+func extractSpendRequestFields(body []byte, contentType string) (map[string]any, []string) {
+	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return nil, nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var envelope map[string]any
+	if err := decoder.Decode(&envelope); err != nil {
+		return nil, nil
+	}
+	metadata, _ := envelope["metadata"].(map[string]any)
+
+	rawTags, exists := envelope["tags"]
+	if !exists {
+		return metadata, nil
+	}
+	items, ok := rawTags.([]any)
+	if !ok {
+		return metadata, nil
+	}
+	tags := make([]string, 0, len(items))
+	for _, item := range items {
+		tag, ok := item.(string)
+		if !ok {
+			return metadata, nil
+		}
+		tags = append(tags, tag)
+	}
+	return metadata, tags
+}
+
 func extractMetadataFromMultipartBody(body []byte, contentType string) (string, string) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {

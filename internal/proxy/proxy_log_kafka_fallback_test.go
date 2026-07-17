@@ -2,11 +2,14 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,13 +20,30 @@ import (
 type stubLiteLLMManager struct {
 	litellmdb.NoopManager
 	loggedEntries []*models.SpendLogEntry
+	err           error
 }
 
 func (s *stubLiteLLMManager) IsEnabled() bool { return true }
 
 func (s *stubLiteLLMManager) LogSpend(entry *models.SpendLogEntry) error {
 	s.loggedEntries = append(s.loggedEntries, entry)
-	return nil
+	return s.err
+}
+
+func TestLogSpendToLiteLLMDB_SurfacesDualWriteFailure(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.metrics = monitoring.New(true)
+	kafkaErr := errors.New("kafka rejected event")
+	databaseErr := errors.New("postgres rejected event")
+	prx.kafkaLog = &stubKafkaManager{enabled: true, err: kafkaErr}
+	prx.LiteLLMDB = &stubLiteLLMManager{err: databaseErr}
+	before := testutil.ToFloat64(monitoring.ShadowSpendDualWriteFailuresTotal)
+
+	err := prx.logSpendToLiteLLMDB(testLogCtx(t))
+
+	require.ErrorIs(t, err, kafkaErr)
+	require.ErrorIs(t, err, databaseErr)
+	assert.Equal(t, before+1, testutil.ToFloat64(monitoring.ShadowSpendDualWriteFailuresTotal))
 }
 
 var _ litellmdb.Manager = (*stubLiteLLMManager)(nil)

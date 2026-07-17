@@ -21,6 +21,7 @@ func TestWriteJSONError(t *testing.T) {
 		{"404", http.StatusNotFound, "not_found_error"},
 		{"405", http.StatusMethodNotAllowed, "invalid_request_error"},
 		{"408", http.StatusRequestTimeout, "timeout_error"},
+		{"504", http.StatusGatewayTimeout, "timeout_error"},
 		{"413", http.StatusRequestEntityTooLarge, "invalid_request_error"},
 		{"429", http.StatusTooManyRequests, "rate_limit_error"},
 		{"500", http.StatusInternalServerError, "server_error"},
@@ -50,6 +51,7 @@ func TestWriteErrorConvenienceFunctions(t *testing.T) {
 		{"TooLarge", WriteErrorTooLarge, 413, "invalid_request_error"},
 		{"BadGateway", WriteErrorBadGateway, 502, "api_error"},
 		{"Timeout", WriteErrorTimeout, 408, "timeout_error"},
+		{"GatewayTimeout", WriteErrorGatewayTimeout, 504, "timeout_error"},
 		{"Unauthorized", WriteErrorUnauthorized, 401, "authentication_error"},
 		{"NotFound", WriteErrorNotFound, 404, "not_found_error"},
 		{"RateLimit", WriteErrorRateLimit, 429, "rate_limit_error"},
@@ -60,6 +62,49 @@ func TestWriteErrorConvenienceFunctions(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			tt.fn(recorder, "error: "+tt.name)
 			testhelpers.AssertJSONErrorResponse(t, recorder, tt.wantStatus, tt.wantType, "error: "+tt.name)
+		})
+	}
+}
+
+func TestNormalizeUpstreamErrorBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantType   string
+		wantMsg    string
+	}{
+		{
+			name:       "preserves anthropic overload type",
+			statusCode: 529,
+			body:       `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`,
+			wantType:   "overloaded_error",
+			wantMsg:    "busy",
+		},
+		{
+			name:       "normalizes scalar error",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"bad input"}`,
+			wantType:   "invalid_request_error",
+			wantMsg:    "bad input",
+		},
+		{
+			name:       "replaces null type",
+			statusCode: http.StatusTooManyRequests,
+			body:       `{"error":{"message":"slow down","type":null}}`,
+			wantType:   "rate_limit_error",
+			wantMsg:    "slow down",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := normalizeUpstreamErrorBody(tt.statusCode, []byte(tt.body))
+			recorder := httptest.NewRecorder()
+			recorder.Header().Set("Content-Type", "application/json")
+			recorder.WriteHeader(tt.statusCode)
+			_, _ = recorder.Write(body)
+			testhelpers.AssertJSONErrorResponse(t, recorder, tt.statusCode, tt.wantType, tt.wantMsg)
 		})
 	}
 }

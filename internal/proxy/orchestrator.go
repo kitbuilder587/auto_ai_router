@@ -67,9 +67,19 @@ func (p *Proxy) orchestrateRequest(
 	if !p.authenticateRequest(w, r, logCtx, isLiteLLMHealthy) {
 		return nil, false
 	}
+	if shouldExposeLiteLLMFinancialHeaders(logCtx) {
+		setLiteLLMKeyLimitHeadersForRequest(w.Header(), logCtx.TokenInfo, logCtx)
+		p.setCommittedKeySpendSnapshot(r.Context(), w.Header(), logCtx)
+		setLiteLLMResponseCostHeaderForRequest(w.Header(), 0, logCtx)
+	} else {
+		clearLiteLLMFinancialHeaders(w.Header())
+	}
 
 	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
+		return nil, false
+	}
+	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
 		return nil, false
 	}
 
@@ -313,14 +323,98 @@ func (p *Proxy) isLiteLLMHealthy() bool {
 	return p.LiteLLMDB.IsHealthy()
 }
 
+type clientCredentialState uint8
+
+const (
+	clientCredentialMissing clientCredentialState = iota
+	clientCredentialMalformed
+	clientCredentialPresent
+)
+
+// extractClientToken implements the public client-credential transport contract.
+// Authorization is authoritative whenever the header is present: a malformed
+// Bearer value must never fall through to a valid x-api-key value.
+func extractClientToken(r *http.Request) (string, clientCredentialState) {
+	if r == nil {
+		return "", clientCredentialMissing
+	}
+	authorizationValues, authorizationPresent := headerValuesFold(r.Header, "Authorization")
+	if authorizationPresent {
+		if len(authorizationValues) != 1 {
+			return "", clientCredentialMalformed
+		}
+		authHeader := strings.TrimSpace(authorizationValues[0])
+		if authHeader == "" {
+			return "", clientCredentialMissing
+		}
+		parts := strings.Fields(authHeader)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.ContainsRune(parts[1], ',') {
+			return "", clientCredentialMalformed
+		}
+		return parts[1], clientCredentialPresent
+	}
+	xAPIKeyValues, xAPIKeyPresent := headerValuesFold(r.Header, "X-Api-Key")
+	if !xAPIKeyPresent {
+		return "", clientCredentialMissing
+	}
+	if len(xAPIKeyValues) != 1 {
+		return "", clientCredentialMalformed
+	}
+	token := strings.TrimSpace(xAPIKeyValues[0])
+	if token == "" {
+		return "", clientCredentialMissing
+	}
+	if strings.ContainsAny(token, ", \t\r\n") {
+		return "", clientCredentialMalformed
+	}
+	return token, clientCredentialPresent
+}
+
+// headerValuesFold collects all values for a header name without relying on
+// canonical map keys. This keeps precedence and duplicate detection intact for
+// requests assembled by middleware that wrote directly to http.Header.
+func headerValuesFold(header http.Header, name string) ([]string, bool) {
+	var values []string
+	present := false
+	for key, currentValues := range header {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		present = true
+		values = append(values, currentValues...)
+	}
+	return values, present
+}
+
+// AuthenticateClientRequest authenticates a non-inference public endpoint by
+// using the exact same master-key/LiteLLM validation path as ProxyRequest.
+func (p *Proxy) AuthenticateClientRequest(w http.ResponseWriter, r *http.Request) (*models.TokenInfo, bool) {
+	if p == nil {
+		WriteErrorServiceUnavailable(w, "Service unavailable")
+		return nil, false
+	}
+	logCtx := &RequestLogContext{Request: r}
+	if !p.authenticateRequest(w, r, logCtx, p.isLiteLLMHealthy()) {
+		return nil, false
+	}
+	return logCtx.TokenInfo, true
+}
+
 func (p *Proxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,
 	isLiteLLMHealthy bool,
 ) bool {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	if trusted, ok := trustedClientAuthFromRequest(r); ok {
+		logCtx.Token = trusted.rawToken
+		logCtx.TokenInfo = trusted.tokenInfo
+		logCtx.Scope = scopeContextFromTokenInfo(trusted.tokenInfo)
+		return true
+	}
+
+	token, credentialState := extractClientToken(r)
+	if credentialState == clientCredentialMissing {
 		// Client-side error (bad request from the caller), not a service failure
 		p.logger.WarnContext(r.Context(), "Missing Authorization header",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
@@ -330,9 +424,7 @@ func (p *Proxy) authenticateRequest(
 		WriteErrorUnauthorized(w, "Missing Authorization header")
 		return false
 	}
-
-	token, ok := bearerToken(authHeader)
-	if !ok {
+	if credentialState == clientCredentialMalformed {
 		p.logger.WarnContext(r.Context(), "Invalid Authorization header format",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
@@ -343,41 +435,60 @@ func (p *Proxy) authenticateRequest(
 	}
 	logCtx.Token = token
 
-	if token == p.masterKey {
+	if p.isMasterKey(token) {
 		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
 		logCtx.Scope = scope.AdminContext()
 		return true
 	}
 
-	if isLiteLLMHealthy {
-		tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
-		logCtx.TokenInfo = tokenInfo
-		if err != nil {
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusUnauthorized
-
-			if p.handleLiteLLMAuthError(r.Context(), w, err, token) {
-				logCtx.ErrorMsg = "LiteLLM auth validation failed"
-			} else {
-				logCtx.ErrorMsg = "LiteLLM DB unavailable"
-			}
-			return false
-		} else if tokenInfo != nil {
-			p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
-				"user_id", tokenInfo.UserID,
-				"team_id", tokenInfo.TeamID,
-			)
-		}
-		logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
-		return true
-	} else {
+	if !isLiteLLMHealthy {
 		p.logger.WarnContext(r.Context(), "Invalid master key",
 			"error_code", http.StatusUnauthorized,
 			"provided_key_prefix", security.MaskAPIKey(token))
 		WriteErrorUnauthorized(w, "Invalid master key")
+		return false
 	}
 
-	return false
+	tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
+	logCtx.TokenInfo = tokenInfo
+	if err == nil && tokenInfo == nil {
+		// A successful validation without identity is never an authenticated
+		// result. Fail closed if a manager implementation violates its contract.
+		err = litellmdb.ErrTokenNotFound
+	}
+	if err != nil {
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusUnauthorized
+
+		if p.handleLiteLLMAuthError(r.Context(), w, err, token) {
+			logCtx.ErrorMsg = "LiteLLM auth validation failed"
+		} else {
+			logCtx.ErrorMsg = "LiteLLM DB unavailable"
+		}
+		return false
+	}
+	if !isVirtualKeyAllowedToCallRoute(tokenInfo.AllowedRoutes, r.URL.Path) {
+		errorMessage := fmt.Sprintf(
+			"Virtual key is not allowed to call this route. Only allowed to call routes: %s. Tried to call route: %s",
+			formatLiteLLMAllowedRoutes(tokenInfo.AllowedRoutes),
+			r.URL.Path,
+		)
+		p.logger.WarnContext(r.Context(), "Virtual key route is not allowed",
+			"error_code", http.StatusForbidden,
+			"path", r.URL.Path,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusForbidden
+		logCtx.ErrorMsg = errorMessage
+		WriteErrorForbidden(w, errorMessage)
+		return false
+	}
+	p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
+		"user_id", tokenInfo.UserID,
+		"team_id", tokenInfo.TeamID,
+	)
+	logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
+	return true
 }
 
 func (p *Proxy) readRequestBodyAndSelectModel(
@@ -413,9 +524,28 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
+	if validationErr := validateRequestBody(r.URL.Path, r.Header.Get("Content-Type"), body); validationErr != nil {
+		p.logger.WarnContext(r.Context(), "Invalid request body",
+			"error_code", http.StatusBadRequest,
+			"path", r.URL.Path,
+			"param", validationErr.Param,
+			"error", validationErr.Message,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = validationErr.Message
+		param := validationErr.Param
+		WriteJSONError(w, http.StatusBadRequest, validationErr.Message, errorTypeForStatus(http.StatusBadRequest), &param, nil)
+		return nil, "", "", false, false
+	}
+	logCtx.DeclaredToolNames = extractOpenAIChatToolNames(r.URL.Path, body)
+	logCtx.RequestMetadata, logCtx.RequestTags = extractSpendRequestFields(body, r.Header.Get("Content-Type"))
+
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
+	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
+	logCtx.Billing = logCtx.Billing.WithPublicModel(modelID)
 
 	if modelID == "" {
 		p.logger.WarnContext(r.Context(), "Model not specified in request body",
@@ -426,6 +556,65 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", "", false, false
 	}
+	// An unrestricted virtual key must still stay inside the configured product
+	// model surface. Provider backend IDs remain available to the trusted
+	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
+	// cannot discover or invoke them even when their DB model ACL is empty.
+	trustedInternalModelID := p.isMasterKey(logCtx.Token)
+	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
+		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		// Product-surface rejections happen before a provider attempt. Suppress
+		// the deferred zero-spend failure row just like an unknown model.
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	}
+	// Token model scopes contain client-visible model IDs. Enforce the scope
+	// before model_alias rewrites the request to its backend routing name.
+	modelAllowed := logCtx.TokenInfo == nil || logCtx.TokenInfo.IsModelAllowed(modelID)
+	if logCtx.TokenInfo != nil && p.modelManager != nil {
+		modelAllowed = logCtx.TokenInfo.IsModelAllowedBy(modelID, p.modelManager.IsModelIDAllowedByScope)
+	}
+	if !modelAllowed {
+		p.logger.WarnContext(r.Context(), "Model is not allowed for token",
+			"error_code", http.StatusForbidden,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusForbidden
+		logCtx.ErrorMsg = "Model not allowed"
+		WriteErrorForbidden(w, "Model not allowed")
+		return nil, "", "", false, false
+	}
+
+	// Resolve additional client-visible names to one exact LiteLLM deployment
+	// identity first. The requested name remains in PublicModelID/Billing so
+	// SpendLogs preserve the user-facing model_group; routing continues through
+	// the canonical public model and then the existing provider-backend alias.
+	if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
+		p.logger.WarnContext(r.Context(), "Public model alias is not uniquely routable",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+			"error", aliasErr,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	} else if isPublicAlias {
+		p.logger.DebugContext(r.Context(), "Resolved public model alias", "alias", modelID, "canonical", canonical)
+		body = openai.ReplaceModelInBody(body, modelID, canonical)
+		modelID = canonical
+		logCtx.ModelID = modelID
+	}
 
 	// Resolve model_alias entries (changes modelID to real name; credential lookup uses real name)
 	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
@@ -433,6 +622,22 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		body = openai.ReplaceModelInBody(body, modelID, resolved)
 		modelID = resolved
 		logCtx.ModelID = modelID
+	}
+
+	// LiteLLM's image-generation handler removes the provider prefix from
+	// OpenAI-compatible backend model names before forwarding to AIR. Restore
+	// only a unique configured model_alias target. The client model ACL above is
+	// intentionally evaluated against the original request before this rewrite.
+	if r.URL.Path == "/v1/images/generations" {
+		if resolved, isShortBackend := p.modelManager.ResolveUniqueAliasedBackendShortName(modelID); isShortBackend {
+			p.logger.DebugContext(r.Context(), "Resolved stripped image backend model",
+				"short_model", modelID,
+				"resolved", resolved,
+			)
+			body = openai.ReplaceModelInBody(body, modelID, resolved)
+			modelID = resolved
+			logCtx.ModelID = modelID
+		}
 	}
 
 	// Resolve models[].model field: replace model in body for provider but keep alias as modelID
@@ -454,6 +659,25 @@ func (p *Proxy) selectCredentialForModel(
 	preferredCredentialName string,
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
+	if p.modelManager != nil && p.modelManager.IsEnabled() && !p.modelManager.HasConfiguredModel(modelID) {
+		errorMsg := fmt.Sprintf("Model %s not found", modelID)
+		p.logger.WarnContext(logCtx.Context(), "Model is not configured",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+			"request_id", logCtx.RequestID,
+		)
+
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = errorMsg
+		// Unknown models are rejected before a credential exists. Mark the
+		// request handled so the deferred logger cannot emit a zero-spend row.
+		logCtx.Logged = true
+
+		WriteErrorNotFound(w, errorMsg)
+		return nil, false
+	}
+
 	if preferredCredentialName != "" {
 		cred, err := p.balancer.NextSpecificScoped(preferredCredentialName, modelID, logCtx.Scope)
 		if err == nil {
@@ -527,14 +751,12 @@ func (p *Proxy) selectCredentialForModel(
 		Type: config.ProviderTypeProxy,
 	}
 
-	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+	if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue error log for no credentials",
 			"error", err,
 			"request_id", logCtx.RequestID,
 		)
 	}
-	logCtx.Logged = true
-
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }
