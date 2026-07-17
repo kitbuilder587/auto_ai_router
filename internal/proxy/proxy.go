@@ -31,6 +31,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
+	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -70,33 +72,53 @@ func (logCtx *RequestLogContext) Context() context.Context {
 	return logCtx.Request.Context()
 }
 
+func (logCtx *RequestLogContext) markCompletionStart(at time.Time) {
+	if logCtx == nil || at.IsZero() || !logCtx.CompletionStartTime.IsZero() {
+		return
+	}
+	logCtx.CompletionStartTime = at
+}
+
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID            string                   // Request ID (UUID)
-	StartTime            time.Time                // Request start time
-	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
-	Request              *http.Request            // HTTP request
-	Token                string                   // Auth token (raw, will be hashed)
-	ModelID              string                   // Model alias name (what client requested)
-	RealModelID          string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
-	Status               string                   // "success" or "failure"
-	HTTPStatus           int                      // HTTP response status code
-	ErrorMsg             string                   // Error message (added to metadata on failure)
-	TokenUsage           *converter.TokenUsage    // Token usage with detailed breakdown
-	Credential           *config.CredentialConfig // Credential used
-	SessionID            string                   // Session ID
-	TargetURL            string                   // Target URL (for APIBase extraction)
-	TokenInfo            *litellmdb.TokenInfo     // User/team/org info
-	IsImageGeneration    bool                     // True if this is an image generation request
-	ImageCount           int                      // Number of images to generate (from 'n' param)
-	Logged               bool                     // True if already logged (prevents duplicate logging)
-	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
-	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
-	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
-	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
-	Scope                scope.Context
+	RequestID             string                   // Request ID (UUID)
+	CallID                string                   // LiteLLM correlation ID (supplied or generated)
+	CompletionStartTime   time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT); never overwritten
+	ShadowContext         shadowcontext.Result     // Verified shadow identity and verification state
+	Billing               BillingContext           // Immutable-value billing envelope
+	StartTime             time.Time                // Request start time
+	Request               *http.Request            // HTTP request
+	Token                 string                   // Auth token (raw, will be hashed)
+	PublicModelID         string                   // Client-requested model before global model_alias resolution
+	ModelID               string                   // Backend routing model after global model_alias resolution
+	RealModelID           string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
+	Status                string                   // "success" or "failure"
+	HTTPStatus            int                      // HTTP response status code
+	ErrorMsg              string                   // Error message (added to metadata on failure)
+	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
+	UsageSource           string                   // provider, estimated, request_parameters, or missing
+	StreamOutcome         string                   // completed, client_aborted, or stream_error
+	Credential            *config.CredentialConfig // Credential used
+	SessionID             string                   // Session ID
+	TargetURL             string                   // Target URL (for APIBase extraction)
+	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
+	RequestMetadata       map[string]any           // Client metadata retained for SpendLogs; AIR-owned keys remain authoritative
+	RequestTags           []string                 // Client tags merged only for directly authenticated AIR requests
+	IsImageGeneration     bool                     // True if this is an image generation request
+	ImageCount            int                      // Number of images to generate (from 'n' param)
+	Logged                bool                     // True after DB commit or replay-queue acceptance
+	pendingSpendEntry     *litellmdb.SpendLogEntry // Exact event retained when synchronous commit/replay enqueue fails
+	kafkaSpendAttempted   bool                     // Exactly one best-effort Kafka copy per terminal spend event
+	keySpendSnapshot      float64                  // PostgreSQL statement snapshot read after auth and before provider dispatch
+	keySpendSnapshotKnown bool                     // Never populated from TokenInfo or an in-process cache
+	PromptTokensEstimate  int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
+	IsResponsesAPI        bool                     // True if this is a Responses API request (converted to Chat Completions)
+	RequestCompleted      bool                     // True only after the response was fully and successfully delivered
+	ActualCredentialName  string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
+	IsProxyRequest        bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
+	DeclaredToolNames     []string                 // Runtime-only OpenAI Chat tool declarations; never sent upstream
+	Scope                 scope.Context
 }
 
 // HealthChecker provides cached database health status
@@ -123,6 +145,9 @@ type Config struct {
 	Commit                     string
 	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
 	KafkaLog                   kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	SpendLogger                shadowspend.Sink           // Isolated shadow spend writer
+	SpendAPIBase               string                     // Client-facing AIR base stored in shadow rows
+	ShadowContextVerifier      *shadowcontext.Verifier    // Signed LiteLLM shadow identity receiver
 	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
 	MaxProviderRetries         int                        // Max same-type credential retries (default: 2)
@@ -136,31 +161,34 @@ type Config struct {
 }
 
 type Proxy struct {
-	balancer             *balancer.RoundRobin
-	client               *http.Client
-	logger               *slog.Logger
-	maxBodySizeMB        int
-	maxResponseBodySize  int64 // Pre-computed max response body size in bytes
-	requestTimeout       time.Duration
-	metrics              *monitoring.Metrics
-	masterKey            string
-	rateLimiter          *ratelimit.RPMLimiter
-	tokenManager         *auth.VertexTokenManager
-	routerID             string                     // Identifier for this router used in /trace responses
-	modelManager         *models.Manager            // Model manager for getting configured models
-	LiteLLMDB            litellmdb.Manager          // LiteLLM database integration
-	kafkaLog             kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	healthChecker        HealthChecker              // Cached DB health status (optional)
-	priceRegistry        *models.ModelPriceRegistry // Model pricing information (optional)
-	maxProviderRetries   int                        // Max same-type credential retries on provider errors
-	maxFallbackAttempts  int                        // Max fallback proxy hops per request chain
-	responseStore        responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	sessionStore         *SessionStore              // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl  bool                       // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort bool                       // Keep reading upstream after client disconnect to get real usage chunk
-	bedrockDailyQuota    *bedrockDailyQuotaTracker
-	version              string
-	commit               string
+	balancer              *balancer.RoundRobin
+	client                *http.Client
+	logger                *slog.Logger
+	maxBodySizeMB         int
+	maxResponseBodySize   int64 // Pre-computed max response body size in bytes
+	requestTimeout        time.Duration
+	metrics               *monitoring.Metrics
+	masterKey             string
+	rateLimiter           *ratelimit.RPMLimiter
+	tokenManager          *auth.VertexTokenManager
+	routerID              string                     // Identifier for this router used in /trace responses
+	modelManager          *models.Manager            // Model manager for getting configured models
+	LiteLLMDB             litellmdb.Manager          // LiteLLM database integration
+	kafkaLog              kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	spendLogger           shadowspend.Sink           // Isolated shadow spend writer
+	spendAPIBase          string                     // Client-facing AIR base stored in shadow rows
+	shadowContextVerifier *shadowcontext.Verifier    // Signed LiteLLM shadow identity receiver
+	healthChecker         HealthChecker              // Cached DB health status (optional)
+	priceRegistry         *models.ModelPriceRegistry // Model pricing information (optional)
+	maxProviderRetries    int                        // Max same-type credential retries on provider errors
+	maxFallbackAttempts   int                        // Max fallback proxy hops per request chain
+	responseStore         responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	sessionStore          *SessionStore              // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl   bool                       // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort  bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	bedrockDailyQuota     *bedrockDailyQuotaTracker
+	version               string
+	commit                string
 }
 
 func New(cfg *Config) *Proxy {
@@ -199,33 +227,44 @@ func New(cfg *Config) *Proxy {
 		}
 		sessionStore = NewSessionStore(ttl)
 	}
+	spendLogger := cfg.SpendLogger
+	if spendLogger == nil {
+		spendLogger = shadowspend.NewDisabledSink("not configured")
+	}
+	spendAPIBase := cfg.SpendAPIBase
+	if spendAPIBase == "" {
+		spendAPIBase = config.ShadowSpendAPIBase
+	}
 
 	return &Proxy{
-		routerID:             routerID,
-		balancer:             cfg.Balancer,
-		logger:               cfg.Logger,
-		maxBodySizeMB:        cfg.MaxBodySizeMB,
-		maxResponseBodySize:  maxResponseBodySize,
-		requestTimeout:       cfg.RequestTimeout,
-		metrics:              cfg.Metrics,
-		masterKey:            cfg.MasterKey,
-		rateLimiter:          cfg.RateLimiter,
-		tokenManager:         cfg.TokenManager,
-		modelManager:         cfg.ModelManager,
-		LiteLLMDB:            cfg.LiteLLMDB,
-		kafkaLog:             cfg.KafkaLog,
-		healthChecker:        cfg.HealthChecker,
-		priceRegistry:        cfg.PriceRegistry,
-		maxProviderRetries:   cfg.MaxProviderRetries,
-		maxFallbackAttempts:  cfg.MaxFallbackAttempts,
-		responseStore:        cfg.ResponseStore,
-		sessionStore:         sessionStore,
-		stickyAutoCacheCtrl:  cfg.SessionStickyAutoCacheCtrl,
-		drainUpstreamOnAbort: cfg.DrainUpstreamOnAbort,
-		bedrockDailyQuota:    newBedrockDailyQuotaTracker(),
-		client:               httputil.NewHTTPClient(httpClientCfg),
-		version:              cfg.Version,
-		commit:               cfg.Commit,
+		routerID:              routerID,
+		balancer:              cfg.Balancer,
+		logger:                cfg.Logger,
+		maxBodySizeMB:         cfg.MaxBodySizeMB,
+		maxResponseBodySize:   maxResponseBodySize,
+		requestTimeout:        cfg.RequestTimeout,
+		metrics:               cfg.Metrics,
+		masterKey:             cfg.MasterKey,
+		rateLimiter:           cfg.RateLimiter,
+		tokenManager:          cfg.TokenManager,
+		modelManager:          cfg.ModelManager,
+		LiteLLMDB:             cfg.LiteLLMDB,
+		kafkaLog:              cfg.KafkaLog,
+		spendLogger:           spendLogger,
+		spendAPIBase:          spendAPIBase,
+		shadowContextVerifier: cfg.ShadowContextVerifier,
+		healthChecker:         cfg.HealthChecker,
+		priceRegistry:         cfg.PriceRegistry,
+		maxProviderRetries:    cfg.MaxProviderRetries,
+		maxFallbackAttempts:   cfg.MaxFallbackAttempts,
+		responseStore:         cfg.ResponseStore,
+		sessionStore:          sessionStore,
+		stickyAutoCacheCtrl:   cfg.SessionStickyAutoCacheCtrl,
+		drainUpstreamOnAbort:  cfg.DrainUpstreamOnAbort,
+		bedrockDailyQuota:     newBedrockDailyQuotaTracker(),
+		client:                httputil.NewHTTPClient(httpClientCfg),
+		version:               cfg.Version,
+		commit:                cfg.Commit,
 	}
 }
 
@@ -268,6 +307,7 @@ func (p *Proxy) GetCommit() string {
 // ProxyResponse holds response details from a proxy credential
 type ProxyResponse struct {
 	StatusCode           int
+	CompletionStartTime  time.Time
 	Headers              http.Header
 	Body                 []byte
 	StreamBody           io.ReadCloser
@@ -337,6 +377,7 @@ func (p *Proxy) executeProxyRequest(
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		return nil, err
 	}
+	completionStartTime := utils.NowUTC()
 	// Proxy credentials are dynamic relays — don't record them in fail2ban.
 	if cred.Type != config.ProviderTypeProxy {
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
@@ -356,6 +397,7 @@ func (p *Proxy) executeProxyRequest(
 	if IsStreamingResponse(resp) {
 		return &ProxyResponse{
 			StatusCode:           resp.StatusCode,
+			CompletionStartTime:  completionStartTime,
 			Headers:              resp.Header,
 			StreamBody:           resp.Body,
 			IsStreaming:          true,
@@ -374,12 +416,18 @@ func (p *Proxy) executeProxyRequest(
 	if err != nil {
 		p.logger.WarnContext(r.Context(), "Failed to read proxy response body, caller may retry",
 			"credential", cred.Name, "model", modelID, "error", err)
-		return nil, err
+		return &ProxyResponse{
+			StatusCode:           resp.StatusCode,
+			CompletionStartTime:  completionStartTime,
+			Headers:              resp.Header,
+			ActualCredentialName: actualCredName,
+		}, err
 	}
 
 	// Return complete response information
 	return &ProxyResponse{
 		StatusCode:           resp.StatusCode,
+		CompletionStartTime:  completionStartTime,
 		Headers:              resp.Header,
 		Body:                 respBody,
 		IsStreaming:          false,
@@ -424,6 +472,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		Status:         "unknown",
 		IsProxyRequest: isProxyRequest,
 	}
+	initializeAIREventIDHeaders(w, r, logCtx.RequestID)
+	r = p.initializeShadowContext(w, r, logCtx)
+	logCtx.Billing = NewBillingContext(requestID, logCtx.CallID, r.URL.Path, logCtx.ShadowContext.Identity)
 
 	// Ensure request is logged at the end regardless of which path is taken
 	defer func() {
@@ -431,14 +482,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Log request only if we have a credential (successful auth path)
 			// For auth/credential selection errors, log directly at the error point instead
 			if logCtx.Credential != nil {
-				if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-					p.logger.WarnContext(r.Context(), "Failed to queue spend log",
+				if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
+					p.logger.WarnContext(r.Context(), "Spend log dropped after deferred replay attempt",
 						"error", err,
 						"request_id", requestID,
 					)
 				}
 			}
-			logCtx.Logged = true
 		}
 		if !logCtx.RequestCompleted {
 			p.clearSessionBinding(logCtx.SessionID, logCtx.ModelID)
@@ -460,6 +510,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	cred := prepared.cred
 	logCtx.IsResponsesAPI = prepared.isResponsesAPI
 	logCtx.RealModelID = realModelID
+	logCtx.Billing = logCtx.Billing.WithRouting(modelID, realModelID, string(cred.Type), cred.Name, cred.BaseURL)
+	publicModelID := logCtx.Billing.PublicModel()
+	if publicModelID == "" {
+		publicModelID = modelID
+	}
 
 	// Build a callback that saves the completed Responses API response if store=true.
 	// Captured by streaming handlers and called when the stream completes.
@@ -473,6 +528,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if resp == nil {
 				return
 			}
+			resp.Model = publicModelID
 			applyResponsesMetadata(resp, meta)
 			if err := p.responseStore.SaveResponse(
 				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput, cred.Name,
@@ -494,6 +550,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			attribute.String("aar.provider", string(cred.Type)),
 			attribute.Bool("aar.streaming", streaming),
 			attribute.String("aar.request_id", requestID),
+			attribute.String("litellm.call_id", logCtx.CallID),
+			attribute.String("aar.shadow_context_state", string(logCtx.ShadowContext.State)),
 		)
 	}
 
@@ -522,6 +580,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.Credential = cred
 		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
+		var proxyRespCred *config.CredentialConfig
 		var lastProxyErr error
 		var shouldRetry bool
 		var retryReason RetryReason
@@ -545,18 +604,34 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 
 			shouldRetry = false
+			logCtx.Billing = logCtx.Billing.AddAttempt(BillingAttempt{
+				Credential:    cred.Name,
+				Provider:      string(cred.Type),
+				ProviderModel: realModelID,
+				TargetHost:    cred.BaseURL,
+			})
 
 			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
 			lastProxyErr = fwdErr
+			if resp != nil {
+				logCtx.markCompletionStart(resp.CompletionStartTime)
+			}
 			if fwdErr != nil {
+				logCtx.Billing = logCtx.Billing.CompleteLastAttempt(0, "transport_error")
 				shouldRetry = true
 				retryReason = RetryReasonNetErr
 				continue
 			}
 			proxyResp = resp
-			if proxyResp.ActualCredentialName != "" {
-				logCtx.ActualCredentialName = proxyResp.ActualCredentialName
+			proxyRespCred = cred
+			outcome := "success"
+			if proxyResp.StatusCode >= 400 {
+				outcome = "provider_error"
 			}
+			logCtx.Billing = logCtx.Billing.CompleteLastAttempt(proxyResp.StatusCode, outcome)
+			// This value is part of the response/credential tuple; clear a stale
+			// nested credential when the newly selected response omits the header.
+			logCtx.ActualCredentialName = proxyResp.ActualCredentialName
 
 			if proxyResp.IsStreaming {
 				break // can't retry streaming
@@ -627,9 +702,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"url", cred.BaseURL,
 				"request_id", logCtx.RequestID)
 			logCtx.Status = "failure"
+			logCtx.Credential = cred
+			logCtx.Billing = logCtx.Billing.WithRouting(modelID, realModelID, string(cred.Type), cred.Name, cred.BaseURL)
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
 			logCtx.TargetURL = cred.BaseURL
+			commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+			if err != nil {
+				p.logger.WarnContext(r.Context(), "Failed to commit proxy transport failure spend before response",
+					"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
+			}
 			if statusCode == http.StatusRequestTimeout {
 				WriteErrorTimeout(w, statusMessage)
 			} else {
@@ -637,9 +719,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		if proxyRespCred != nil {
+			// The selected route must describe the response returned to the client,
+			// not a later retry whose transport failed. Attempt history still keeps
+			// every tried credential and its independent outcome.
+			cred = proxyRespCred
+			logCtx.Credential = cred
+			logCtx.Billing = logCtx.Billing.WithRouting(modelID, realModelID, string(cred.Type), cred.Name, cred.BaseURL)
+		}
 
 		// Write response (streaming or non-streaming)
 		if proxyResp.IsStreaming {
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				setLiteLLMResponseCostHeaderForRequest(w.Header(), 0, logCtx)
+			}
+			setSuccessfulSSEHeaders(w.Header(), proxyResp.StatusCode)
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
 			streamCompleted := false
@@ -705,6 +799,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
 				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, modelID, tokenizerModelID, logCtx)
 				if err != nil {
+					markStreamFailure(logCtx, err)
 					p.logStreamHandlerError(r.Context(), "Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
@@ -781,11 +876,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					proxyResp.Body = responsesBody
 				}
 			}
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				proxyResp.Body = normalizeSuccessfulResponseModel(proxyResp.Body, prepared.basePath, publicModelID)
+			}
 
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 			}
-			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
+			logCtx.Billing = logCtx.Billing.WithProviderResponseID(extractClientVisibleResponseID(proxyResp.Body))
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -795,15 +893,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.DebugContext(r.Context(), "Proxy token usage recorded",
 					"credential", cred.Name, "model", modelID, "tokens", tokens)
 			}
-			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				logCtx.RequestCompleted = true
-				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
-			}
 		}
 
 		// Log proxy response
 		logCtx.Status = "success"
-		if proxyResp.StatusCode >= 400 {
+		if logCtx.StreamOutcome == "client_aborted" || logCtx.StreamOutcome == "stream_error" {
+			logCtx.Status = "failure"
+			if logCtx.ErrorMsg == "" {
+				logCtx.ErrorMsg = logCtx.StreamOutcome
+			}
+		} else if proxyResp.StatusCode >= 400 {
 			logCtx.Status = "failure"
 			// Final error returned to the client — single unified ERROR record.
 			// For streaming responses the body was forwarded to the client and is
@@ -814,7 +913,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"actual_credential", logCtx.ActualCredentialName,
 				"request_id", logCtx.RequestID)
 		}
-		logCtx.HTTPStatus = proxyResp.StatusCode
+		if logCtx.StreamOutcome == "client_aborted" {
+			logCtx.HTTPStatus = 499
+		} else {
+			logCtx.HTTPStatus = proxyResp.StatusCode
+		}
 		logCtx.TargetURL = cred.BaseURL
 		if !proxyResp.IsStreaming {
 			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
@@ -833,6 +936,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if proxyResp.StatusCode >= 400 {
 				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
+			}
+			commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+			if err != nil {
+				p.logger.WarnContext(r.Context(), "Failed to commit proxy spend before response",
+					"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
+			}
+			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID, logCtx)
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				logCtx.RequestCompleted = true
+				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 			}
 		}
 		return
@@ -1029,6 +1142,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				targetURL += "?" + r.URL.RawQuery
 			}
 		}
+		logCtx.Billing = logCtx.Billing.WithRouting(modelID, realModelID, string(cred.Type), cred.Name, targetURL)
+		logCtx.Billing = logCtx.Billing.AddAttempt(BillingAttempt{
+			Credential:    cred.Name,
+			Provider:      string(cred.Type),
+			ProviderModel: realModelID,
+			TargetHost:    targetURL,
+		})
 
 		// For Vertex AI, obtain OAuth2 token
 		var vertexToken string
@@ -1036,6 +1156,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			var tokenErr error
 			vertexToken, tokenErr = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON)
 			if tokenErr != nil {
+				logCtx.Billing = logCtx.Billing.CompleteLastAttempt(0, "auth_setup_error")
 				p.logger.ErrorContext(r.Context(), "Failed to get Vertex AI token",
 					"error_code", http.StatusInternalServerError,
 					"credential", cred.Name, "provider", string(cred.Type),
@@ -1051,6 +1172,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		proxyReq, reqErr := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(requestBody))
 		if reqErr != nil {
+			logCtx.Billing = logCtx.Billing.CompleteLastAttempt(0, "request_build_error")
 			// Fatal: request creation error
 			p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)
 			logCtx.Status = "failure"
@@ -1115,11 +1237,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		var doErr error
 		resp, doErr = p.client.Do(proxyReq)
 		if doErr != nil {
+			logCtx.Billing = logCtx.Billing.CompleteLastAttempt(0, "transport_error")
 			// Transport failure on one credential — retried with the next one;
 			// the final failure is logged at ERROR after the retry loop.
 			statusCode := http.StatusBadGateway
 			if isTimeoutError(doErr) {
-				statusCode = http.StatusRequestTimeout
+				statusCode = http.StatusGatewayTimeout
 				p.logger.WarnContext(r.Context(), "Upstream request timeout, will retry",
 					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			} else {
@@ -1133,6 +1256,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			transportErr = doErr
 			continue
 		}
+		logCtx.markCompletionStart(utils.NowUTC())
 
 		// Setup close body with sync.Once to prevent double-close
 		var closeOnce sync.Once
@@ -1144,6 +1268,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
+		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+		attemptOutcome := "success"
+		if resp.StatusCode >= 400 {
+			attemptOutcome = "provider_error"
+		}
+		logCtx.Billing = logCtx.Billing.CompleteLastAttempt(resp.StatusCode, attemptOutcome)
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 		// Debug: log response headers
@@ -1176,8 +1306,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		responseBody, readErr = p.readLimitedResponseBody(resp.Body)
 		bodyReadTimer.Stop()
 		if readErr != nil {
+			outcome := "response_read_error"
+			if errors.Is(readErr, ErrResponseBodyTooLarge) {
+				outcome = "response_too_large"
+			}
+			logCtx.Billing = logCtx.Billing.CompleteLastAttempt(resp.StatusCode, outcome)
 			closeBody()
-			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
 				// Response too large — fatal, another credential won't help
 				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
@@ -1226,7 +1360,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if transportErr != nil {
 			fallbackStatus = http.StatusBadGateway
 			if isTimeoutError(transportErr) {
-				fallbackStatus = http.StatusRequestTimeout
+				fallbackStatus = http.StatusGatewayTimeout
 			}
 		} else if resp != nil {
 			fallbackStatus = resp.StatusCode
@@ -1255,8 +1389,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		statusCode := http.StatusBadGateway
 		statusMessage := "Bad Gateway"
 		if transportErr != nil && isTimeoutError(transportErr) {
-			statusCode = http.StatusRequestTimeout
-			statusMessage = "Request Timeout"
+			statusCode = http.StatusGatewayTimeout
+			statusMessage = "Gateway Timeout"
 		}
 		p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
 			"error", transportErr,
@@ -1266,8 +1400,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
 		logCtx.TargetURL = targetURL
-		if statusCode == http.StatusRequestTimeout {
-			WriteErrorTimeout(w, statusMessage)
+		commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+		if err != nil {
+			p.logger.WarnContext(r.Context(), "Failed to commit provider transport failure spend before response",
+				"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
+		}
+		if statusCode == http.StatusGatewayTimeout {
+			WriteErrorGatewayTimeout(w, statusMessage)
 		} else {
 			WriteErrorBadGateway(w, statusMessage)
 		}
@@ -1387,10 +1526,25 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				finalResponseBody = responsesBody
 			}
 		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			finalResponseBody = normalizeSuccessfulResponseModel(finalResponseBody, prepared.basePath, publicModelID)
+			bodyForTokenExtraction = finalResponseBody
+		}
 
 		rawErrorBody := finalResponseBody
-		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
-			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !json.Valid(finalResponseBody) {
+			resp.StatusCode = http.StatusBadGateway
+			logCtx.Billing = logCtx.Billing.CompleteLastAttempt(resp.StatusCode, "response_validation_error")
+			finalResponseBody = invalidUpstreamResponseBody()
+			bodyForTokenExtraction = finalResponseBody
+			resp.Header.Set("Content-Type", "application/json")
+		}
+		if resp.StatusCode >= 400 {
+			if shouldMaskUpstreamErrors(cred) {
+				finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+			} else {
+				finalResponseBody = normalizeUpstreamErrorBody(resp.StatusCode, finalResponseBody)
+			}
 			bodyForTokenExtraction = finalResponseBody
 			resp.Header.Set("Content-Type", "application/json")
 		}
@@ -1419,6 +1573,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
+		logCtx.Billing = logCtx.Billing.WithProviderResponseID(extractClientVisibleResponseID(finalResponseBody))
 
 		// Log to LiteLLM DB (non-streaming)
 		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
@@ -1447,13 +1602,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
 			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
-		if logCtx.Token != "" && logCtx.Credential != nil {
-			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-				p.logger.WarnContext(r.Context(), "Failed to queue spend log",
-					"error", err, "request_id", logCtx.RequestID)
-			}
+		commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+		if err != nil {
+			p.logger.WarnContext(r.Context(), "Failed to commit spend log before response",
+				"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
 		}
-		logCtx.Logged = true
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
@@ -1466,6 +1619,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 
 	if isStreamingResp {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			setLiteLLMResponseCostHeaderForRequest(w.Header(), 0, logCtx)
+		}
+		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		if resp.StatusCode >= 400 {
 			// Error status on a streaming response — the body is forwarded to the
 			// client as a stream and is not available here for logging.
@@ -1679,6 +1836,11 @@ func applyResponsesMetadata(resp *responses.Response, meta *responses.ResponsesM
 // HandleGetResponse handles GET /v1/responses/{response_id}.
 // Returns the stored Responses API response if the caller owns it.
 func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
+	tokenInfo, ok := p.AuthenticateClientRequest(w, r)
+	if !ok {
+		return
+	}
+
 	if p.responseStore == nil {
 		WriteErrorNotFound(w, "Response store not enabled")
 		return
@@ -1692,17 +1854,10 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		WriteErrorUnauthorized(w, "Missing Authorization header")
-		return
-	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader {
-		WriteErrorUnauthorized(w, "Invalid Authorization header format")
-		return
-	}
+	// Authentication above intentionally uses the shared client-auth path so
+	// blocked/expired keys, x-api-key transport, and LiteLLM allowed_routes all
+	// match inference requests before the response store is consulted.
+	token, _ := extractClientToken(r)
 
 	var resp *responses.Response
 	var err error
@@ -1711,7 +1866,12 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 		// Master key: bypass ownership check
 		resp, err = p.responseStore.GetResponseByID(r.Context(), responseID)
 	} else {
-		apiKeyHash := litellmdb.HashToken(token)
+		apiKeyHash := tokenInfo.Token
+		if apiKeyHash == "" {
+			// A custom Manager should return the validated token hash, but retain
+			// the historical ownership behavior if it omits that optional field.
+			apiKeyHash = litellmdb.HashToken(token)
+		}
 		resp, err = p.responseStore.GetResponse(r.Context(), responseID, apiKeyHash)
 	}
 

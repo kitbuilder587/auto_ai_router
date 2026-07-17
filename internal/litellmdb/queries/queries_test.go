@@ -315,3 +315,20 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryUpsertDailyEndUserSpend, "end_user_id")
 	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
 }
+
+func TestTokenValidationQueryLoadsSpendIdentity(t *testing.T) {
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.project_id")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.agent_id")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.allowed_routes as token_allowed_routes")
+}
+
+func TestTokenValidationQueryLoadsModelAccessHierarchy(t *testing.T) {
+	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id`)
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "u.models as user_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "tm.models as team_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "p.models as project_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "p.blocked as project_blocked")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "b_tmem.allowed_models as team_member_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_ProjectTable" p ON t.project_id = p.project_id`)
+}

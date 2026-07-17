@@ -163,10 +163,25 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	}
 
 	// Model aliases
+	if cfg.ClientModelIDs != nil {
+		logger.Info("client_model_ids", "total_count", len(cfg.ClientModelIDs), "enforced", true)
+	}
 	if len(cfg.ModelAlias) > 0 {
 		logger.Info("model_alias", "total_count", len(cfg.ModelAlias))
 		for alias, target := range cfg.ModelAlias {
 			logger.Info("  alias", "from", alias, "to", target)
+		}
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		logger.Info("public_model_alias", "total_count", len(cfg.PublicModelAlias))
+		for alias, target := range cfg.PublicModelAlias {
+			logger.Info("  public alias", "from", alias, "to", target)
+		}
+	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		logger.Info("accepted_model_alias", "total_count", len(cfg.AcceptedModelAlias))
+		for alias, target := range cfg.AcceptedModelAlias {
+			logger.Info("  accepted alias", "from", alias, "to", target)
 		}
 	}
 
@@ -210,6 +225,22 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		)
 	} else {
 		logger.Info("kafka", "status", "DISABLED")
+	}
+
+	if cfg.SpendLog.Mode == SpendLogModeShadow {
+		logger.Info("spend_log (SHADOW)",
+			"database_url", security.MaskDatabaseURL(cfg.SpendLog.DatabaseURL),
+			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
+			"api_base", cfg.SpendLog.APIBase,
+			"max_conns", cfg.SpendLog.MaxConns,
+			"min_conns", cfg.SpendLog.MinConns,
+			"log_queue_size", cfg.SpendLog.LogQueueSize,
+			"log_batch_size", cfg.SpendLog.LogBatchSize,
+			"log_flush_interval", cfg.SpendLog.LogFlushInterval.String(),
+			"auth_context_keys", len(cfg.SpendLog.AuthContext.PublicKeys),
+		)
+	} else {
+		logger.Info("spend_log", "status", "DISABLED")
 	}
 
 	// OTEL config

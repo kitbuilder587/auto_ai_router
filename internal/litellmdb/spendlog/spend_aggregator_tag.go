@@ -2,10 +2,9 @@ package spendlog
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"log/slog"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
 
@@ -40,7 +39,7 @@ type aggregateTagValue struct {
 // Returns error on any database operation failure.
 func aggregateDailyTagSpendLogs(
 	ctx context.Context,
-	conn *pgxpool.Conn,
+	conn dailySpendExecer,
 	logger *slog.Logger,
 	records []spendLogRecord,
 ) error {
@@ -52,25 +51,20 @@ func aggregateDailyTagSpendLogs(
 	for _, record := range records {
 		totalRows++
 
-		// Skip if no tags
-		if record.RequestTags == "" || record.RequestTags == "[]" {
+		tags, err := parseUniqueRequestTags(record.RequestTags)
+		if err != nil {
+			logger.Error("[DB] Tag aggregation: failed to unmarshal request_tags JSON",
+				"request_id", record.RequestID,
+				"error", err,
+			)
+			return fmt.Errorf("parse request_tags for %s: %w", record.RequestID, err)
+		}
+		if len(tags) == 0 {
 			skippedRows++
 			continue
 		}
 
-		// Parse tags from JSON array
-		var tags []string
-		err := json.Unmarshal([]byte(record.RequestTags), &tags)
-		if err != nil {
-			logger.Warn("[DB] Tag aggregation: failed to unmarshal request_tags JSON",
-				"request_id", record.RequestID,
-				"request_tags", record.RequestTags,
-				"error", err,
-			)
-			continue
-		}
-
-		// For each tag in the array, aggregate
+		// Each tag contributes at most once per request, matching counter semantics.
 		for _, tag := range tags {
 			if tag == "" {
 				continue

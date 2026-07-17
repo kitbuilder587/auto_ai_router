@@ -327,12 +327,19 @@ func TestTransformAnthropicStreamToResponses_ToolUseBlock(t *testing.T) {
 
 	events := parseSSEEvents(out.String())
 	var completedEvent map[string]interface{}
+	var argumentsDoneEvent map[string]interface{}
 	for _, e := range events {
 		if e["type"] == "response.completed" {
 			completedEvent = e
 		}
+		if e["type"] == "response.function_call_arguments.done" {
+			argumentsDoneEvent = e
+		}
 	}
 	require.NotNil(t, completedEvent)
+	require.NotNil(t, argumentsDoneEvent)
+	assert.Equal(t, "get_weather", argumentsDoneEvent["name"])
+	assert.Equal(t, `{"city": "NYC"}`, argumentsDoneEvent["arguments"])
 
 	respObj := completedEvent["response"].(map[string]interface{})
 	output := respObj["output"].([]interface{})

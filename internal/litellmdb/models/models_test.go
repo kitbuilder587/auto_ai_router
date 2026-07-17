@@ -201,6 +201,67 @@ func TestTokenInfo_IsModelAllowed_ModelNotInList(t *testing.T) {
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
+func TestTokenInfo_IsModelAllowed_IntersectsApplicableHierarchy(t *testing.T) {
+	token := &TokenInfo{
+		Models:           []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
+		UserID:           "user-alt",
+		UserModels:       []string{"openai/gpt-4o-mini"},
+		TeamID:           "team-alt",
+		TeamModels:       []string{"openai/gpt-4o-mini"},
+		TeamMemberModels: []string{"openai/gpt-4o-mini"},
+		ProjectID:        "project-alt",
+		ProjectModels:    []string{"openai/gpt-4o-mini"},
+	}
+
+	assert.True(t, token.IsModelAllowed("openai/gpt-4o-mini"))
+	assert.False(t, token.IsModelAllowed("gpt-4o-mini"), "a child key cannot widen its parent scopes")
+}
+
+func TestTokenInfo_IsModelAllowed_UsesUserScopeOnlyForPersonalKeys(t *testing.T) {
+	personal := &TokenInfo{
+		Models:     []string{"public/chat", "public/embed"},
+		UserID:     "personal-user",
+		UserModels: []string{NoDefaultModels, "public/chat"},
+	}
+	assert.False(t, personal.IsModelAllowed("public/chat"), "no-default-models overrides explicit user model IDs")
+	assert.False(t, personal.IsModelAllowed("public/embed"))
+
+	teamKey := &TokenInfo{
+		Models:     []string{"public/chat", "public/embed"},
+		UserID:     "team-user",
+		UserModels: []string{NoDefaultModels},
+		TeamID:     "team",
+		TeamModels: []string{"public/chat", "public/embed"},
+	}
+	assert.True(t, teamKey.IsModelAllowed("public/embed"), "LiteLLM does not apply the user scope to team keys")
+}
+
+func TestTokenInfo_IsModelAllowed_EmptyParentScopeIsUnrestricted(t *testing.T) {
+	token := &TokenInfo{
+		Models:        []string{"public/chat"},
+		TeamID:        "team",
+		TeamModels:    nil,
+		ProjectID:     "project",
+		ProjectModels: []string{},
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModelsInheritsTeamScope(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{AllTeamModels},
+		TeamID:     "team",
+		TeamModels: []string{"public/chat"},
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
+	assert.False(t, token.IsModelAllowed("public/embed"))
+
+	broken := &TokenInfo{Models: []string{AllTeamModels}}
+	assert.False(t, broken.IsModelAllowed("public/chat"), "all-team-models without a team must fail closed")
+}
+
 // ==================== Budget Check Helper Tests ====================
 
 func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {
@@ -395,6 +456,21 @@ func TestTokenInfo_Validate_ModelAllowedWithEmptyCheck(t *testing.T) {
 
 	err := token.Validate("")
 	assert.NoError(t, err)
+}
+
+func TestTokenInfo_Validate_BlockedParentScopes(t *testing.T) {
+	teamBlocked := true
+	projectBlocked := true
+
+	t.Run("team", func(t *testing.T) {
+		token := &TokenInfo{TeamID: "team", TeamBlocked: &teamBlocked}
+		assert.ErrorIs(t, token.Validate(""), ErrTeamBlocked)
+	})
+
+	t.Run("project", func(t *testing.T) {
+		token := &TokenInfo{ProjectID: "project", ProjectBlocked: &projectBlocked}
+		assert.ErrorIs(t, token.Validate(""), ErrProjectBlocked)
+	})
 }
 
 func TestTokenInfo_Validate_ValidationOrder(t *testing.T) {

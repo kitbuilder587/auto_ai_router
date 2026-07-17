@@ -163,17 +163,19 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var info models.TokenInfo
 
 	// ============ Token fields ============
-	var keyName, keyAlias, userID, teamID, orgID *string
+	var keyName, keyAlias, userID, teamID, orgID, projectID, agentID *string
 	var tokenMaxBudget *float64
 	var tokenTPMLimit, tokenRPMLimit *int64
 	var expires *time.Time
 	var blocked *bool
 	var tokenModels []string
+	var tokenAllowedRoutes []string
 	var tokenMetadata []byte
 
 	// ============ User fields ============
 	var userIDCheck, userAlias, userEmail *string
 	var userMaxBudget, userSpend *float64
+	var userModels []string
 
 	// ============ Team fields ============
 	var teamIDCheck, teamAlias *string
@@ -181,6 +183,12 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var teamMaxBudget, teamSpend *float64
 	var teamBlocked *bool
 	var teamTPMLimit, teamRPMLimit *int64
+	var teamModels []string
+
+	// ============ Project fields ============
+	var projectIDCheck *string
+	var projectModels []string
+	var projectBlocked *bool
 
 	// ============ Organization fields (with external budget) ============
 	var orgIDCheck *string
@@ -192,6 +200,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var teamMemberSpend *float64
 	var teamMemberMaxBudget *float64
 	var teamMemberTPMLimit, teamMemberRPMLimit *int64
+	var teamMemberModels []string
 
 	// ============ OrganizationMembership fields (with external budget) ============
 	var orgMemberSpend *float64
@@ -213,6 +222,9 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&expires,
 		&blocked,
 		&tokenModels,
+		&tokenAllowedRoutes,
+		&projectID,
+		&agentID,
 		&tokenMetadata,
 
 		// User
@@ -221,6 +233,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&userEmail,
 		&userMaxBudget,
 		&userSpend,
+		&userModels,
 
 		// Team
 		&teamIDCheck,
@@ -231,6 +244,12 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&teamBlocked,
 		&teamTPMLimit,
 		&teamRPMLimit,
+		&teamModels,
+
+		// Project
+		&projectIDCheck,
+		&projectModels,
+		&projectBlocked,
 
 		// Organization
 		&orgIDCheck,
@@ -244,6 +263,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&teamMemberMaxBudget,
 		&teamMemberTPMLimit,
 		&teamMemberRPMLimit,
+		&teamMemberModels,
 
 		// OrganizationMembership
 		&orgMemberSpend,
@@ -282,11 +302,18 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	if orgID != nil {
 		info.OrganizationID = *orgID
 	}
+	if projectID != nil {
+		info.ProjectID = *projectID
+	}
+	if agentID != nil {
+		info.AgentID = *agentID
+	}
 	if blocked != nil {
 		info.Blocked = *blocked
 	}
 	info.Models = tokenModels
-	info.Metadata = decodeMetadata(tokenMetadata)
+	info.AllowedRoutes = tokenAllowedRoutes
+	info.Metadata, info.Tags = decodeTokenMetadata(tokenMetadata)
 
 	info.MaxBudget = tokenMaxBudget
 	info.Expires = expires
@@ -302,6 +329,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	}
 	info.UserMaxBudget = userMaxBudget
 	info.UserSpend = userSpend
+	info.UserModels = userModels
 
 	// Set Team fields (if team exists)
 	if teamAlias != nil {
@@ -312,6 +340,13 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamBlocked = teamBlocked
 	info.TeamTPMLimit = teamTPMLimit
 	info.TeamRPMLimit = teamRPMLimit
+	info.TeamModels = teamModels
+
+	// Project model scope is enforced whenever the token has a project_id. A
+	// missing joined row leaves an unrestricted empty scope, matching LiteLLM's
+	// optional project lookup.
+	info.ProjectModels = projectModels
+	info.ProjectBlocked = projectBlocked
 
 	// Set Organization fields (external budget from BudgetTable)
 	info.OrgSpend = orgSpend
@@ -324,6 +359,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamMemberMaxBudget = teamMemberMaxBudget
 	info.TeamMemberTPMLimit = teamMemberTPMLimit
 	info.TeamMemberRPMLimit = teamMemberRPMLimit
+	info.TeamMemberModels = teamMemberModels
 
 	// Set OrganizationMembership fields (external budget from BudgetTable)
 	info.OrgMemberSpend = orgMemberSpend
@@ -341,18 +377,28 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	return &info, nil
 }
 
-func decodeMetadata(raw []byte) map[string]interface{} {
+func decodeTokenMetadata(raw []byte) (map[string]interface{}, []string) {
 	if len(raw) == 0 {
-		return nil
+		return nil, nil
 	}
+
 	var metadata map[string]interface{}
 	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return nil
+		return nil, nil
 	}
-	if len(metadata) == 0 {
-		return nil
+	tagValue, exists := metadata["tags"]
+	if !exists || tagValue == nil {
+		return metadata, nil
 	}
-	return metadata
+	encodedTags, err := json.Marshal(tagValue)
+	if err != nil {
+		return metadata, nil
+	}
+	var tags []string
+	if err := json.Unmarshal(encodedTags, &tags); err != nil {
+		return metadata, nil
+	}
+	return metadata, append([]string(nil), tags...)
 }
 
 // InvalidateToken removes a token from cache

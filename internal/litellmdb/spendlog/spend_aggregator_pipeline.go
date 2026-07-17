@@ -2,14 +2,27 @@ package spendlog
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
-	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
+
+// spendLogQuerier is implemented by pgx.Tx and keeps the raw-row lookup on
+// the same transaction that inserted the rows.
+type spendLogQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+// dailySpendExecer is implemented by pgx.Tx. Daily aggregators deliberately
+// accept this narrow interface so they cannot escape to a pool connection and
+// accidentally commit independently from the raw row and entity counters.
+type dailySpendExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
 
 type spendLogRecord struct {
 	UserID                   string
@@ -31,11 +44,29 @@ type spendLogRecord struct {
 	OrganizationID           string
 	EndUser                  string
 	RequestTags              string
+	AgentID                  string
+	SkipDaily                bool
+}
+
+var dailyEndpointByCallType = map[string]string{
+	"acompletion":       "/chat/completions",
+	"atext_completion":  "/completions",
+	"aembedding":        "/embeddings",
+	"aresponses":        "/responses",
+	"aimage_generation": "/image/generations",
+	"aimage_edit":       "/images/edits",
+}
+
+// dailyEndpoint mirrors LiteLLM ROUTE_ENDPOINT_MAPPING for AIR-supported
+// shadow routes. Unknown call types intentionally yield an empty/NULL-like
+// endpoint rather than leaking api_base into the daily dimension.
+func dailyEndpoint(callType string) string {
+	return dailyEndpointByCallType[callType]
 }
 
 func loadUnprocessedSpendLogRecords(
 	ctx context.Context,
-	conn *pgxpool.Conn,
+	conn spendLogQuerier,
 	logger *slog.Logger,
 	scope string,
 	requestIDs []string,
@@ -51,9 +82,9 @@ func loadUnprocessedSpendLogRecords(
 	for rows.Next() {
 		var record spendLogRecord
 		var userID *string
-		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, apiBase *string
+		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, callType, aggregationCallType *string
 		var status *string
-		var teamID, organizationID, endUser, requestTags *string
+		var teamID, organizationID, endUser, requestTags, agentID *string
 
 		err := rows.Scan(
 			&userID,
@@ -63,7 +94,8 @@ func loadUnprocessedSpendLogRecords(
 			&modelGroup,
 			&customLLMProvider,
 			&mcpNamespacedToolName,
-			&apiBase,
+			&callType,
+			&aggregationCallType,
 			&record.PromptTokens,
 			&record.CompletionTokens,
 			&record.CacheReadInputTokens,
@@ -75,6 +107,7 @@ func loadUnprocessedSpendLogRecords(
 			&organizationID,
 			&endUser,
 			&requestTags,
+			&agentID,
 		)
 		if err != nil {
 			logger.Error("[DB] "+scope+" aggregation: failed to scan row", "error", err)
@@ -86,12 +119,53 @@ func loadUnprocessedSpendLogRecords(
 		record.ModelGroup = derefString(modelGroup)
 		record.CustomLLMProvider = derefString(customLLMProvider)
 		record.MCPNamespacedTool = derefString(mcpNamespacedToolName)
-		record.Endpoint = derefString(apiBase)
 		record.Status = derefString(status)
+		rawCallType := derefString(callType)
+		effectiveCallType := derefString(aggregationCallType)
+		if effectiveCallType == "" {
+			record.SkipDaily = true
+		} else {
+			_, knownEndpoint := dailyEndpointByCallType[effectiveCallType]
+			if !knownEndpoint {
+				return nil, fmt.Errorf("unsupported LiteLLM daily call_type %q for request %q", effectiveCallType, record.RequestID)
+			}
+			if rawCallType == "" {
+				if record.Status != "failure" {
+					return nil, fmt.Errorf(
+						"empty raw LiteLLM call_type with status %q for request %q",
+						record.Status, record.RequestID,
+					)
+				}
+				if record.Spend != 0 || record.PromptTokens != 0 ||
+					record.CompletionTokens != 0 || record.CacheReadInputTokens != 0 ||
+					record.CacheCreationInputTokens != 0 {
+					return nil, fmt.Errorf(
+						"empty raw LiteLLM call_type on a nonzero failure for request %q",
+						record.RequestID,
+					)
+				}
+				// LiteLLM failure rows use the public model as their daily model and
+				// leave provider and endpoint empty. Keep the richer raw
+				// AIR dimensions intact while projecting the compatible daily key.
+				publicModel := record.ModelGroup
+				if publicModel == "" {
+					publicModel = record.Model
+				}
+				record.Model = publicModel
+				record.CustomLLMProvider = ""
+				record.Endpoint = ""
+				if effectiveCallType == "aresponses" {
+					record.ModelGroup = ""
+				}
+			} else {
+				record.Endpoint = dailyEndpoint(rawCallType)
+			}
+		}
 		record.TeamID = derefString(teamID)
 		record.OrganizationID = derefString(organizationID)
 		record.EndUser = derefString(endUser)
 		record.RequestTags = derefString(requestTags)
+		record.AgentID = derefString(agentID)
 
 		records = append(records, record)
 	}
@@ -111,10 +185,16 @@ func derefString(value *string) string {
 	return *value
 }
 
-// runAggregators runs all 6 daily aggregators on the given records.
-// Returns true if all aggregators succeeded.
-func (sl *Logger) runAggregators(aggCtx context.Context, conn *pgxpool.Conn, scope string, records []spendLogRecord) bool {
-	hasErrors := false
+// runAggregators runs all six daily aggregators sequentially on the transaction
+// that inserted the source rows. The first error aborts the pipeline because a
+// PostgreSQL transaction is unusable after a statement error and must roll back.
+func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, scope string, records []spendLogRecord) error {
+	dailyRecords := make([]spendLogRecord, 0, len(records))
+	for _, record := range records {
+		if !record.SkipDaily {
+			dailyRecords = append(dailyRecords, record)
+		}
+	}
 	aggregators := []struct {
 		name string
 		fn   func() error
@@ -122,77 +202,40 @@ func (sl *Logger) runAggregators(aggCtx context.Context, conn *pgxpool.Conn, sco
 		{"User", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyUserSpendLogs(c, conn, sl.logger, records)
+			return aggregateDailyUserSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 		{"Team", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyTeamSpendLogs(c, conn, sl.logger, records)
+			return aggregateDailyTeamSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 		{"Organization", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyOrganizationSpendLogs(c, conn, sl.logger, records)
+			return aggregateDailyOrganizationSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 		{"EndUser", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyEndUserSpendLogs(c, conn, sl.logger, records)
+			return aggregateDailyEndUserSpendLogs(c, tx, sl.logger, dailyRecords)
+		}},
+		{"Agent", func() error {
+			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
+			defer cn()
+			return aggregateDailyAgentSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 		{"Tag", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
-			return aggregateDailyTagSpendLogs(c, conn, sl.logger, records)
+			return aggregateDailyTagSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 	}
 
 	for _, agg := range aggregators {
 		if err := agg.fn(); err != nil {
-			hasErrors = true
-			atomic.AddUint64(&sl.aggregationErrors, 1)
 			sl.logger.Error("[DB] "+scope+": aggregator failed", "aggregator", agg.name, "error", err)
+			return fmt.Errorf("%s daily aggregation: %w", agg.name, err)
 		}
 	}
-
-	if !hasErrors {
-		atomic.AddUint64(&sl.aggregationCount, 1)
-		sl.mu.Lock()
-		sl.lastAggregationTime = utils.NowUTC()
-		sl.mu.Unlock()
-		return true
-	}
-	return false
-}
-
-// aggregateByIDs aggregates specific logs (by request_id list) into all Daily tables.
-// Called from aggregationWorker after receiving insertedIDs from pendingAggregation.
-// No distributed lock needed — each router processes only its own IDs.
-func (sl *Logger) aggregateByIDs(ids []string) {
-	if len(ids) == 0 {
-		return
-	}
-
-	aggCtx, aggCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer aggCancel()
-
-	conn, err := sl.pool.Acquire(aggCtx)
-	if err != nil {
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("[DB] aggregateByIDs: failed to acquire connection", "error", err, "ids_count", len(ids))
-		return
-	}
-	defer conn.Release()
-
-	loadCtx, loadCancel := context.WithTimeout(aggCtx, 30*time.Second)
-	records, err := loadUnprocessedSpendLogRecords(loadCtx, conn, sl.logger, "push", ids)
-	loadCancel()
-	if err != nil {
-		atomic.AddUint64(&sl.aggregationErrors, 1)
-		return
-	}
-	if len(records) == 0 {
-		return
-	}
-
-	sl.runAggregators(aggCtx, conn, "aggregateByIDs", records)
+	return nil
 }

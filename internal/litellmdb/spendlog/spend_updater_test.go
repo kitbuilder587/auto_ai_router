@@ -1,10 +1,13 @@
 package spendlog
 
 import (
+	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAggregateSpendUpdates_AllEntities tests aggregation with all entity types
@@ -15,6 +18,11 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			UserID:         "user-1",
 			TeamID:         "team-1",
 			OrganizationID: "org-1",
+			ProjectID:      "project-1",
+			Model:          "model-1",
+			EndUser:        "end-user-1",
+			AgentID:        "agent-1",
+			RequestTags:    `["tag-1","tag-2"]`,
 			Spend:          10.0,
 		},
 		{
@@ -22,6 +30,11 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			UserID:         "user-1",
 			TeamID:         "team-1",
 			OrganizationID: "org-1",
+			ProjectID:      "project-1",
+			Model:          "model-1",
+			EndUser:        "end-user-1",
+			AgentID:        "agent-1",
+			RequestTags:    `["tag-1","tag-2"]`,
 			Spend:          5.0,
 		},
 		{
@@ -34,24 +47,28 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 	result := aggregateSpendUpdates(batch)
 
 	// Token aggregation
-	assert.Equal(t, 15.0, result.Tokens["token-1"])
-	assert.Equal(t, 3.0, result.Tokens["token-2"])
+	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1", Model: "model-1"}])
+	assert.Equal(t, 3.0, result.Tokens[entityModelKey{EntityID: "token-2"}])
 
 	// User aggregation
-	assert.Equal(t, 15.0, result.Users["user-1"])
-	assert.Equal(t, 3.0, result.Users["user-2"])
+	assert.Equal(t, 15.0, result.Users[entityModelKey{EntityID: "user-1", Model: "model-1"}])
+	assert.Equal(t, 3.0, result.Users[entityModelKey{EntityID: "user-2"}])
 
 	// Team aggregation
-	assert.Equal(t, 15.0, result.Teams["team-1"])
+	assert.Equal(t, 15.0, result.Teams[entityModelKey{EntityID: "team-1", Model: "model-1"}])
 
 	// Org aggregation
-	assert.Equal(t, 15.0, result.Orgs["org-1"])
+	assert.Equal(t, 15.0, result.Orgs[entityModelKey{EntityID: "org-1", Model: "model-1"}])
+	assert.Equal(t, 15.0, result.Projects[projectModelKey{ProjectID: "project-1", Model: "model-1"}])
 
 	// Team membership
-	assert.Equal(t, 15.0, result.TeamMembers["team-1:user-1"])
+	assert.Equal(t, 15.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-1"}])
+	assert.Equal(t, 15.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-1"}])
 
-	// Org membership
-	assert.Equal(t, 15.0, result.OrgMembers["org-1:user-1"])
+	assert.Equal(t, 15.0, result.EndUsers["end-user-1"])
+	assert.Equal(t, 15.0, result.Tags["tag-1"])
+	assert.Equal(t, 15.0, result.Tags["tag-2"])
+	assert.Equal(t, 15.0, result.Agents["agent-1"])
 }
 
 // TestAggregateSpendUpdates_EmptyBatch tests empty batch
@@ -63,8 +80,12 @@ func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 	assert.Empty(t, result.Users)
 	assert.Empty(t, result.Teams)
 	assert.Empty(t, result.Orgs)
+	assert.Empty(t, result.Projects)
 	assert.Empty(t, result.TeamMembers)
-	assert.Empty(t, result.OrgMembers)
+	assert.Empty(t, result.OrganizationMembers)
+	assert.Empty(t, result.EndUsers)
+	assert.Empty(t, result.Tags)
+	assert.Empty(t, result.Agents)
 }
 
 // TestAggregateSpendUpdates_NilBatch tests nil batch
@@ -99,14 +120,14 @@ func TestAggregateSpendUpdates_PartialEntities(t *testing.T) {
 	result := aggregateSpendUpdates(batch)
 
 	// Token aggregation works
-	assert.Equal(t, 15.0, result.Tokens["token-1"])
-	assert.Equal(t, 3.0, result.Tokens["token-2"])
+	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1"}])
+	assert.Equal(t, 3.0, result.Tokens[entityModelKey{EntityID: "token-2"}])
 
 	// User aggregation works
-	assert.Equal(t, 5.0, result.Users["user-1"])
+	assert.Equal(t, 5.0, result.Users[entityModelKey{EntityID: "user-1"}])
 
 	// Team aggregation works
-	assert.Equal(t, 3.0, result.Teams["team-1"])
+	assert.Equal(t, 3.0, result.Teams[entityModelKey{EntityID: "team-1"}])
 
 	// Org should be empty
 	assert.Empty(t, result.Orgs)
@@ -132,12 +153,11 @@ func TestAggregateSpendUpdates_TeamMember(t *testing.T) {
 	result := aggregateSpendUpdates(batch)
 
 	// Team membership should aggregate by team:user
-	assert.Equal(t, 10.0, result.TeamMembers["team-1:user-1"])
-	assert.Equal(t, 5.0, result.TeamMembers["team-1:user-2"])
+	assert.Equal(t, 10.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-1"}])
+	assert.Equal(t, 5.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-2"}])
 }
 
-// TestAggregateSpendUpdates_OrgMember tests org membership with user
-func TestAggregateSpendUpdates_OrgMember(t *testing.T) {
+func TestAggregateSpendUpdates_OrganizationMembership(t *testing.T) {
 	batch := []*models.SpendLogEntry{
 		{
 			APIKey:         "token-1",
@@ -154,10 +174,9 @@ func TestAggregateSpendUpdates_OrgMember(t *testing.T) {
 	}
 
 	result := aggregateSpendUpdates(batch)
-
-	// Org membership should aggregate by org:user
-	assert.Equal(t, 10.0, result.OrgMembers["org-1:user-1"])
-	assert.Equal(t, 5.0, result.OrgMembers["org-1:user-2"])
+	assert.Equal(t, 15.0, result.Orgs[entityModelKey{EntityID: "org-1"}])
+	assert.Equal(t, 10.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-1"}])
+	assert.Equal(t, 5.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-2"}])
 }
 
 // TestExecuteSpendUpdates_NilUpdates tests nil updates
@@ -169,27 +188,39 @@ func TestExecuteSpendUpdates_NilUpdates(t *testing.T) {
 // TestSpendUpdates_Fields verifies SpendUpdates structure
 func TestSpendUpdates_Fields(t *testing.T) {
 	updates := &SpendUpdates{
-		Tokens:      map[string]float64{"key1": 1.0},
-		Users:       map[string]float64{"user1": 2.0},
-		Teams:       map[string]float64{"team1": 3.0},
-		Orgs:        map[string]float64{"org1": 4.0},
-		TeamMembers: map[string]float64{"team1:user1": 5.0},
-		OrgMembers:  map[string]float64{"org1:user1": 6.0},
+		Tokens:              map[entityModelKey]float64{{EntityID: "key1", Model: "model1"}: 1.0},
+		Users:               map[entityModelKey]float64{{EntityID: "user1", Model: "model1"}: 2.0},
+		Teams:               map[entityModelKey]float64{{EntityID: "team1", Model: "model1"}: 3.0},
+		Orgs:                map[entityModelKey]float64{{EntityID: "org1", Model: "model1"}: 4.0},
+		Projects:            map[projectModelKey]float64{{ProjectID: "project1", Model: "model1"}: 4.5},
+		TeamMembers:         map[teamMemberKey]float64{{TeamID: "team1", UserID: "user1"}: 5.0},
+		OrganizationMembers: map[organizationMemberKey]float64{{OrganizationID: "org1", UserID: "user1"}: 5.5},
+		EndUsers:            map[string]float64{"end-user1": 6.0},
+		Tags:                map[string]float64{"tag1": 7.0},
+		Agents:              map[string]float64{"agent1": 8.0},
 	}
 
 	assert.Len(t, updates.Tokens, 1)
 	assert.Len(t, updates.Users, 1)
 	assert.Len(t, updates.Teams, 1)
 	assert.Len(t, updates.Orgs, 1)
+	assert.Len(t, updates.Projects, 1)
 	assert.Len(t, updates.TeamMembers, 1)
-	assert.Len(t, updates.OrgMembers, 1)
+	assert.Len(t, updates.OrganizationMembers, 1)
+	assert.Len(t, updates.EndUsers, 1)
+	assert.Len(t, updates.Tags, 1)
+	assert.Len(t, updates.Agents, 1)
 
-	assert.Equal(t, 1.0, updates.Tokens["key1"])
-	assert.Equal(t, 2.0, updates.Users["user1"])
-	assert.Equal(t, 3.0, updates.Teams["team1"])
-	assert.Equal(t, 4.0, updates.Orgs["org1"])
-	assert.Equal(t, 5.0, updates.TeamMembers["team1:user1"])
-	assert.Equal(t, 6.0, updates.OrgMembers["org1:user1"])
+	assert.Equal(t, 1.0, updates.Tokens[entityModelKey{EntityID: "key1", Model: "model1"}])
+	assert.Equal(t, 2.0, updates.Users[entityModelKey{EntityID: "user1", Model: "model1"}])
+	assert.Equal(t, 3.0, updates.Teams[entityModelKey{EntityID: "team1", Model: "model1"}])
+	assert.Equal(t, 4.0, updates.Orgs[entityModelKey{EntityID: "org1", Model: "model1"}])
+	assert.Equal(t, 4.5, updates.Projects[projectModelKey{ProjectID: "project1", Model: "model1"}])
+	assert.Equal(t, 5.0, updates.TeamMembers[teamMemberKey{TeamID: "team1", UserID: "user1"}])
+	assert.Equal(t, 5.5, updates.OrganizationMembers[organizationMemberKey{OrganizationID: "org1", UserID: "user1"}])
+	assert.Equal(t, 6.0, updates.EndUsers["end-user1"])
+	assert.Equal(t, 7.0, updates.Tags["tag1"])
+	assert.Equal(t, 8.0, updates.Agents["agent1"])
 }
 
 // TestSpendUpdates_Empty verifies empty SpendUpdates
@@ -200,8 +231,246 @@ func TestSpendUpdates_Empty(t *testing.T) {
 	assert.Nil(t, updates.Users)
 	assert.Nil(t, updates.Teams)
 	assert.Nil(t, updates.Orgs)
+	assert.Nil(t, updates.Projects)
 	assert.Nil(t, updates.TeamMembers)
-	assert.Nil(t, updates.OrgMembers)
+	assert.Nil(t, updates.OrganizationMembers)
+	assert.Nil(t, updates.EndUsers)
+	assert.Nil(t, updates.Tags)
+	assert.Nil(t, updates.Agents)
+}
+
+type recordedSpendUpdateCall struct {
+	query string
+	args  []interface{}
+}
+
+type recordingSpendUpdateExecer struct {
+	calls []recordedSpendUpdateCall
+}
+
+func (r *recordingSpendUpdateExecer) Exec(_ context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
+	r.calls = append(r.calls, recordedSpendUpdateCall{query: query, args: append([]interface{}(nil), args...)})
+	return pgconn.CommandTag{}, nil
+}
+
+type endUserSpendExecer struct {
+	recordingSpendUpdateExecer
+	spendByUser map[string]float64
+}
+
+func (e *endUserSpendExecer) Exec(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
+	tag, err := e.recordingSpendUpdateExecer.Exec(ctx, query, args...)
+	if err != nil {
+		return tag, err
+	}
+	endUserID := args[0].(string)
+	amount := args[1].(float64)
+	e.spendByUser[endUserID] += amount
+	return tag, nil
+}
+
+func TestUpdateEndUsersInsertsNewEndUser(t *testing.T) {
+	execer := &endUserSpendExecer{spendByUser: make(map[string]float64)}
+
+	require.NoError(t, updateEndUsers(context.Background(), execer, map[string]float64{
+		"new-end-user": 1.25,
+	}))
+
+	assert.Equal(t, 1.25, execer.spendByUser["new-end-user"])
+	assertEndUserUpsert(t, execer.calls, "new-end-user", 1.25)
+}
+
+func TestUpdateEndUsersIncrementsExistingEndUser(t *testing.T) {
+	execer := &endUserSpendExecer{spendByUser: map[string]float64{"existing-end-user": 3.5}}
+
+	require.NoError(t, updateEndUsers(context.Background(), execer, map[string]float64{
+		"existing-end-user": 0.75,
+	}))
+
+	assert.Equal(t, 4.25, execer.spendByUser["existing-end-user"])
+	assertEndUserUpsert(t, execer.calls, "existing-end-user", 0.75)
+}
+
+func assertEndUserUpsert(t *testing.T, calls []recordedSpendUpdateCall, endUserID string, amount float64) {
+	t.Helper()
+	require.Len(t, calls, 1)
+	call := calls[0]
+	assert.Contains(t, call.query, `INSERT INTO "LiteLLM_EndUserTable" (user_id, spend)`)
+	assert.Contains(t, call.query, "ON CONFLICT (user_id) DO UPDATE")
+	assert.Contains(t, call.query, `COALESCE("LiteLLM_EndUserTable".spend, 0) + EXCLUDED.spend`)
+	assert.Equal(t, []interface{}{endUserID, amount}, call.args)
+}
+
+func TestAggregateSpendUpdatesPreservesZeroSpendModelAndCompositeIDs(t *testing.T) {
+	entry := &models.SpendLogEntry{
+		APIKey:         "token:west",
+		UserID:         "user:east",
+		TeamID:         "team:blue",
+		OrganizationID: "org:green",
+		ProjectID:      "project:gold",
+		Model:          "provider:model:v1",
+		Spend:          0,
+	}
+
+	updates := aggregateSpendUpdates([]*models.SpendLogEntry{entry})
+
+	for _, present := range []bool{
+		hasEntityModelKey(updates.Tokens, entityModelKey{EntityID: entry.APIKey, Model: entry.Model}),
+		hasEntityModelKey(updates.Users, entityModelKey{EntityID: entry.UserID, Model: entry.Model}),
+		hasEntityModelKey(updates.Teams, entityModelKey{EntityID: entry.TeamID, Model: entry.Model}),
+		hasEntityModelKey(updates.Orgs, entityModelKey{EntityID: entry.OrganizationID, Model: entry.Model}),
+	} {
+		assert.True(t, present, "zero-spend rows must still create their model counter key")
+	}
+	_, projectPresent := updates.Projects[projectModelKey{ProjectID: entry.ProjectID, Model: entry.Model}]
+	assert.True(t, projectPresent)
+	_, teamMemberPresent := updates.TeamMembers[teamMemberKey{TeamID: entry.TeamID, UserID: entry.UserID}]
+	assert.True(t, teamMemberPresent)
+	_, organizationMemberPresent := updates.OrganizationMembers[organizationMemberKey{
+		OrganizationID: entry.OrganizationID,
+		UserID:         entry.UserID,
+	}]
+	assert.True(t, organizationMemberPresent)
+}
+
+func hasEntityModelKey(updates map[entityModelKey]float64, key entityModelKey) bool {
+	_, ok := updates[key]
+	return ok
+}
+
+func TestEntityUpdatesPersistSpendAndNumericModelSpendTogether(t *testing.T) {
+	const (
+		model  = "provider:model:{v1}"
+		entity = "tenant:west"
+	)
+
+	previousTokenLastActive := schemaTokenHasLastActive.Load()
+	schemaTokenHasLastActive.Store(true)
+	t.Cleanup(func() { schemaTokenHasLastActive.Store(previousTokenLastActive) })
+
+	tests := []struct {
+		name      string
+		table     string
+		extraSQL  string
+		runUpdate func(*recordingSpendUpdateExecer) error
+	}{
+		{
+			name:     "verification token",
+			table:    `"LiteLLM_VerificationToken"`,
+			extraSQL: "last_active = NOW()",
+			runUpdate: func(execer *recordingSpendUpdateExecer) error {
+				return updateTokens(context.Background(), execer, map[entityModelKey]float64{
+					{EntityID: entity, Model: model}: 0,
+				})
+			},
+		},
+		{
+			name:  "user",
+			table: `"LiteLLM_UserTable"`,
+			runUpdate: func(execer *recordingSpendUpdateExecer) error {
+				return updateUsers(context.Background(), execer, map[entityModelKey]float64{
+					{EntityID: entity, Model: model}: 0,
+				})
+			},
+		},
+		{
+			name:  "team",
+			table: `"LiteLLM_TeamTable"`,
+			runUpdate: func(execer *recordingSpendUpdateExecer) error {
+				return updateTeams(context.Background(), execer, map[entityModelKey]float64{
+					{EntityID: entity, Model: model}: 0,
+				})
+			},
+		},
+		{
+			name:  "organization",
+			table: `"LiteLLM_OrganizationTable"`,
+			runUpdate: func(execer *recordingSpendUpdateExecer) error {
+				return updateOrgs(context.Background(), execer, map[entityModelKey]float64{
+					{EntityID: entity, Model: model}: 0,
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			execer := &recordingSpendUpdateExecer{}
+			require.NoError(t, tt.runUpdate(execer))
+			require.Len(t, execer.calls, 1)
+
+			call := execer.calls[0]
+			assert.Contains(t, call.query, "UPDATE "+tt.table)
+			assert.Contains(t, call.query, "SET spend = spend + $1")
+			assert.Contains(t, call.query, "model_spend = jsonb_set")
+			assert.Contains(t, call.query, "ARRAY[$2]::text[]")
+			assert.Contains(t, call.query, "to_jsonb")
+			assert.Contains(t, call.query, "updated_at = NOW()")
+			if tt.extraSQL != "" {
+				assert.Contains(t, call.query, tt.extraSQL)
+			}
+			assert.Equal(t, []interface{}{float64(0), model, entity}, call.args)
+		})
+	}
+}
+
+func TestMembershipUpdatesKeepColonContainingCompositeIDsSeparate(t *testing.T) {
+	previousTeamTotalSpend := schemaTeamMemberHasTotalSpend.Load()
+	schemaTeamMemberHasTotalSpend.Store(true)
+	t.Cleanup(func() { schemaTeamMemberHasTotalSpend.Store(previousTeamTotalSpend) })
+
+	teamExecer := &recordingSpendUpdateExecer{}
+	require.NoError(t, updateTeamMembers(context.Background(), teamExecer, map[teamMemberKey]float64{
+		{TeamID: "team:west", UserID: "user:east"}: 1.25,
+	}))
+	require.Len(t, teamExecer.calls, 1)
+	assert.Equal(t, []interface{}{1.25, "team:west", "user:east"}, teamExecer.calls[0].args)
+
+	organizationExecer := &recordingSpendUpdateExecer{}
+	require.NoError(t, updateOrganizationMembers(
+		context.Background(),
+		organizationExecer,
+		map[organizationMemberKey]float64{
+			{OrganizationID: "org:west", UserID: "user:east"}: 2.5,
+		},
+	))
+	require.Len(t, organizationExecer.calls, 1)
+	call := organizationExecer.calls[0]
+	assert.Contains(t, call.query, `UPDATE "LiteLLM_OrganizationMembership"`)
+	assert.Contains(t, call.query, "updated_at = NOW()")
+	assert.Contains(t, call.query, "organization_id = $2 AND user_id = $3")
+	assert.Equal(t, []interface{}{2.5, "org:west", "user:east"}, call.args)
+}
+
+func TestZeroSpendTagAndAgentUpdatesAdvanceUpdatedAt(t *testing.T) {
+	tagTx := &atomicTestTx{}
+	require.NoError(t, updateTags(context.Background(), tagTx, map[string]float64{"tag-1": 0}))
+	require.Len(t, tagTx.attemptedSQL, 1)
+	assert.Contains(t, tagTx.attemptedSQL[0], `UPDATE "LiteLLM_TagTable"`)
+	assert.Contains(t, tagTx.attemptedSQL[0], "updated_at = NOW()")
+
+	agentTx := &atomicTestTx{}
+	require.NoError(t, updateAgents(context.Background(), agentTx, map[string]float64{"agent-1": 0}))
+	require.Len(t, agentTx.attemptedSQL, 1)
+	assert.Contains(t, agentTx.attemptedSQL[0], `UPDATE "LiteLLM_AgentsTable"`)
+	assert.Contains(t, agentTx.attemptedSQL[0], "updated_at = NOW()")
+}
+
+func TestUpdateProjectsPersistsSpendAndNumericModelSpend(t *testing.T) {
+	execer := &recordingSpendUpdateExecer{}
+	err := updateProjects(context.Background(), execer, map[projectModelKey]float64{
+		{ProjectID: "project-1", Model: "gpt-4o-mini"}: 0.125,
+	})
+
+	assert.NoError(t, err)
+	if assert.Len(t, execer.calls, 1) {
+		call := execer.calls[0]
+		assert.Contains(t, call.query, `UPDATE "LiteLLM_ProjectTable"`)
+		assert.Contains(t, call.query, "model_spend = jsonb_set")
+		assert.Contains(t, call.query, "to_jsonb")
+		assert.Contains(t, call.query, "updated_at = NOW()")
+		assert.Equal(t, []interface{}{0.125, "gpt-4o-mini", "project-1"}, call.args)
+	}
 }
 
 // TestFilterBatchByInsertedIDs tests filtering batch by inserted IDs
