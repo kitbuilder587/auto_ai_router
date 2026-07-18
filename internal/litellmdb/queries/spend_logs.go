@@ -338,7 +338,10 @@ const (
 
 // Number of parameters per SpendLogEntry in batch insert
 const SpendLogParamCount = 29
-const spendLogParamCount = SpendLogParamCount
+const (
+	spendLogParamCount                      = SpendLogParamCount
+	spendLogMCPNamespacedToolNameParamIndex = 27
+)
 
 // BuildBatchInsertQuery builds a query for batch INSERT
 func BuildBatchInsertQuery(count int) string {
@@ -371,7 +374,8 @@ func BuildBatchInsertQuery(count int) string {
 			if j > 0 {
 				b.WriteString(", ")
 			}
-			if j == 27 { // optional mcp_namespaced_tool_name is SQL NULL when absent
+			if j == spendLogMCPNamespacedToolNameParamIndex {
+				// Optional mcp_namespaced_tool_name is SQL NULL when absent.
 				fmt.Fprintf(&b, "NULLIF($%d, '')", paramIdx)
 			} else {
 				fmt.Fprintf(&b, "$%d", paramIdx)

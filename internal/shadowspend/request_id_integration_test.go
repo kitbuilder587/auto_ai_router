@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
-	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +53,7 @@ func TestShadowSinkConcurrentProviderResponseIDCollision(t *testing.T) {
 	secondSink, err := New(ctx, cfg, slog.Default())
 	require.NoError(t, err)
 
-	identity := verifiedIntegrationIdentity(t)
+	identity := integrationIdentityFixture()
 	providerID := "chatcmpl-concurrent-integration"
 	first := collisionIntegrationEntry(identity, providerID, "air-event-concurrent-1", time.Now().UTC())
 	second := collisionIntegrationEntry(identity, providerID, "air-event-concurrent-2", first.StartTime.Add(time.Millisecond))
@@ -124,7 +123,7 @@ func TestShadowSinkConcurrentProviderResponseIDCollision(t *testing.T) {
 }
 
 func collisionIntegrationEntry(
-	identity shadowcontext.Identity,
+	identity integrationIdentity,
 	providerID string,
 	eventID string,
 	start time.Time,

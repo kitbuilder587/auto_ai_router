@@ -147,14 +147,9 @@ func loadUnprocessedSpendLogRecords(
 						record.Status, record.RequestID,
 					)
 				}
-				if record.Spend != 0 || record.PromptTokens != 0 ||
-					record.CompletionTokens != 0 || record.CacheReadInputTokens != 0 ||
-					record.CacheCreationInputTokens != 0 {
-					return nil, fmt.Errorf(
-						"empty raw LiteLLM call_type on a nonzero failure for request %q",
-						record.RequestID,
-					)
-				}
+				// No nonzero-spend rejection here: LiteLLM legitimately writes
+				// failure rows with partial cost and usage (interrupted streams,
+				// recovered_response_cost in proxy_track_cost_callback).
 				// LiteLLM failure rows use the public model as their daily model and
 				// leave provider and endpoint empty. Keep the richer raw
 				// AIR dimensions intact while projecting the compatible daily key.

@@ -157,10 +157,8 @@ var (
 		},
 	)
 
-	// Kafka spend-log publisher metrics (internal/kafkalog). These mirror
-	// kafkalog.Stats snapshots (cumulative queue/DLQ counters), so gauges are
-	// used even for monotonic counts rather than prometheus.Counter, which
-	// would double-count on every periodic poll.
+	// Kafka publisher stats are snapshots of cumulative counters, so gauges avoid
+	// double-counting when the periodic updater publishes a new snapshot.
 	KafkaSpendLoggerQueuedTotal = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_spend_logger_queued_total",
@@ -192,7 +190,7 @@ var (
 	KafkaSpendLoggerDLQSize = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_spend_logger_dlq_size",
-			Help: "Current number of batches held in the Kafka spend logger's dead letter queue",
+			Help: "Current number of batches held in the Kafka spend logger dead letter queue",
 		},
 	)
 
