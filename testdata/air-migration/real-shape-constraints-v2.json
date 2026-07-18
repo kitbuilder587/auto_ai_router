@@ -2,7 +2,7 @@
   "schema_version": "air-migration-real-shape-constraints/v2",
   "provenance": {
     "sanitized_corpus_schema_version": "air-migration-real-shape-corpus/v2",
-    "sanitized_corpus_sha256": "96c161a3cc28af2bd87056e90e479f5a0077ac644b7634a821908102de54911b",
+    "sanitized_corpus_sha256": "4122060e52ea9dab3d1de8ae3c80e4885e59469764a4f87dc78dc2144c508c90",
     "spendlog_dump_profile_sha256": "6bc6086681ebd91f85d38ed8b1822f1aced2709bf663d13320e0584d9715f052",
     "spendlog_source_sha256": "99e228e81e40158dcc049e61a164406916fde62b1872450be11dedd1779c77b0",
     "spendlog_source_complete": false,

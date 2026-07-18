@@ -186,6 +186,50 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 	assert.Equal(t, int32(1), providerCalls.Load(), "master-key internal routing must remain available")
 }
 
+func TestExplicitClientModelSurfacePreservesRestrictedACLPrecedenceForUnknownModel(t *testing.T) {
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"unexpected-provider-call"}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"restricted-key": {
+			Token:  "restricted-hash",
+			Models: []string{"public/chat"},
+		},
+		"unrestricted-key": {
+			Token: "unrestricted-hash",
+		},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.modelManager.SetClientModelIDs([]string{"public/chat", "public/embed"})
+
+	request := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"unknown-client-model","messages":[{"role":"user","content":"hello"}]}`,
+		))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		writer := httptest.NewRecorder()
+		prx.ProxyRequest(writer, req)
+		return writer
+	}
+
+	restricted := request("restricted-key")
+	assertAuthErrorShape(t, restricted, http.StatusForbidden)
+	assert.Contains(t, restricted.Body.String(), "Model not allowed")
+
+	unrestricted := request("unrestricted-key")
+	testhelpers.AssertJSONErrorResponse(t, unrestricted, http.StatusNotFound, "not_found_error", "Model unknown-client-model not found")
+
+	trusted := request("master-key")
+	testhelpers.AssertJSONErrorResponse(t, trusted, http.StatusNotFound, "not_found_error", "Model unknown-client-model not found")
+	assert.Zero(t, providerCalls.Load())
+}
+
 func TestClientAuthenticationAuthorizationTakesPrecedenceOverXAPIKey(t *testing.T) {
 	db := &clientAuthTestDB{
 		tokens: map[string]*dbmodels.TokenInfo{"valid-x-key": {Token: "hash"}},

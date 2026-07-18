@@ -567,22 +567,10 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
 	// cannot discover or invoke them even when their DB model ACL is empty.
 	trustedInternalModelID := p.masterKey != "" && logCtx.Token == p.masterKey
-	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
-		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
-			"error_code", http.StatusNotFound,
-			"model", modelID,
-		)
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusNotFound
-		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
-		// Product-surface rejections happen before a provider attempt. Suppress
-		// the deferred zero-spend failure row just like an unknown model.
-		logCtx.Logged = true
-		WriteErrorNotFound(w, logCtx.ErrorMsg)
-		return nil, "", "", false, false
-	}
 	// Token model scopes contain client-visible model IDs. Enforce the scope
-	// before model_alias rewrites the request to its backend routing name.
+	// before route-surface lookup or alias rewrites. LiteLLM reports a restricted
+	// key's unknown/disallowed model as an authorization failure; unrestricted
+	// keys continue to the product-surface check and receive a not-found error.
 	modelAllowed := logCtx.TokenInfo == nil || logCtx.TokenInfo.IsModelAllowed(modelID)
 	if logCtx.TokenInfo != nil && p.modelManager != nil {
 		modelAllowed = logCtx.TokenInfo.IsModelAllowedBy(modelID, p.modelManager.IsModelIDAllowedByScope)
@@ -598,12 +586,33 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorForbidden(w, "Model not allowed")
 		return nil, "", "", false, false
 	}
+	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
+		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		// Product-surface rejections happen before a provider attempt. Suppress
+		// the deferred zero-spend failure row just like an unknown model.
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	}
 
 	// Resolve additional client-visible names to one exact LiteLLM deployment
 	// identity first. The requested name remains in PublicModelID/Billing so
 	// SpendLogs preserve the user-facing model_group; routing continues through
 	// the canonical public model and then the existing provider-backend alias.
-	if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
+	// A trusted LiteLLM hop may submit an exact configured backend whose string
+	// also exists in the client accepted-alias map. Preserve that exact internal
+	// route; non-master callers and non-routable aliases still use the fail-closed
+	// public resolver.
+	trustedExactModelID := trustedInternalModelID && len(p.modelManager.GetCredentialsForModel(modelID)) > 0
+	if trustedExactModelID {
+		p.logger.DebugContext(r.Context(), "Preserved trusted internal model identifier", "model", modelID)
+	} else if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
 		p.logger.WarnContext(r.Context(), "Public model alias is not uniquely routable",
 			"error_code", http.StatusNotFound,
 			"model", modelID,
