@@ -77,7 +77,10 @@ type Claims struct {
 	DeploymentID   string   `json:"deployment_id,omitempty"`
 	EndUser        string   `json:"end_user,omitempty"`
 	Tags           []string `json:"tags,omitempty"`
-	CallID         string   `json:"call_id"`
+	// OriginalCallType preserves the user-facing operation when LiteLLM
+	// translates it to another AIR route before forwarding the request.
+	OriginalCallType string `json:"original_call_type"`
+	CallID           string `json:"call_id"`
 }
 
 type Identity struct {
@@ -91,7 +94,9 @@ type Identity struct {
 	DeploymentID   string
 	EndUser        string
 	Tags           []string
-	CallID         string
+	// OriginalCallType is populated only after the containing JWS is verified.
+	OriginalCallType string
+	CallID           string
 }
 
 type Result struct {
@@ -214,17 +219,18 @@ func (v *Verifier) Verify(compact string) Result {
 	return Result{
 		State: StateValid,
 		Identity: Identity{
-			APIKeyHash:     claims.APIKeyHash,
-			UserID:         claims.UserID,
-			TeamID:         claims.TeamID,
-			OrganizationID: claims.OrganizationID,
-			ProjectID:      claims.ProjectID,
-			AgentID:        claims.AgentID,
-			PublicModel:    claims.PublicModel,
-			DeploymentID:   claims.DeploymentID,
-			EndUser:        claims.EndUser,
-			Tags:           append([]string(nil), claims.Tags...),
-			CallID:         claims.CallID,
+			APIKeyHash:       claims.APIKeyHash,
+			UserID:           claims.UserID,
+			TeamID:           claims.TeamID,
+			OrganizationID:   claims.OrganizationID,
+			ProjectID:        claims.ProjectID,
+			AgentID:          claims.AgentID,
+			PublicModel:      claims.PublicModel,
+			DeploymentID:     claims.DeploymentID,
+			EndUser:          claims.EndUser,
+			Tags:             append([]string(nil), claims.Tags...),
+			OriginalCallType: claims.OriginalCallType,
+			CallID:           claims.CallID,
 		},
 	}
 }
@@ -243,6 +249,9 @@ func (v *Verifier) validateClaims(claims Claims) error {
 	if !validAPIKeyHash(claims.APIKeyHash) || !validCallID(claims.CallID) {
 		return fmt.Errorf("%w: identity claims", ErrInvalidClaims)
 	}
+	if !validOriginalCallType(claims.OriginalCallType) {
+		return fmt.Errorf("%w: original_call_type", ErrInvalidClaims)
+	}
 	if time.Unix(claims.ExpiresAt, 0).Before(now.Add(-v.skew)) {
 		return ErrExpired
 	}
@@ -253,6 +262,15 @@ func (v *Verifier) validateClaims(claims Claims) error {
 		return fmt.Errorf("%w: iat is in the future", ErrInvalidClaims)
 	}
 	return nil
+}
+
+func validOriginalCallType(value string) bool {
+	switch value {
+	case "acompletion", "atext_completion", "aembedding", "aresponses", "aimage_generation", "aimage_edit":
+		return true
+	default:
+		return false
+	}
 }
 
 func validAPIKeyHash(value string) bool {

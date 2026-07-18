@@ -89,11 +89,18 @@ func (logCtx *RequestLogContext) captureProviderResponseID(capture *responseIDCa
 }
 
 func NewBillingContext(eventID, callID, endpoint string, identity shadowcontext.Identity) BillingContext {
+	callType := routeKindFromEndpoint(endpoint)
+	// LiteLLM may translate legacy Completions into Chat Completions before AIR
+	// sees the request. Identity only contains this override after JWS
+	// verification; direct and invalidly signed requests remain route-derived.
+	if signedCallType := routeKindFromSignedOriginalCallType(identity.OriginalCallType); signedCallType != RouteUnknown {
+		callType = signedCallType
+	}
 	return BillingContext{
 		eventID:          eventID,
 		callID:           callID,
 		originalEndpoint: endpoint,
-		callType:         routeKindFromEndpoint(endpoint),
+		callType:         callType,
 		publicModel:      identity.PublicModel,
 		deploymentID:     identity.DeploymentID,
 	}
@@ -193,6 +200,25 @@ func routeKindFromEndpoint(endpoint string) RouteKind {
 	case "/v1/images/generations":
 		return RouteImageGeneration
 	case "/v1/images/edits":
+		return RouteImageEdit
+	default:
+		return RouteUnknown
+	}
+}
+
+func routeKindFromSignedOriginalCallType(callType string) RouteKind {
+	switch callType {
+	case string(RouteCompletion):
+		return RouteCompletion
+	case string(RouteTextCompletion):
+		return RouteTextCompletion
+	case string(RouteEmbedding):
+		return RouteEmbedding
+	case string(RouteResponses):
+		return RouteResponses
+	case string(RouteImageGeneration):
+		return RouteImageGeneration
+	case string(RouteImageEdit):
 		return RouteImageEdit
 	default:
 		return RouteUnknown

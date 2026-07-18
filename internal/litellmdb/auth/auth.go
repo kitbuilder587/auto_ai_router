@@ -175,7 +175,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	// ============ User fields ============
 	var userIDCheck, userAlias, userEmail *string
 	var userMaxBudget, userSpend *float64
-	var userTPMLimit, userRPMLimit *int64
 	var userModels []string
 
 	// ============ Team fields ============
@@ -234,8 +233,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&userEmail,
 		&userMaxBudget,
 		&userSpend,
-		&userTPMLimit,
-		&userRPMLimit,
 		&userModels,
 
 		// Team
@@ -332,8 +329,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	}
 	info.UserMaxBudget = userMaxBudget
 	info.UserSpend = userSpend
-	info.UserTPMLimit = userTPMLimit
-	info.UserRPMLimit = userRPMLimit
 	info.UserModels = userModels
 
 	// Set Team fields (if team exists)

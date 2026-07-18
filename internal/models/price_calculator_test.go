@@ -57,7 +57,7 @@ func TestCalculateTokenCosts_ImagenUsesPerImageRate(t *testing.T) {
 	assert.InDelta(t, 0.036, costs.TotalCost, 1e-12)
 }
 
-func TestCalculateShadowTokenCosts_ImageInputTokensUseImageRate(t *testing.T) {
+func TestCalculateTokenCosts_ImageInputTokensUseImageRate(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens: 100,
 		ImageTokens:  40,
@@ -67,7 +67,7 @@ func TestCalculateShadowTokenCosts_ImageInputTokensUseImageRate(t *testing.T) {
 		InputCostPerImageToken: 0.03,
 	}
 
-	costs := CalculateShadowTokenCosts(usage, price)
+	costs := CalculateTokenCosts(usage, price)
 
 	assert.InDelta(t, 0.6, costs.InputCost, 1e-12)
 	assert.InDelta(t, 1.2, costs.InputImageCost, 1e-12)
@@ -76,7 +76,7 @@ func TestCalculateShadowTokenCosts_ImageInputTokensUseImageRate(t *testing.T) {
 	assert.InDelta(t, 1.8, costs.TotalCost, 1e-12)
 }
 
-func TestCalculateShadowTokenCosts_ImageOutputTokensUseImageRate(t *testing.T) {
+func TestCalculateTokenCosts_ImageOutputTokensUseImageRate(t *testing.T) {
 	usage := &converter.TokenUsage{
 		CompletionTokens:  100,
 		OutputImageTokens: 80,
@@ -86,7 +86,7 @@ func TestCalculateShadowTokenCosts_ImageOutputTokensUseImageRate(t *testing.T) {
 		OutputCostPerImageToken: 0.05,
 	}
 
-	costs := CalculateShadowTokenCosts(usage, price)
+	costs := CalculateTokenCosts(usage, price)
 
 	assert.InDelta(t, 0.4, costs.OutputCost, 1e-12)
 	assert.Zero(t, costs.InputImageCost)
@@ -95,7 +95,7 @@ func TestCalculateShadowTokenCosts_ImageOutputTokensUseImageRate(t *testing.T) {
 	assert.InDelta(t, 4.4, costs.TotalCost, 1e-12)
 }
 
-func TestCalculateShadowTokenCosts_PerImagePriceTakesPriorityForOutput(t *testing.T) {
+func TestCalculateTokenCosts_PerImagePriceTakesPriorityForOutput(t *testing.T) {
 	usage := &converter.TokenUsage{
 		CompletionTokens:  100,
 		OutputImageTokens: 80,
@@ -107,7 +107,7 @@ func TestCalculateShadowTokenCosts_PerImagePriceTakesPriorityForOutput(t *testin
 		OutputCostPerImage:      1.5,
 	}
 
-	costs := CalculateShadowTokenCosts(usage, price)
+	costs := CalculateTokenCosts(usage, price)
 
 	assert.InDelta(t, 0.4, costs.OutputCost, 1e-12)
 	assert.InDelta(t, 3.0, costs.OutputImageCost, 1e-12)
@@ -278,24 +278,7 @@ func TestCalculateTokenCosts_CachedFallbackToRegularPrice(t *testing.T) {
 	assert.Equal(t, 1.0, costs.TotalCost)
 }
 
-func TestCalculateShadowTokenCosts_CachedOutputIsNotDoubleCounted(t *testing.T) {
-	usage := &converter.TokenUsage{
-		CompletionTokens:   100,
-		CachedOutputTokens: 20,
-	}
-	price := &ModelPrice{
-		OutputCostPerToken:       0.02,
-		OutputCostPerCachedToken: 0.005,
-	}
-
-	costs := CalculateShadowTokenCosts(usage, price)
-
-	assert.InDelta(t, 1.6, costs.OutputCost, 1e-12)
-	assert.InDelta(t, 0.1, costs.CachedOutputCost, 1e-12)
-	assert.InDelta(t, 1.7, costs.TotalCost, 1e-12)
-}
-
-func TestCalculateTokenCosts_PreservesProductionCachedOutputSemantics(t *testing.T) {
+func TestCalculateTokenCosts_CachedOutputIsNotDoubleCounted(t *testing.T) {
 	usage := &converter.TokenUsage{
 		CompletionTokens:   100,
 		CachedOutputTokens: 20,
@@ -307,9 +290,9 @@ func TestCalculateTokenCosts_PreservesProductionCachedOutputSemantics(t *testing
 
 	costs := CalculateTokenCosts(usage, price)
 
-	assert.InDelta(t, 2.0, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 1.6, costs.OutputCost, 1e-12)
 	assert.InDelta(t, 0.1, costs.CachedOutputCost, 1e-12)
-	assert.InDelta(t, 2.1, costs.TotalCost, 1e-12)
+	assert.InDelta(t, 1.7, costs.TotalCost, 1e-12)
 }
 
 func TestCalculateTokenCosts_SafetyNegativeTokens(t *testing.T) {

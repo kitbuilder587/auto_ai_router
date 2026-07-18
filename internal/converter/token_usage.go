@@ -14,8 +14,8 @@ type TokenUsage struct {
 	AcceptedPredictionTokens int
 	RejectedPredictionTokens int
 	ImageCount               int // Number of images to generate (1-10)
-	ImageTokens              int // Input image tokens included in PromptTokens
-	OutputImageTokens        int // Output image tokens included in CompletionTokens
+	ImageTokens              int // Input image/video tokens included in PromptTokens
+	OutputImageTokens        int // Generated image/video tokens included in CompletionTokens
 }
 
 // Total returns the sum of prompt and completion tokens.

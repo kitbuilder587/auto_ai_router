@@ -56,6 +56,22 @@ func TestBillingContextPreservesOriginalRouteAndPublicModel(t *testing.T) {
 	assert.Empty(t, resolved.Attempts(), "adding an attempt must not mutate an earlier context value")
 }
 
+func TestBillingContextUsesOnlyCanonicalSignedOriginalCallType(t *testing.T) {
+	translated := NewBillingContext("event-1", "call-1", "/v1/chat/completions", shadowcontext.Identity{
+		OriginalCallType: string(RouteTextCompletion),
+	})
+	assert.Equal(t, RouteTextCompletion, translated.CallType())
+	assert.Equal(t, "/v1/chat/completions", translated.OriginalEndpoint())
+
+	legacyToken := NewBillingContext("event-2", "call-2", "/v1/chat/completions", shadowcontext.Identity{})
+	assert.Equal(t, RouteCompletion, legacyToken.CallType())
+
+	invalidIdentity := NewBillingContext("event-3", "call-3", "/v1/chat/completions", shadowcontext.Identity{
+		OriginalCallType: "text_completion",
+	})
+	assert.Equal(t, RouteCompletion, invalidIdentity.CallType())
+}
+
 func TestBillingContextFillsMissingPublicModelWithoutOverwritingSignedIdentity(t *testing.T) {
 	direct := NewBillingContext("event-direct", "call-direct", "/v1/chat/completions", shadowcontext.Identity{}).
 		WithPublicModel("openai/gpt-4o-mini")

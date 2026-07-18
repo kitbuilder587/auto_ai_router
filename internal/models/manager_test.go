@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
 )
@@ -82,6 +83,29 @@ func TestGetAllModelsScoped_FiltersByCredentialScope(t *testing.T) {
 	}
 
 	assert.ElementsMatch(t, []string{"shared-model", "team-a-model"}, ids)
+}
+
+func TestGetAllModelsScoped_ProjectsExplicitClientSurfaceAfterVisibility(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{
+		{Name: "backend-a", Credential: "team-a"},
+		{Name: "backend-b", Credential: "team-b"},
+	})
+	manager.SetModelAliases(map[string]string{
+		"public/a": "backend-a",
+		"public/b": "backend-b",
+	})
+	manager.SetClientModelIDs([]string{"public/a", "public/b"})
+	credentials := []config.CredentialConfig{
+		{Name: "team-a", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-a"}},
+		{Name: "team-b", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-b"}},
+	}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+
+	visibility := scope.NewContext([]string{"team-a"}, nil)
+	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsScoped(visibility)))
+	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsWithAccessGroupsScoped(visibility)))
 }
 
 func TestGetAllModelsScoped_AdminExcludesCredentialsWithoutRoute(t *testing.T) {
@@ -417,7 +441,8 @@ func TestRoutableAliasTargetCanAlsoBeAnAliasKey(t *testing.T) {
 	// though it is also an alias key for a different request.
 	assert.True(t, manager.AreModelIDsAliasEquivalent("chatgpt-4o-latest", "openai/gpt-4o"))
 	assert.True(t, manager.AreModelIDsAliasEquivalent("openai/gpt-4o", "chatgpt-4o-latest"))
-	assert.True(t, manager.IsModelIDAllowedByScope("chatgpt-4o-latest", []string{"openai/gpt-4o"}))
+	assert.True(t, manager.IsModelIDAllowedByScope("chatgpt-4o-latest", []string{"openai/gpt-4o"}),
+		"a configured request alias inherits its exact LiteLLM model-group permission")
 	assert.False(t, manager.IsModelIDAllowedByScope("openai/gpt-4o", []string{"chatgpt-4o-latest"}),
 		"an internal alias target cannot gain permission from the public alias in reverse")
 
@@ -501,6 +526,47 @@ func TestModelScopeWildcardMatchingIsProviderAwareAndTreatsRegexSyntaxLiterally(
 	ambiguous.LoadModelsFromConfig(ambiguousCredentials)
 	assert.False(t, ambiguous.IsModelIDAllowedByScope("gpt-4o", []string{"openai/*"}),
 		"provider-qualified wildcard matching must fail closed for ambiguous short models")
+}
+
+func TestPublicModelAliasInheritsCanonicalPermissionAcrossHierarchy(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "openai-provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, 100, []config.ModelRPMConfig{{
+		Name:       "gpt-4o-mini",
+		Credential: credential.Name,
+	}})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetModelAliases(map[string]string{
+		"openai/gpt-4o-mini": "gpt-4o-mini",
+	})
+	manager.SetPublicModelAliases(map[string]string{
+		"gpt-4o-mini": "openai/gpt-4o-mini",
+	})
+	manager.UpdateDBModels([]config.ModelRPMConfig{{
+		Name:         "openai/gpt-4o-mini",
+		Model:        "gpt-4o-mini",
+		Credential:   credential.Name,
+		DeploymentID: "deployment-gpt-4o-mini",
+	}}, []config.CredentialConfig{credential}, []config.CredentialConfig{credential})
+
+	assert.True(t, manager.IsModelIDAllowedByScope("openai/gpt-4o-mini", []string{"openai/gpt-4o-mini"}))
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o-mini", []string{"gpt-4o-mini"}))
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o-mini", []string{"openai/*"}),
+		"LiteLLM provider wildcards remain valid for known short model IDs")
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o-mini", []string{"openai/gpt-4o-mini"}),
+		"LiteLLM checks both a configured alias and its canonical model group")
+
+	token := &dbmodels.TokenInfo{
+		Models:        []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
+		TeamID:        "restricted-team",
+		TeamModels:    []string{"openai/gpt-4o-mini"},
+		ProjectID:     "restricted-project",
+		ProjectModels: []string{"openai/gpt-4o-mini"},
+	}
+	assert.True(t, token.IsModelAllowedBy("openai/gpt-4o-mini", manager.IsModelIDAllowedByScope))
+	assert.True(t, token.IsModelAllowedBy("gpt-4o-mini", manager.IsModelIDAllowedByScope),
+		"the configured alias must inherit canonical permission in every hierarchy scope")
 }
 
 func TestGetAllModelsExcludesModelsWithoutCredentialMapping(t *testing.T) {
@@ -598,29 +664,6 @@ func TestGetAllModelsWithAccessGroupsDeduplicatesAliasMatchingGroupedID(t *testi
 	}
 
 	assert.Equal(t, []string{"openai/gpt-4o-mini", "openai/standalone"}, ids)
-}
-
-func TestGetAllModelsWithAccessGroupsScopedFiltersModelScope(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, 100, []config.ModelRPMConfig{{
-		Name:       "team-a-model",
-		Credential: "openai-provider",
-		RPM:        100,
-	}})
-	credentials := []config.CredentialConfig{{Name: "openai-provider", Type: config.ProviderTypeOpenAI}}
-	manager.SetCredentials(credentials)
-	manager.LoadModelsFromConfig(credentials)
-	manager.mu.Lock()
-	manager.dynamicModelScopes["team-a-model"] = map[string]ScopeMetadata{
-		"openai-provider": scopeMetadataFromExpression(scope.FromScopes([]string{"team-a"}, nil)),
-	}
-	manager.mu.Unlock()
-
-	allowed := manager.GetAllModelsWithAccessGroupsScoped(scope.NewContext([]string{"team-a"}, nil))
-	denied := manager.GetAllModelsWithAccessGroupsScoped(scope.NewContext([]string{"team-b"}, nil))
-
-	assert.Equal(t, []string{"openai/team-a-model"}, modelIDs(allowed.Data))
-	assert.Empty(t, denied.Data)
 }
 
 func TestGetCredentialsForModel(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -36,6 +37,64 @@ func TestVerifierAcceptsValidEd25519JWS(t *testing.T) {
 	assert.Equal(t, "end-user-1", result.Identity.EndUser)
 	assert.Equal(t, []string{"golden", "shadow"}, result.Identity.Tags)
 	assert.Equal(t, "call-1", result.Identity.CallID)
+}
+
+func TestVerifierRequiresCanonicalOriginalCallType(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	now := time.Unix(1_800_000_000, 0).UTC()
+
+	for index, callType := range []string{
+		"acompletion",
+		"atext_completion",
+		"aembedding",
+		"aresponses",
+		"aimage_generation",
+		"aimage_edit",
+	} {
+		t.Run(callType, func(t *testing.T) {
+			verifier := newTestVerifier(t, publicKey, now)
+			claims := validClaims(now)
+			claims.ID = fmt.Sprintf("jti-%d", index)
+			claims.OriginalCallType = callType
+
+			result := verifier.Verify(signJWS(t, privateKey, "key-1", claims))
+
+			require.NoError(t, result.Err)
+			assert.Equal(t, StateValid, result.State)
+			assert.Equal(t, callType, result.Identity.OriginalCallType)
+		})
+	}
+}
+
+func TestVerifierRejectsOlderTokenWithoutOriginalCallType(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	verifier := newTestVerifier(t, publicKey, now)
+	claims := validClaims(now)
+	claims.OriginalCallType = ""
+
+	result := verifier.Verify(signJWS(t, privateKey, "key-1", claims))
+
+	assert.ErrorIs(t, result.Err, ErrInvalidClaims)
+	assert.Equal(t, StateInvalid, result.State)
+	assert.Empty(t, result.Identity.OriginalCallType)
+}
+
+func TestVerifierRejectsUnsupportedOriginalCallType(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	verifier := newTestVerifier(t, publicKey, now)
+	claims := validClaims(now)
+	claims.OriginalCallType = "completion"
+
+	result := verifier.Verify(signJWS(t, privateKey, "key-1", claims))
+
+	assert.ErrorIs(t, result.Err, ErrInvalidClaims)
+	assert.Equal(t, StateInvalid, result.State)
+	assert.Empty(t, result.Identity.OriginalCallType)
 }
 
 func TestVerifierRejectsExpiredForgedAndReplayedJWS(t *testing.T) {
@@ -197,22 +256,23 @@ func newTestVerifier(t *testing.T, publicKey ed25519.PublicKey, now time.Time) *
 
 func validClaims(now time.Time) Claims {
 	return Claims{
-		Issuer:         "litellm",
-		Audience:       Audience{"air-ru01"},
-		IssuedAt:       now.Add(-time.Second).Unix(),
-		ExpiresAt:      now.Add(time.Minute).Unix(),
-		ID:             "jti-1",
-		APIKeyHash:     "cc557cce629a1cb98664b98a3d5f5600a90a91c5955c4fdddfa4d13c94bfdcd6",
-		UserID:         "user-1",
-		TeamID:         "team-1",
-		OrganizationID: "org-1",
-		ProjectID:      "project-1",
-		AgentID:        "agent-1",
-		PublicModel:    "public-gpt",
-		DeploymentID:   "deployment-1",
-		EndUser:        "end-user-1",
-		Tags:           []string{"golden", "shadow"},
-		CallID:         "call-1",
+		Issuer:           "litellm",
+		Audience:         Audience{"air-ru01"},
+		IssuedAt:         now.Add(-time.Second).Unix(),
+		ExpiresAt:        now.Add(time.Minute).Unix(),
+		ID:               "jti-1",
+		APIKeyHash:       "cc557cce629a1cb98664b98a3d5f5600a90a91c5955c4fdddfa4d13c94bfdcd6",
+		UserID:           "user-1",
+		TeamID:           "team-1",
+		OrganizationID:   "org-1",
+		ProjectID:        "project-1",
+		AgentID:          "agent-1",
+		PublicModel:      "public-gpt",
+		DeploymentID:     "deployment-1",
+		EndUser:          "end-user-1",
+		Tags:             []string{"golden", "shadow"},
+		OriginalCallType: "acompletion",
+		CallID:           "call-1",
 	}
 }
 
