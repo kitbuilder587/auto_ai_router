@@ -21,6 +21,38 @@ and recent logs to determine whether the condition is ongoing. A financial
 comparison is valid only for a time range whose AIR processes all kept this
 gauge at `1` throughout the range.
 
+## Comparison semantics (what shadow-compare can and cannot prove)
+
+The comparison against the primary LiteLLM accounting is **aggregate-only**.
+Interpret its output with the following known, deliberate asymmetries:
+
+- **No row-by-row matching.** LiteLLM's `request_id` is the provider response
+  id (fallback `litellm_call_id`); AIR writes its own router UUID. The two
+  systems cannot be joined per request — only totals over a UTC window are
+  comparable.
+- **No per-model breakdown.** LiteLLM records the backend model name and the
+  deployment id in `model`/`model_id`; AIR records the public alias. Totals
+  match, per-model daily buckets never will. Compare spend/tokens/request
+  counts without the `model` dimension.
+- **Tables LiteLLM does not maintain.** AIR additionally increments
+  `LiteLLM_ProjectTable.spend`, `LiteLLM_OrganizationMembership.spend` and the
+  per-entity `model_spend` JSON columns. The primary writer never touches
+  them; they are excluded from comparison and must not be treated as drift.
+- **Empty dimensions.** AIR stores `''` where LiteLLM (via Prisma) stores SQL
+  `NULL` in nullable dimension columns (`model_group`, `custom_llm_provider`,
+  `endpoint`, ...). The comparator normalizes `'' = NULL`; ad-hoc SQL against
+  the two databases must do the same.
+- **Expected drift direction under retries.** LiteLLM deduplicates the raw
+  spend row (`skip_duplicates`) but enqueues entity and daily increments
+  regardless, so a redelivered event can double-count on the primary side.
+  AIR applies raw row, counters, and daily projections in one transaction
+  keyed by the inserted row, so replays add nothing. During incidents expect
+  `primary >= shadow`, not the reverse.
+- **Failure rows.** Both sides record failed requests (`failed_requests`
+  counters, spend usually 0), but LiteLLM writes `call_type=''` for them
+  while AIR keeps the resolved call type; daily failure buckets can differ in
+  the `endpoint`/`custom_llm_provider` dimensions.
+
 ## Triage
 
 1. Check sink health, queue depth, pending entries, and DLQ size.

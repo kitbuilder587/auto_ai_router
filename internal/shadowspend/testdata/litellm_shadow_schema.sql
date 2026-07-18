@@ -1,6 +1,9 @@
 -- LiteLLM shadow-write integration schema extracted from schema.prisma at
 -- commit 10d5804b3ef4ead5abb77c3f5fafdd0c0159de0f. It contains only the tables
 -- touched by AIR's shadow writer and is installed into an ephemeral test schema.
+-- Timestamps are timestamp(3) WITHOUT time zone, matching Prisma's DateTime
+-- mapping in the real LiteLLM DDL: timestamptz here would hide TZ-dependent
+-- date-bucketing bugs the production schema is exposed to.
 
 CREATE TABLE "LiteLLM_SpendLogs" (
     request_id text PRIMARY KEY,
@@ -10,10 +13,10 @@ CREATE TABLE "LiteLLM_SpendLogs" (
     total_tokens integer NOT NULL DEFAULT 0,
     prompt_tokens integer NOT NULL DEFAULT 0,
     completion_tokens integer NOT NULL DEFAULT 0,
-    "startTime" timestamptz NOT NULL,
-    "endTime" timestamptz NOT NULL,
+    "startTime" timestamp(3) NOT NULL,
+    "endTime" timestamp(3) NOT NULL,
     request_duration_ms integer,
-    "completionStartTime" timestamptz,
+    "completionStartTime" timestamp(3),
     model text NOT NULL DEFAULT '',
     model_id text DEFAULT '',
     model_group text DEFAULT '',
@@ -43,32 +46,32 @@ CREATE TABLE "LiteLLM_VerificationToken" (
     token text PRIMARY KEY,
     spend double precision NOT NULL DEFAULT 0,
     model_spend jsonb NOT NULL DEFAULT '{}'::jsonb,
-    last_active timestamptz,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    last_active timestamp(3),
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_UserTable" (
     user_id text PRIMARY KEY,
     spend double precision NOT NULL DEFAULT 0,
     model_spend jsonb NOT NULL DEFAULT '{}'::jsonb,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_TeamTable" (
     team_id text PRIMARY KEY,
     spend double precision NOT NULL DEFAULT 0,
     model_spend jsonb NOT NULL DEFAULT '{}'::jsonb,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_OrganizationTable" (
     organization_id text PRIMARY KEY,
     spend double precision NOT NULL DEFAULT 0,
     model_spend jsonb NOT NULL DEFAULT '{}'::jsonb,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_ProjectTable" (
     project_id text PRIMARY KEY,
     spend double precision NOT NULL DEFAULT 0,
     model_spend jsonb NOT NULL DEFAULT '{}'::jsonb,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_TeamMembership" (
     team_id text NOT NULL,
@@ -81,7 +84,7 @@ CREATE TABLE "LiteLLM_OrganizationMembership" (
     organization_id text NOT NULL,
     user_id text NOT NULL,
     spend double precision NOT NULL DEFAULT 0,
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL DEFAULT now(),
     PRIMARY KEY (organization_id, user_id)
 );
 CREATE TABLE "LiteLLM_EndUserTable" (
@@ -91,13 +94,13 @@ CREATE TABLE "LiteLLM_EndUserTable" (
 CREATE TABLE "LiteLLM_TagTable" (
     tag_name text PRIMARY KEY,
     spend double precision NOT NULL DEFAULT 0,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_AgentsTable" (
     agent_id text PRIMARY KEY,
     agent_name text UNIQUE,
     spend double precision NOT NULL DEFAULT 0,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 CREATE TABLE "LiteLLM_ToolTable" (
     tool_id text PRIMARY KEY,
@@ -110,10 +113,10 @@ CREATE TABLE "LiteLLM_ToolTable" (
     team_id text,
     key_alias text,
     user_agent text,
-    last_used_at timestamptz,
+    last_used_at timestamp(3),
     created_by text,
     updated_by text,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamp(3) NOT NULL DEFAULT now()
 );
 
 CREATE TABLE "LiteLLM_DailyUserSpend" (
@@ -134,8 +137,8 @@ CREATE TABLE "LiteLLM_DailyUserSpend" (
     api_requests bigint NOT NULL DEFAULT 0,
     successful_requests bigint NOT NULL DEFAULT 0,
     failed_requests bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamp(3) NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL,
     UNIQUE (user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 );
 
@@ -157,8 +160,8 @@ CREATE TABLE "LiteLLM_DailyTeamSpend" (
     api_requests bigint NOT NULL DEFAULT 0,
     successful_requests bigint NOT NULL DEFAULT 0,
     failed_requests bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamp(3) NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL,
     UNIQUE (team_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 );
 
@@ -180,8 +183,8 @@ CREATE TABLE "LiteLLM_DailyOrganizationSpend" (
     api_requests bigint NOT NULL DEFAULT 0,
     successful_requests bigint NOT NULL DEFAULT 0,
     failed_requests bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamp(3) NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL,
     UNIQUE (organization_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 );
 
@@ -203,8 +206,8 @@ CREATE TABLE "LiteLLM_DailyEndUserSpend" (
     api_requests bigint NOT NULL DEFAULT 0,
     successful_requests bigint NOT NULL DEFAULT 0,
     failed_requests bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamp(3) NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL,
     UNIQUE (end_user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 );
 
@@ -226,8 +229,8 @@ CREATE TABLE "LiteLLM_DailyAgentSpend" (
     api_requests bigint NOT NULL DEFAULT 0,
     successful_requests bigint NOT NULL DEFAULT 0,
     failed_requests bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamp(3) NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL,
     UNIQUE (agent_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 );
 
@@ -250,7 +253,7 @@ CREATE TABLE "LiteLLM_DailyTagSpend" (
     api_requests bigint NOT NULL DEFAULT 0,
     successful_requests bigint NOT NULL DEFAULT 0,
     failed_requests bigint NOT NULL DEFAULT 0,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamp(3) NOT NULL DEFAULT now(),
+    updated_at timestamp(3) NOT NULL,
     UNIQUE (tag, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 );

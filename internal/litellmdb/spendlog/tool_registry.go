@@ -3,6 +3,8 @@ package spendlog
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -76,6 +78,13 @@ func upsertDiscoveredTools(ctx context.Context, execer toolRegistryExecer, batch
 	if len(discoveries) == 0 {
 		return nil
 	}
+
+	// Stable row-lock order across replicas: batch order differs between
+	// concurrent writers, and ON CONFLICT upserts on the same tool names
+	// deadlock without a consistent acquisition order.
+	slices.SortFunc(discoveries, func(a, b toolDiscovery) int {
+		return strings.Compare(a.name, b.name)
+	})
 
 	lastUsedAt := utils.NowUTC()
 	for _, discovery := range discoveries {

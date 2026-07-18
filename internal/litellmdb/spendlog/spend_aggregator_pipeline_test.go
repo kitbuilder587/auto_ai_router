@@ -113,7 +113,10 @@ func TestKnownEffectiveRouteRejectsNonzeroFailureWithEmptyRawCallType(t *testing
 	assert.Contains(t, err.Error(), "empty raw LiteLLM call_type on a nonzero failure")
 }
 
-func TestUnknownEffectiveDailyRouteRollsBackAtomicWrite(t *testing.T) {
+// An unknown call_type is a permanent property of the row: it must not poison
+// the batch (retry → DLQ would lose the valid rows around it). The raw row and
+// entity counters commit; only the daily projection is skipped.
+func TestUnknownEffectiveDailyRouteSkipsDailyButCommitsRawWrite(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicTestEntry("req-unknown-effective-route")
 	entry.CallType = ""
@@ -121,9 +124,9 @@ func TestUnknownEffectiveDailyRouteRollsBackAtomicWrite(t *testing.T) {
 	row[8] = "unsupported-route"
 	tx := &atomicTestTx{insertedIDs: []string{entry.RequestID}, spendRows: [][]any{row}}
 	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `unsupported LiteLLM daily call_type "unsupported-route"`)
-	assert.True(t, tx.rolledBack)
-	assert.False(t, tx.committed)
-	assert.Empty(t, tx.committedSQL)
+	require.NoError(t, err)
+	assert.False(t, tx.rolledBack)
+	assert.True(t, tx.committed)
+	assert.Equal(t, 0, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`),
+		"daily projections must be skipped for an unknown call_type")
 }

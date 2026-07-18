@@ -67,7 +67,11 @@ const (
 	QuerySelectUnprocessedSpendLogs = `
 		SELECT
 			"user",
-			TO_CHAR("startTime" AT TIME ZONE 'UTC', 'YYYY-MM-DD') as date,
+			-- "startTime" is timestamp WITHOUT time zone storing UTC wall-clock
+			-- time. Formatted as-is: any timezone conversion here would make
+			-- TO_CHAR render it in the session TimeZone, silently shifting the
+			-- daily bucket around midnight on non-UTC sessions.
+			TO_CHAR("startTime", 'YYYY-MM-DD') as date,
 			api_key,
 			model,
 			model_group,
@@ -80,8 +84,21 @@ const (
 			) AS aggregation_call_type,
 			prompt_tokens,
 			completion_tokens,
-			COALESCE(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cached_tokens}', '')::bigint, 0) AS cache_read_input_tokens,
-			COALESCE(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_creation_tokens}', '')::bigint, 0) AS cache_creation_input_tokens,
+			-- Mirrors LiteLLM _extract_cache_read_tokens: Anthropic-style
+			-- top-level usage_object fields win when nonzero, then the
+			-- OpenAI-compatible prompt_tokens_details fallbacks. NULLIF(x,'0')
+			-- reproduces Python's zero-is-falsy fall-through.
+			COALESCE(
+				NULLIF(NULLIF(metadata #>> '{usage_object,cache_read_input_tokens}', ''), '0')::bigint,
+				NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cached_tokens}', '')::bigint,
+				0
+			) AS cache_read_input_tokens,
+			COALESCE(
+				NULLIF(NULLIF(metadata #>> '{usage_object,cache_creation_input_tokens}', ''), '0')::bigint,
+				NULLIF(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_write_tokens}', ''), '0')::bigint,
+				NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_creation_tokens}', '')::bigint,
+				0
+			) AS cache_creation_input_tokens,
 			spend,
 			status,
 			request_id,
