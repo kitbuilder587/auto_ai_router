@@ -4,6 +4,10 @@ package shadowspend
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,7 +65,7 @@ func TestShadowSink_PostgreSQLLiteLLMContract(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, sink.IsEnabled())
 
-	identity := integrationIdentityFixture()
+	identity := verifiedIntegrationIdentity(t)
 	entries := integrationEntries(identity)
 	for _, entry := range entries {
 		require.NoError(t, sink.LogSpend(entry))
@@ -154,33 +159,41 @@ func seedCounterRows(t *testing.T, ctx context.Context, conn *pgx.Conn) {
 	}
 }
 
-type integrationIdentity struct {
-	APIKeyHash     string
-	UserID         string
-	TeamID         string
-	OrganizationID string
-	ProjectID      string
-	AgentID        string
-	PublicModel    string
-	DeploymentID   string
-	EndUser        string
-}
-
-func integrationIdentityFixture() integrationIdentity {
-	return integrationIdentity{
-		APIKeyHash:     integrationKeyHash,
-		UserID:         "user-it",
-		TeamID:         "team-it",
-		OrganizationID: "org-it",
-		ProjectID:      "project-it",
-		AgentID:        "agent-it",
-		PublicModel:    "public-it",
-		DeploymentID:   "deployment-it",
-		EndUser:        "end-user-it",
+func verifiedIntegrationIdentity(t *testing.T) shadowcontext.Identity {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	verifier, err := shadowcontext.NewVerifier(config.ShadowAuthContextConfig{
+		Issuer:          "litellm-it",
+		Audience:        "air-it",
+		PublicKeys:      map[string]string{"it": base64.RawURLEncoding.EncodeToString(publicKey)},
+		ClockSkew:       10 * time.Second,
+		ReplayCacheSize: 100,
+	})
+	require.NoError(t, err)
+	now := time.Now()
+	claims := shadowcontext.Claims{
+		Issuer: "litellm-it", Audience: shadowcontext.Audience{"air-it"},
+		IssuedAt: now.Add(-time.Second).Unix(), ExpiresAt: now.Add(time.Minute).Unix(), ID: uuid.NewString(),
+		APIKeyHash: integrationKeyHash, UserID: "user-it", TeamID: "team-it", OrganizationID: "org-it",
+		ProjectID: "project-it", AgentID: "agent-it", PublicModel: "public-it", DeploymentID: "deployment-it",
+		EndUser: "end-user-it", Tags: []string{"tag-it"}, OriginalCallType: "acompletion", CallID: "call-it",
 	}
+	protected, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": "it"})
+	require.NoError(t, err)
+	payload, err := json.Marshal(claims)
+	require.NoError(t, err)
+	encodedProtected := base64.RawURLEncoding.EncodeToString(protected)
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	signingInput := encodedProtected + "." + encodedPayload
+	compact := signingInput + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(signingInput)))
+	result := verifier.Verify(compact)
+	require.NoError(t, result.Err)
+	require.Equal(t, shadowcontext.StateValid, result.State)
+	return result.Identity
 }
 
-func integrationEntries(identity integrationIdentity) []*models.SpendLogEntry {
+func integrationEntries(identity shadowcontext.Identity) []*models.SpendLogEntry {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	routes := []struct {
 		requestID string

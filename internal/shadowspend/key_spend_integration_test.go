@@ -69,7 +69,7 @@ func TestSynchronousKeySpendSerializesAcrossShadowWriterInstances(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, known)
 
-	identity := integrationIdentityFixture()
+	identity := verifiedIntegrationIdentity(t)
 	const requestCount = 8
 	entries := make([]*models.SpendLogEntry, 0, requestCount)
 	startedAt := time.Now().UTC()
@@ -248,7 +248,7 @@ func TestDailyProjectionDeadlineReplaysWithoutPoisoningTerminalWindow(t *testing
 		_ = sink.Shutdown(shutdownCtx)
 	})
 
-	identity := integrationIdentityFixture()
+	identity := verifiedIntegrationIdentity(t)
 	startedAt := time.Now().UTC()
 	seedEntry := collisionIntegrationEntry(
 		identity,

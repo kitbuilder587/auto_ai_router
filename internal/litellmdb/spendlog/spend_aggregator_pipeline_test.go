@@ -58,6 +58,12 @@ func TestLoadDailyProjectionDimensions(t *testing.T) {
 			if tt.status != "" {
 				entry.Status = tt.status
 			}
+			if tt.rawCallType == "" && tt.status == "failure" {
+				entry.Spend = 0
+				entry.PromptTokens = 0
+				entry.CompletionTokens = 0
+				entry.TotalTokens = 0
+			}
 			row := atomicTestSpendRow(entry)
 			row[8] = tt.effectiveCallType
 			logger := newAtomicTestLogger()
@@ -87,6 +93,24 @@ func TestKnownEffectiveRouteWithEmptyRawCallTypeRequiresFailureStatus(t *testing
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `empty raw LiteLLM call_type with status "success"`)
+}
+
+func TestKnownEffectiveRouteRejectsNonzeroFailureWithEmptyRawCallType(t *testing.T) {
+	entry := atomicTestEntry("req-nonzero-empty-call-type")
+	entry.CallType, entry.Status = "", "failure"
+	entry.PromptTokens = 3
+	entry.CompletionTokens = 2
+	entry.Spend = 0.001
+	row := atomicTestSpendRow(entry)
+	row[8] = "aresponses"
+	logger := newAtomicTestLogger()
+
+	_, err := loadUnprocessedSpendLogRecords(
+		context.Background(), &atomicTestTx{spendRows: [][]any{row}}, logger.logger, "test", []string{entry.RequestID},
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty raw LiteLLM call_type on a nonzero failure")
 }
 
 func TestUnknownEffectiveDailyRouteRollsBackAtomicWrite(t *testing.T) {

@@ -248,8 +248,9 @@ func TestAddToDLQOwnsBatchSlice(t *testing.T) {
 	// The worker resets its reusable batch to [:0] after flushBatch and appends
 	// new queue entries into the same backing array.
 	batch = batch[:0]
-	batch = append(batch, &models.SpendLogEntry{RequestID: "next-request"})
-	require.Equal(t, "next-request", batch[0].RequestID)
+	next := &models.SpendLogEntry{RequestID: "next-request"}
+	batch = append(batch, next)
+	require.Same(t, next, batch[0])
 
 	require.Len(t, logger.dlq, 1)
 	require.Len(t, logger.dlq[0].batch, 1)

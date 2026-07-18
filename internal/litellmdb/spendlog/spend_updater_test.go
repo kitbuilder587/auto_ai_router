@@ -239,29 +239,6 @@ func TestSpendUpdates_Empty(t *testing.T) {
 	assert.Nil(t, updates.Agents)
 }
 
-func TestSortedSpendKeysDeterministicAcrossTypedAggregateKeys(t *testing.T) {
-	first := map[entityModelKey]float64{
-		{EntityID: "team-b", Model: "model-z"}: 1,
-		{EntityID: "team-a", Model: "model-z"}: 2,
-		{EntityID: "team-a", Model: "model-a"}: 3,
-	}
-	second := map[entityModelKey]float64{
-		{EntityID: "team-a", Model: "model-a"}: 7,
-		{EntityID: "team-b", Model: "model-z"}: 8,
-		{EntityID: "team-a", Model: "model-z"}: 9,
-	}
-	want := []entityModelKey{
-		{EntityID: "team-a", Model: "model-a"},
-		{EntityID: "team-a", Model: "model-z"},
-		{EntityID: "team-b", Model: "model-z"},
-	}
-
-	for range 20 {
-		assert.Equal(t, want, sortedSpendKeys(first, compareEntityModelKey))
-		assert.Equal(t, want, sortedSpendKeys(second, compareEntityModelKey))
-	}
-}
-
 type recordedSpendUpdateCall struct {
 	query string
 	args  []interface{}

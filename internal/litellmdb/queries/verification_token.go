@@ -32,8 +32,6 @@ SELECT
   u.user_email,
   u.max_budget as user_max_budget,
   u.spend as user_spend,
-  u.tpm_limit as user_tpm_limit,
-  u.rpm_limit as user_rpm_limit,
   u.models as user_models,
 
   -- ============ Team ============

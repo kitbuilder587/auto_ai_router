@@ -211,7 +211,7 @@ func (m *DefaultManager) ValidateTokenForModel(ctx context.Context, rawToken, mo
 
 // LogSpend adds an entry to the logging queue
 func (m *DefaultManager) LogSpend(entry *models.SpendLogEntry) error {
-	if m.spendLogger == nil {
+	if m.config.DisableSpendLogsWrite || m.spendLogger == nil {
 		return nil
 	}
 	return m.spendLogger.Log(entry)

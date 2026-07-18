@@ -136,6 +136,14 @@ func loadUnprocessedSpendLogRecords(
 						record.Status, record.RequestID,
 					)
 				}
+				if record.Spend != 0 || record.PromptTokens != 0 ||
+					record.CompletionTokens != 0 || record.CacheReadInputTokens != 0 ||
+					record.CacheCreationInputTokens != 0 {
+					return nil, fmt.Errorf(
+						"empty raw LiteLLM call_type on a nonzero failure for request %q",
+						record.RequestID,
+					)
+				}
 				// LiteLLM failure rows use the public model as their daily model and
 				// leave provider and endpoint empty. Keep the richer raw
 				// AIR dimensions intact while projecting the compatible daily key.
