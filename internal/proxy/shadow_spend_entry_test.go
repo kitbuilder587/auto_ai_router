@@ -15,39 +15,61 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/models"
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const testClientKeyHash = "cc557cce629a1cb98664b98a3d5f5600a90a91c5955c4fdddfa4d13c94bfdcd6"
 
-func TestBuildShadowSpendEntryRecordsValidContextWithoutAPIKeyHash(t *testing.T) {
-	p := NewTestProxyBuilder().Build()
-	p.metrics = monitoring.New(true)
-	logCtx := testLogCtx(t)
-	logCtx.ShadowContext = shadowcontext.Result{
-		State: shadowcontext.StateValid,
-		Identity: shadowcontext.Identity{
-			UserID:       "tenant-user",
-			PublicModel:  "public-model",
-			DeploymentID: "deployment-id",
-		},
+func TestBuildShadowSpendEntryPreservesSignedOriginalCallTypeAfterRouteTranslation(t *testing.T) {
+	registry := models.NewModelPriceRegistry()
+	registry.Update(map[string]*models.ModelPrice{
+		"provider-model": {InputCostPerToken: 0.000001, OutputCostPerToken: 0.000004},
+	})
+	p := &Proxy{logger: slog.New(slog.DiscardHandler), priceRegistry: registry}
+	identity := shadowcontext.Identity{
+		APIKeyHash:       testClientKeyHash,
+		PublicModel:      "deepseek-v4-flash",
+		DeploymentID:     "deployment-1",
+		OriginalCallType: string(RouteTextCompletion),
+		CallID:           "translated-call",
 	}
-	before := testutil.ToFloat64(
-		monitoring.ShadowSpendMissingIdentityTotal.WithLabelValues("signed_context_missing_api_key_hash"),
+	billing := NewBillingContext(
+		"translated-event",
+		"translated-call",
+		"/v1/chat/completions",
+		identity,
+	).WithRouting(
+		"deepseek-v4-flash",
+		"provider-model",
+		"openai",
+		"credential-1",
+		"https://provider.example.invalid/v1",
 	)
-
-	entry := p.buildShadowSpendEntry(logCtx)
+	entry := p.buildShadowSpendEntry(&RequestLogContext{
+		RequestID:     "translated-event",
+		CallID:        "translated-call",
+		ShadowContext: shadowcontext.Result{State: shadowcontext.StateValid, Identity: identity},
+		Billing:       billing,
+		StartTime:     time.Now().Add(-time.Millisecond),
+		Request:       httptest.NewRequest("POST", "/v1/chat/completions", nil),
+		Status:        "success",
+		HTTPStatus:    http.StatusOK,
+		TokenUsage:    &converter.TokenUsage{PromptTokens: 1, CompletionTokens: 1},
+		UsageSource:   "provider",
+		Credential:    &config.CredentialConfig{Name: "credential-1", Type: config.ProviderTypeOpenAI},
+		ModelID:       "deepseek-v4-flash",
+		RealModelID:   "provider-model",
+	})
 
 	require.NotNil(t, entry)
-	assert.Empty(t, entry.APIKey)
-	assert.False(t, entry.ComparisonEligible)
-	assert.Equal(t, before+1, testutil.ToFloat64(
-		monitoring.ShadowSpendMissingIdentityTotal.WithLabelValues("signed_context_missing_api_key_hash"),
-	))
+	assert.Equal(t, "atext_completion", entry.CallType)
+	assert.True(t, entry.ComparisonEligible)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	extension := metadata["spend_logs_metadata"].(map[string]any)
+	assert.Equal(t, "atext_completion", extension["original_call_type"])
 }
 
 func TestBuildShadowSpendEntryUsesCanonicalBillingAndSignedIdentity(t *testing.T) {

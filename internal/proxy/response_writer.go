@@ -146,7 +146,7 @@ func resolveCapturedProviderStreamError(
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string, logContexts ...*RequestLogContext) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string, logCtx *RequestLogContext) {
 	if resp == nil {
 		return
 	}
@@ -240,15 +240,12 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	credName string,
 	modelID string,
 	tokenizerModelID string,
-	logContexts ...*RequestLogContext,
+	logCtx *RequestLogContext,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
 	}
-	var logCtx *RequestLogContext
-	if len(logContexts) > 0 {
-		logCtx = logContexts[0]
-	}
+
 	streamBody := resp.StreamBody
 	normalizeStream := false
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
@@ -257,6 +254,8 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			normalizeStream = true
 		}
 	}
+	normalizeResponseModel := resp.StatusCode >= http.StatusOK &&
+		resp.StatusCode < http.StatusMultipleChoices && streamRouteReturnsModel(logCtx)
 	defer func() {
 		if closeErr := streamBody.Close(); closeErr != nil {
 			p.logger.WarnContext(clientReq.Context(), "Failed to close proxy streaming response body", "error", closeErr)
@@ -267,7 +266,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		if isHopByHopHeader(key) || isProxyOwnedResponseHeader(key) {
 			continue
 		}
-		if normalizeStream && isRepresentationIntegrityHeader(key) {
+		if (normalizeStream || normalizeResponseModel) && isRepresentationIntegrityHeader(key) {
 			continue
 		}
 		// Skip Content-Length, Transfer-Encoding, and Content-Encoding

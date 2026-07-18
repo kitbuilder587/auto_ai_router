@@ -12,7 +12,6 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
-	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
@@ -158,121 +157,6 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
-// logSpendToLiteLLMDB keeps the upstream Postgres/Kafka write contract for
-// callers that still use the legacy manager while the migration path writes
-// through the isolated shadow sink.
-func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	entry := p.buildShadowSpendEntry(logCtx)
-	if entry == nil {
-		return nil
-	}
-	kafkaErr := p.publishShadowSpendToKafka(logCtx, entry)
-	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
-		return p.reconcileSpendSinkErrors(logCtx, kafkaErr, nil, false)
-	}
-	databaseErr := p.LiteLLMDB.LogSpend(entry)
-	return p.reconcileSpendSinkErrors(logCtx, kafkaErr, databaseErr, databaseErr == nil)
-}
-
-func (p *Proxy) publishShadowSpendToKafka(logCtx *RequestLogContext, entry *litellmdb.SpendLogEntry) error {
-	if logCtx == nil || entry == nil || p.kafkaLog == nil || !p.kafkaLog.IsEnabled() {
-		return nil
-	}
-
-	credentialName := logCtx.Credential.Name
-	if logCtx.ActualCredentialName != "" {
-		credentialName = logCtx.ActualCredentialName
-	}
-	overheadMS := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000
-	err := p.logSpendToKafka(
-		logCtx,
-		credentialName,
-		entry.ModelID,
-		entry.APIKey,
-		entry.UserID,
-		entry.TeamID,
-		entry.OrganizationID,
-		entry.EndUser,
-		entry.APIBase,
-		entry.Status,
-		entry.Spend,
-		nil,
-		overheadMS,
-		entry.EndTime,
-	)
-	if err == nil {
-		return nil
-	}
-
-	reason := "publish_error"
-	if errors.Is(err, kafkalog.ErrQueueFull) {
-		reason = "queue_full"
-	}
-	metadata := make(map[string]any)
-	if entry.Metadata != "" {
-		_ = json.Unmarshal([]byte(entry.Metadata), &metadata)
-	}
-	metadata["kafka_fallback"] = true
-	metadata["kafka_fallback_reason"] = reason
-	if encoded, marshalErr := json.Marshal(metadata); marshalErr == nil {
-		entry.Metadata = string(encoded)
-	}
-	return err
-}
-
-// reconcileSpendSinkErrors makes the dual-write outcome explicit. Kafka
-// failure remains fail-open when PostgreSQL accepted the fallback marker, but
-// rejection by both sinks is surfaced as a joined error and a dedicated
-// metric instead of disappearing behind one of the errors.
-func (p *Proxy) reconcileSpendSinkErrors(
-	logCtx *RequestLogContext,
-	kafkaErr error,
-	databaseErr error,
-	databaseAccepted bool,
-) error {
-	if kafkaErr == nil {
-		return databaseErr
-	}
-
-	ctx := context.Background()
-	requestID := ""
-	if logCtx != nil {
-		ctx = logCtx.Context()
-		requestID = logCtx.RequestID
-	}
-	if databaseAccepted {
-		if p.logger != nil {
-			p.logger.WarnContext(ctx, "Kafka spend publish failed; PostgreSQL fallback accepted",
-				"kafka_error", kafkaErr,
-				"database_error", databaseErr,
-				"request_id", requestID,
-			)
-		}
-		return databaseErr
-	}
-	if databaseErr == nil {
-		if p.logger != nil {
-			p.logger.ErrorContext(ctx, "Kafka spend publish failed without PostgreSQL fallback",
-				"kafka_error", kafkaErr,
-				"request_id", requestID,
-			)
-		}
-		return kafkaErr
-	}
-
-	if p.metrics != nil {
-		p.metrics.RecordShadowSpendDualWriteFailure()
-	}
-	if p.logger != nil {
-		p.logger.ErrorContext(ctx, "Both spend write paths failed",
-			"kafka_error", kafkaErr,
-			"database_error", databaseErr,
-			"request_id", requestID,
-		)
-	}
-	return errors.Join(kafkaErr, databaseErr)
-}
-
 func (p *Proxy) finalizeDeferredShadowSpend(logCtx *RequestLogContext) error {
 	if logCtx == nil {
 		return nil
@@ -282,10 +166,8 @@ func (p *Proxy) finalizeDeferredShadowSpend(logCtx *RequestLogContext) error {
 		entry = p.buildShadowSpendEntry(logCtx)
 		logCtx.pendingSpendEntry = entry
 	}
-	kafkaErr := p.publishShadowSpendToKafka(logCtx, entry)
-	databaseEnabled := p.spendLogger != nil && p.spendLogger.IsEnabled()
-	databaseErr := p.queueShadowSpendEntry(entry)
-	if err := p.reconcileSpendSinkErrors(logCtx, kafkaErr, databaseErr, databaseEnabled && databaseErr == nil); err != nil {
+	_ = p.publishKafkaSpendCopy(logCtx, entry)
+	if err := p.queueShadowSpendEntry(entry); err != nil {
 		return err
 	}
 	logCtx.pendingSpendEntry = nil
@@ -378,17 +260,15 @@ type shadowSpendCommitResult struct {
 // reused; unclassified hard failures omit the header.
 func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers http.Header, logCtx *RequestLogContext) (shadowSpendCommitResult, error) {
 	entry := p.buildShadowSpendEntry(logCtx)
-	var kafkaErr error
 	if entry != nil {
 		setLiteLLMResponseCostHeaderForRequest(headers, entry.Spend, logCtx)
-		kafkaErr = p.publishShadowSpendToKafka(logCtx, entry)
+		_ = p.publishKafkaSpendCopy(logCtx, entry)
 	}
 	if entry == nil || p.spendLogger == nil || !p.spendLogger.IsEnabled() {
 		if logCtx != nil {
 			logCtx.Logged = true
 		}
-		return shadowSpendCommitResult{Disposition: shadowSpendCommitSkipped},
-			p.reconcileSpendSinkErrors(logCtx, kafkaErr, nil, false)
+		return shadowSpendCommitResult{Disposition: shadowSpendCommitSkipped}, nil
 	}
 
 	dbCtx, cancel := boundedShadowSpendContext(ctx)
@@ -408,8 +288,7 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 				logCtx.pendingSpendEntry = nil
 				logCtx.Logged = true
 			}
-			return shadowSpendCommitResult{Disposition: shadowSpendReplayQueued},
-				p.reconcileSpendSinkErrors(logCtx, kafkaErr, err, true)
+			return shadowSpendCommitResult{Disposition: shadowSpendReplayQueued}, err
 		}
 		// Without lifecycle-owned exact retention, do not allow an earlier
 		// value to survive an unclassified hard failure.
@@ -423,11 +302,9 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 			logCtx.Logged = true
 		}
 		if queueErr != nil {
-			return shadowSpendCommitResult{Disposition: shadowSpendReplayEnqueueFailed},
-				p.reconcileSpendSinkErrors(logCtx, kafkaErr, errors.Join(err, queueErr), false)
+			return shadowSpendCommitResult{Disposition: shadowSpendReplayEnqueueFailed}, errors.Join(err, queueErr)
 		}
-		return shadowSpendCommitResult{Disposition: shadowSpendReplayQueued},
-			p.reconcileSpendSinkErrors(logCtx, kafkaErr, err, true)
+		return shadowSpendCommitResult{Disposition: shadowSpendReplayQueued}, err
 	}
 
 	if logCtx != nil {
@@ -441,8 +318,7 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 		logCtx.pendingSpendEntry = nil
 		logCtx.Logged = true
 	}
-	return shadowSpendCommitResult{Disposition: shadowSpendCommitted},
-		p.reconcileSpendSinkErrors(logCtx, kafkaErr, nil, true)
+	return shadowSpendCommitResult{Disposition: shadowSpendCommitted}, nil
 }
 
 func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.SpendLogEntry {
@@ -526,7 +402,7 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 				(logCtx.IsImageGeneration && usage.Total() == 0 && modelPrice.OutputCostPerImage <= 0) {
 				costStatus = "insufficient_usage"
 			} else {
-				tokenCosts = modelPrice.CalculateShadowCosts(usage)
+				tokenCosts = modelPrice.CalculateCosts(usage)
 			}
 		}
 	}
@@ -548,9 +424,6 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 	}
 
 	identity, trustedIdentity := resolveSpendIdentity(logCtx, billing)
-	if logCtx.ShadowContext.State == shadowcontext.StateValid && identity.APIKeyHash == "" {
-		p.recordMissingSpendIdentity(logCtx, "signed_context_missing_api_key_hash")
-	}
 	routingCredential := billing.Credential()
 	if routingCredential == "" {
 		routingCredential = logCtx.Credential.Name
@@ -612,7 +485,7 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 		value := logCtx.CompletionStartTime
 		completionStartTime = &value
 	}
-	callType := spendLogCallType(status, billing)
+	callType := spendLogCallType(status, billing, hasMaterialUsage(usage) || cost != 0)
 	cacheHit := "None"
 	if billing.CallType() == RouteCompletion || billing.CallType() == RouteTextCompletion {
 		cacheHit = "False"
@@ -658,31 +531,36 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 	}
 }
 
-func (p *Proxy) recordMissingSpendIdentity(logCtx *RequestLogContext, reason string) {
-	if logCtx == nil {
-		return
-	}
-	if p.metrics != nil {
-		p.metrics.RecordShadowSpendMissingIdentity(reason)
-	}
-	if p.logger != nil {
-		p.logger.WarnContext(logCtx.Context(), "Spend event is missing authoritative billing identity",
-			"reason", reason,
-			"shadow_context_state", logCtx.ShadowContext.State,
-			"request_id", logCtx.RequestID,
-		)
-	}
-}
-
-// spendLogCallType keeps the OpenAI-compatible Chat Completions route on terminal
-// failures. Its daily aggregate contract requires /chat/completions together
-// with failed_requests=1. Other failure-route shapes remain unchanged until
-// their endpoint contracts are independently covered.
-func spendLogCallType(status string, billing BillingContext) string {
-	if status == "failure" && billing.CallType() != RouteCompletion {
+// spendLogCallType keeps a canonical route whenever a terminal failure carries
+// billable/token effects.  Zero-effect non-chat failures retain LiteLLM's
+// historical empty raw call_type and are projected into daily tables from the
+// signed original_call_type metadata.  This prevents partial stream usage from
+// becoming an unrouteable aggregate while preserving the observed zero-effect
+// failure shape.
+func spendLogCallType(status string, billing BillingContext, hasEffect bool) string {
+	if status == "failure" && billing.CallType() != RouteCompletion && !hasEffect {
 		return ""
 	}
 	return string(billing.CallType())
+}
+
+func hasMaterialUsage(usage *converter.TokenUsage) bool {
+	if usage == nil {
+		return false
+	}
+	return usage.PromptTokens != 0 ||
+		usage.CompletionTokens != 0 ||
+		usage.AudioInputTokens != 0 ||
+		usage.AudioOutputTokens != 0 ||
+		usage.CachedInputTokens != 0 ||
+		usage.CacheCreationTokens != 0 ||
+		usage.CachedOutputTokens != 0 ||
+		usage.ReasoningTokens != 0 ||
+		usage.AcceptedPredictionTokens != 0 ||
+		usage.RejectedPredictionTokens != 0 ||
+		usage.ImageCount != 0 ||
+		usage.ImageTokens != 0 ||
+		usage.OutputImageTokens != 0
 }
 
 // resolveSpendIdentity selects exactly one authenticated identity source. A

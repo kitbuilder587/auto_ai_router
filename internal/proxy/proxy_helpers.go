@@ -367,6 +367,7 @@ func buildShadowMetadata(input shadowMetadataInput) string {
 		"prompt_tokens":     usage.PromptTokens,
 		"completion_tokens": usage.CompletionTokens,
 		"total_tokens":      usage.Total(),
+		"image_count":       usage.ImageCount,
 		"prompt_tokens_details": map[string]interface{}{
 			"audio_tokens":          usage.AudioInputTokens,
 			"image_tokens":          usage.ImageTokens,
@@ -404,6 +405,7 @@ func buildShadowMetadata(input shadowMetadataInput) string {
 			"audio_input_cost":    input.Costs.AudioInputCost,
 			"audio_output_cost":   input.Costs.AudioOutputCost,
 			"prediction_cost":     input.Costs.PredictionCost,
+			"cached_output_cost":  input.Costs.CachedOutputCost,
 			"input_image_cost":    input.Costs.InputImageCost,
 			"output_image_cost":   input.Costs.OutputImageCost,
 			"image_cost":          input.Costs.ImageCost,

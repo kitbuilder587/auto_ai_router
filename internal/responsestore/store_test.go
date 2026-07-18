@@ -74,6 +74,7 @@ func TestBboltStore_SaveAndGetResponse(t *testing.T) {
 
 	if got == nil {
 		t.Fatal("response is nil")
+		return
 	}
 
 	if got.ID != resp.ID {
@@ -176,6 +177,7 @@ func TestBboltStore_GetEntry(t *testing.T) {
 
 	if entry == nil {
 		t.Fatal("entry is nil")
+		return
 	}
 
 	if entry.ResponseID != "entry-test-id" {

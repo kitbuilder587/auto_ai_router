@@ -313,21 +313,6 @@ var (
 		},
 		[]string{"eligibility"},
 	)
-
-	ShadowSpendMissingIdentityTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "auto_ai_router_shadow_spend_missing_identity_total",
-			Help: "Spend events missing an authoritative billing identity",
-		},
-		[]string{"reason"},
-	)
-
-	ShadowSpendDualWriteFailuresTotal = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "auto_ai_router_shadow_spend_dual_write_failures_total",
-			Help: "Spend events rejected by both Kafka and PostgreSQL write paths",
-		},
-	)
 )
 
 // ShadowSpendSnapshot contains instantaneous spend writer state. Loss/error
@@ -470,20 +455,6 @@ func (m *Metrics) RecordShadowSpendSinkStartupFailure(reason string) {
 	}
 	SetShadowSpendSinkHealthy(false)
 	ShadowSpendSinkStartupFailuresTotal.WithLabelValues(reason).Inc()
-}
-
-func (m *Metrics) RecordShadowSpendMissingIdentity(reason string) {
-	if !m.isEnabled() {
-		return
-	}
-	ShadowSpendMissingIdentityTotal.WithLabelValues(reason).Inc()
-}
-
-func (m *Metrics) RecordShadowSpendDualWriteFailure() {
-	if !m.isEnabled() {
-		return
-	}
-	ShadowSpendDualWriteFailuresTotal.Inc()
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {

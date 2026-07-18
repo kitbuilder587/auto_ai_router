@@ -803,18 +803,19 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 	log.Info("Initializing LiteLLM DB integration...", "is_required", cfg.LiteLLMDB.IsRequired)
 
 	litellmCfg := &litellmdb.Config{
-		DatabaseURL:         cfg.LiteLLMDB.DatabaseURL,
-		MaxConns:            int32(cfg.LiteLLMDB.MaxConns),
-		MinConns:            int32(cfg.LiteLLMDB.MinConns),
-		HealthCheckInterval: cfg.LiteLLMDB.HealthCheckInterval,
-		ConnectTimeout:      cfg.LiteLLMDB.ConnectTimeout,
-		AuthCacheTTL:        cfg.LiteLLMDB.AuthCacheTTL,
-		AuthCacheSize:       cfg.LiteLLMDB.AuthCacheSize,
-		LogQueueSize:        cfg.LiteLLMDB.LogQueueSize,
-		LogBatchSize:        cfg.LiteLLMDB.LogBatchSize,
-		LogFlushInterval:    cfg.LiteLLMDB.LogFlushInterval,
-		DisableSpendLogging: true,
-		Logger:              log,
+		DatabaseURL:           cfg.LiteLLMDB.DatabaseURL,
+		MaxConns:              int32(cfg.LiteLLMDB.MaxConns),
+		MinConns:              int32(cfg.LiteLLMDB.MinConns),
+		HealthCheckInterval:   cfg.LiteLLMDB.HealthCheckInterval,
+		ConnectTimeout:        cfg.LiteLLMDB.ConnectTimeout,
+		AuthCacheTTL:          cfg.LiteLLMDB.AuthCacheTTL,
+		AuthCacheSize:         cfg.LiteLLMDB.AuthCacheSize,
+		LogQueueSize:          cfg.LiteLLMDB.LogQueueSize,
+		LogBatchSize:          cfg.LiteLLMDB.LogBatchSize,
+		LogFlushInterval:      cfg.LiteLLMDB.LogFlushInterval,
+		DisableSpendLogging:   true,
+		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
+		Logger:                log,
 	}
 
 	manager, err := litellmdb.New(litellmCfg)
@@ -838,14 +839,22 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 	return manager
 }
 
-// initializeKafkaLog sets up the independent Kafka analytics write-path.
-// Kafka-only mode is fail-closed because otherwise every spend event would be
-// silently dropped.
+// initializeKafkaLog sets up the Kafka spend-log publisher (internal/kafkalog),
+// an independent analytics write-path alongside (not instead of) LiteLLM
+// Postgres. There is no "is_required" flag here: broker unavailability never
+// blocks startup or request processing on its own — it only keeps
+// kafkalog.Manager.IsHealthy() false until connectivity is established (see
+// auto_ai_router_kafka_spend_log_tz.md section 6). The one exception is
+// Kafka-only mode (litellm_db.disable_spend_logs_write=true): there, Kafka is
+// the *only* spend-log write-path, so degrading to NoopManager would silently
+// drop every spend event with no write-path left at all — that case is fatal.
 func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager litellmdb.Manager) kafkalog.Manager {
 	if !cfg.Kafka.Enabled {
 		log.Info("Kafka spend-log publishing disabled - using NoopManager")
 		return kafkalog.NewNoopManager()
 	}
+
+	log.Info("Initializing Kafka spend-log publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.Topic)
 
 	kafkaCfg := &kafkalog.Config{
 		Brokers:          cfg.Kafka.Brokers,
@@ -859,6 +868,9 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 		SASLUsername:     cfg.Kafka.SASLUsername,
 		SASLPassword:     cfg.Kafka.SASLPassword,
 		Logger:           log,
+		// Flags a batch's underlying LiteLLM_SpendLogs rows for later re-send
+		// when the batch is dropped from the in-memory DLQ after a sustained
+		// Kafka outage (see kafkalog.Config.FallbackNotifier doc comment).
 		FallbackNotifier: litellmDBManager.MarkSpendLogKafkaFallback,
 	}
 
@@ -868,10 +880,15 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 			log.Error("CRITICAL: Failed to initialize Kafka spend-log publisher in Kafka-only mode",
 				"error", err,
 				"reason", "litellm_db.disable_spend_logs_write=true leaves Kafka as the only spend-log write-path",
+				"action", "Fix Kafka connectivity/credentials or re-enable litellm_db spend log writes",
 			)
 			os.Exit(1)
 		}
-		log.Warn("Failed to initialize Kafka spend-log publisher, degrading to NoopManager", "error", err)
+
+		log.Warn("Failed to initialize Kafka spend-log publisher, degrading to NoopManager",
+			"error", err,
+			"impact", "Spend events will not be published to Kafka/ClickHouse; Postgres logging is unaffected",
+		)
 		return kafkalog.NewNoopManager()
 	}
 	log.Info("Kafka spend-log publisher initialized successfully")

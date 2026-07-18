@@ -133,7 +133,23 @@ func TestFailureCallTypePreservationIsRouteBasedAndChatScoped(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			billing := NewBillingContext("event", "call", tt.endpoint, shadowcontext.Identity{}).
 				WithRouting("backend", "provider-model", tt.provider, "credential", "https://provider.invalid")
-			assert.Equal(t, tt.want, spendLogCallType("failure", billing))
+			assert.Equal(t, tt.want, spendLogCallType("failure", billing, false))
+		})
+	}
+}
+
+func TestFailureWithMaterialEffectKeepsEveryCanonicalRoute(t *testing.T) {
+	for _, endpoint := range []string{
+		"/v1/chat/completions",
+		"/v1/completions",
+		"/v1/embeddings",
+		"/v1/responses",
+		"/v1/images/generations",
+		"/v1/images/edits",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			billing := NewBillingContext("event", "call", endpoint, shadowcontext.Identity{})
+			assert.NotEmpty(t, spendLogCallType("failure", billing, true))
 		})
 	}
 }

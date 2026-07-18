@@ -20,7 +20,7 @@ import (
 
 func TestInitializeShadowContextAcceptsSignedIdentityAndEchoesCallID(t *testing.T) {
 	verifier, privateKey := proxyTestVerifier(t)
-	token := proxySignContext(t, privateKey, "call-123", "jti-1")
+	token := proxySignContextForCallType(t, privateKey, "call-123", "jti-1", "aresponses")
 	p := &Proxy{logger: slog.New(slog.DiscardHandler), shadowContextVerifier: verifier}
 	req := httptest.NewRequest("POST", "/v1/responses", nil)
 	req.Header.Set(shadowcontext.AuthContextHeader, token)
@@ -39,6 +39,39 @@ func TestInitializeShadowContextAcceptsSignedIdentityAndEchoesCallID(t *testing.
 	assert.Equal(t, testClientKeyHash, logCtx.ShadowContext.Identity.APIKeyHash)
 	assert.Equal(t, "public-model", logCtx.ShadowContext.Identity.PublicModel)
 	assert.Equal(t, "deployment-1", logCtx.ShadowContext.Identity.DeploymentID)
+}
+
+func TestInitializeShadowContextAcceptsOnlyTheSignedEndpointTransition(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		callType string
+		path     string
+		want     shadowcontext.State
+	}{
+		{name: "same chat route", callType: "acompletion", path: "/v1/chat/completions", want: shadowcontext.StateValid},
+		{name: "same text route", callType: "atext_completion", path: "/v1/completions", want: shadowcontext.StateValid},
+		{name: "unexpected text to chat translation", callType: "atext_completion", path: "/v1/chat/completions", want: shadowcontext.StateInvalid},
+		{name: "cross operation", callType: "aembedding", path: "/v1/chat/completions", want: shadowcontext.StateInvalid},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			verifier, privateKey := proxyTestVerifier(t)
+			callID := "call-transition"
+			token := proxySignContextForCallType(t, privateKey, callID, "jti-transition", tt.callType)
+			p := &Proxy{logger: slog.New(slog.DiscardHandler), shadowContextVerifier: verifier}
+			req := httptest.NewRequest("POST", tt.path, nil)
+			req.Header.Set(shadowcontext.AuthContextHeader, token)
+			req.Header.Set(shadowcontext.CallIDHeader, callID)
+			logCtx := &RequestLogContext{RequestID: "air-event-transition", Request: req}
+
+			p.initializeShadowContext(httptest.NewRecorder(), req, logCtx)
+
+			assert.Equal(t, tt.want, logCtx.ShadowContext.State)
+			if tt.want == shadowcontext.StateInvalid {
+				assert.ErrorIs(t, logCtx.ShadowContext.Err, errShadowCallTypeMismatch)
+				assert.Empty(t, logCtx.ShadowContext.Identity.APIKeyHash)
+			}
+		})
+	}
 }
 
 func TestInitializeShadowContextGeneratesCallIDWhenContextMissing(t *testing.T) {
@@ -91,27 +124,32 @@ func proxyTestVerifier(t *testing.T) (*shadowcontext.Verifier, ed25519.PrivateKe
 }
 
 func proxySignContext(t *testing.T, privateKey ed25519.PrivateKey, callID, jti string) string {
+	return proxySignContextForCallType(t, privateKey, callID, jti, "acompletion")
+}
+
+func proxySignContextForCallType(t *testing.T, privateKey ed25519.PrivateKey, callID, jti, originalCallType string) string {
 	t.Helper()
 	now := time.Now()
 	header, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": "key-1"})
 	require.NoError(t, err)
 	payload, err := json.Marshal(shadowcontext.Claims{
-		Issuer:         "litellm",
-		Audience:       shadowcontext.Audience{"air-ru01"},
-		IssuedAt:       now.Add(-time.Second).Unix(),
-		ExpiresAt:      now.Add(time.Minute).Unix(),
-		ID:             jti,
-		APIKeyHash:     testClientKeyHash,
-		UserID:         "user-1",
-		TeamID:         "team-1",
-		OrganizationID: "org-1",
-		ProjectID:      "project-1",
-		AgentID:        "agent-1",
-		PublicModel:    "public-model",
-		DeploymentID:   "deployment-1",
-		EndUser:        "end-user-1",
-		Tags:           []string{"shadow"},
-		CallID:         callID,
+		Issuer:           "litellm",
+		Audience:         shadowcontext.Audience{"air-ru01"},
+		IssuedAt:         now.Add(-time.Second).Unix(),
+		ExpiresAt:        now.Add(time.Minute).Unix(),
+		ID:               jti,
+		APIKeyHash:       testClientKeyHash,
+		UserID:           "user-1",
+		TeamID:           "team-1",
+		OrganizationID:   "org-1",
+		ProjectID:        "project-1",
+		AgentID:          "agent-1",
+		PublicModel:      "public-model",
+		DeploymentID:     "deployment-1",
+		EndUser:          "end-user-1",
+		Tags:             []string{"shadow"},
+		OriginalCallType: originalCallType,
+		CallID:           callID,
 	})
 	require.NoError(t, err)
 	encodedHeader := base64.RawURLEncoding.EncodeToString(header)

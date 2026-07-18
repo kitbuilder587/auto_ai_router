@@ -294,12 +294,25 @@ func signedMultipartRequest(t *testing.T, privateKey ed25519.PrivateKey, callID 
 func setProxyIntegrationContext(t *testing.T, request *http.Request, privateKey ed25519.PrivateKey, callID, publicModel, deploymentID string) {
 	t.Helper()
 	now := time.Now()
+	originalCallType := "acompletion"
+	switch request.URL.Path {
+	case "/v1/completions":
+		originalCallType = "atext_completion"
+	case "/v1/embeddings":
+		originalCallType = "aembedding"
+	case "/v1/responses":
+		originalCallType = "aresponses"
+	case "/v1/images/generations":
+		originalCallType = "aimage_generation"
+	case "/v1/images/edits":
+		originalCallType = "aimage_edit"
+	}
 	claims := shadowcontext.Claims{
 		Issuer: "litellm-it", Audience: shadowcontext.Audience{"air-it"},
 		IssuedAt: now.Add(-time.Second).Unix(), ExpiresAt: now.Add(time.Minute).Unix(), ID: uuid.NewString(),
 		APIKeyHash: proxyIntegrationKeyHash, UserID: "user-it", TeamID: "team-it", OrganizationID: "org-it",
 		ProjectID: "project-it", AgentID: "agent-it", PublicModel: publicModel, DeploymentID: deploymentID,
-		EndUser: "end-user-it", Tags: []string{"tag-it"}, CallID: callID,
+		EndUser: "end-user-it", Tags: []string{"tag-it"}, OriginalCallType: originalCallType, CallID: callID,
 	}
 	protected, err := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": "it-key"})
 	require.NoError(t, err)

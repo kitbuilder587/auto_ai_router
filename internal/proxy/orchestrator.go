@@ -239,6 +239,12 @@ func (p *Proxy) prepareRequestForCredential(
 	body := baseBody
 	proxyBody := baseProxyBody
 	realModelID := baseRealModelID
+	if cred.Type != config.ProviderTypeProxy {
+		// Root-level tags are LiteLLM proxy metadata. The first AIR hop captures
+		// them for SpendLogs; proxy credentials preserve them for the next policy
+		// hop, and only a terminal provider request consumes them.
+		body = stripProviderRequestTags(body, r.Header.Get("Content-Type"))
+	}
 	if cred.Type != config.ProviderTypeProxy && p.modelManager != nil {
 		if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok && credRealName != realModelID {
 			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
@@ -389,15 +395,24 @@ func headerValuesFold(header http.Header, name string) ([]string, bool) {
 // AuthenticateClientRequest authenticates a non-inference public endpoint by
 // using the exact same master-key/LiteLLM validation path as ProxyRequest.
 func (p *Proxy) AuthenticateClientRequest(w http.ResponseWriter, r *http.Request) (*models.TokenInfo, bool) {
+	tokenInfo, _, ok := p.AuthenticateClientRequestScoped(w, r)
+	return tokenInfo, ok
+}
+
+// AuthenticateClientRequestScoped authenticates once and returns the exact
+// scope derived from that same credential. This keeps /v1/models visibility
+// identical for Authorization and x-api-key transports and avoids a second DB
+// validation with a different header parser.
+func (p *Proxy) AuthenticateClientRequestScoped(w http.ResponseWriter, r *http.Request) (*models.TokenInfo, scope.Context, bool) {
 	if p == nil {
 		WriteErrorServiceUnavailable(w, "Service unavailable")
-		return nil, false
+		return nil, scope.PublicContext(), false
 	}
 	logCtx := &RequestLogContext{Request: r}
 	if !p.authenticateRequest(w, r, logCtx, p.isLiteLLMHealthy()) {
-		return nil, false
+		return nil, scope.PublicContext(), false
 	}
-	return logCtx.TokenInfo, true
+	return logCtx.TokenInfo, logCtx.Scope, true
 }
 
 func (p *Proxy) authenticateRequest(
@@ -540,7 +555,6 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	}
 	logCtx.DeclaredToolNames = extractOpenAIChatToolNames(r.URL.Path, body)
 	logCtx.RequestMetadata, logCtx.RequestTags = extractSpendRequestFields(body, r.Header.Get("Content-Type"))
-
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
 	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
@@ -561,22 +575,10 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
 	// cannot discover or invoke them even when their DB model ACL is empty.
 	trustedInternalModelID := p.isMasterKey(logCtx.Token)
-	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
-		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
-			"error_code", http.StatusNotFound,
-			"model", modelID,
-		)
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusNotFound
-		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
-		// Product-surface rejections happen before a provider attempt. Suppress
-		// the deferred zero-spend failure row just like an unknown model.
-		logCtx.Logged = true
-		WriteErrorNotFound(w, logCtx.ErrorMsg)
-		return nil, "", "", false, false
-	}
 	// Token model scopes contain client-visible model IDs. Enforce the scope
-	// before model_alias rewrites the request to its backend routing name.
+	// before route-surface lookup or alias rewrites. LiteLLM reports a restricted
+	// key's unknown/disallowed model as an authorization failure; unrestricted
+	// keys continue to the product-surface check and receive a not-found error.
 	modelAllowed := logCtx.TokenInfo == nil || logCtx.TokenInfo.IsModelAllowed(modelID)
 	if logCtx.TokenInfo != nil && p.modelManager != nil {
 		modelAllowed = logCtx.TokenInfo.IsModelAllowedBy(modelID, p.modelManager.IsModelIDAllowedByScope)
@@ -592,12 +594,33 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorForbidden(w, "Model not allowed")
 		return nil, "", "", false, false
 	}
+	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
+		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		// Product-surface rejections happen before a provider attempt. Suppress
+		// the deferred zero-spend failure row just like an unknown model.
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	}
 
 	// Resolve additional client-visible names to one exact LiteLLM deployment
 	// identity first. The requested name remains in PublicModelID/Billing so
 	// SpendLogs preserve the user-facing model_group; routing continues through
 	// the canonical public model and then the existing provider-backend alias.
-	if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
+	// A trusted LiteLLM hop may submit an exact configured backend whose string
+	// also exists in the client accepted-alias map. Preserve that exact internal
+	// route; non-master callers and non-routable aliases still use the fail-closed
+	// public resolver.
+	trustedExactModelID := trustedInternalModelID && len(p.modelManager.GetCredentialsForModel(modelID)) > 0
+	if trustedExactModelID {
+		p.logger.DebugContext(r.Context(), "Preserved trusted internal model identifier", "model", modelID)
+	} else if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
 		p.logger.WarnContext(r.Context(), "Public model alias is not uniquely routable",
 			"error_code", http.StatusNotFound,
 			"model", modelID,
@@ -659,7 +682,7 @@ func (p *Proxy) selectCredentialForModel(
 	preferredCredentialName string,
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
-	if p.modelManager != nil && p.modelManager.IsEnabled() && !p.modelManager.HasConfiguredModel(modelID) {
+	if p.modelManager != nil && p.modelManager.IsEnabled() && len(p.modelManager.GetCredentialsForModel(modelID)) == 0 {
 		errorMsg := fmt.Sprintf("Model %s not found", modelID)
 		p.logger.WarnContext(logCtx.Context(), "Model is not configured",
 			"error_code", http.StatusNotFound,

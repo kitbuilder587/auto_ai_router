@@ -12,10 +12,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	litellmdbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
 	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -332,29 +330,6 @@ func TestCommitAndReplayEnqueueFailureRemainTruthfullyUnlogged(t *testing.T) {
 	assert.Nil(t, logCtx.pendingSpendEntry)
 	require.Len(t, sink.replayed, 1)
 	assert.Same(t, sink.committed[0], sink.replayed[0])
-}
-
-func TestFinalizeDeferredShadowSpendSurfacesKafkaAndPostgreSQLFailures(t *testing.T) {
-	events := []string{}
-	databaseErr := errors.New("postgres queue rejected event")
-	kafkaErr := errors.New("kafka queue rejected event")
-	sink := &keySpendTestSink{events: &events, logErr: databaseErr}
-	prx := NewTestProxyBuilder().Build()
-	prx.spendLogger = sink
-	prx.kafkaLog = &stubKafkaManager{enabled: true, err: kafkaErr}
-	prx.metrics = monitoring.New(true)
-	logCtx := newKeySpendCommitLogContext(newKeySpendCommitTestRequest(), &config.CredentialConfig{
-		Name: "primary", Type: config.ProviderTypeProxy, BaseURL: "https://provider.example.invalid/v1",
-	})
-	before := testutil.ToFloat64(monitoring.ShadowSpendDualWriteFailuresTotal)
-
-	err := prx.finalizeDeferredShadowSpend(logCtx)
-
-	require.ErrorIs(t, err, kafkaErr)
-	require.ErrorIs(t, err, databaseErr)
-	assert.False(t, logCtx.Logged)
-	assert.NotNil(t, logCtx.pendingSpendEntry)
-	assert.Equal(t, before+1, testutil.ToFloat64(monitoring.ShadowSpendDualWriteFailuresTotal))
 }
 
 func assertShadowSpendDeadline(t *testing.T, deadline time.Time) {

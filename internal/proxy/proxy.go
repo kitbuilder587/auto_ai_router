@@ -86,7 +86,7 @@ func (logCtx *RequestLogContext) markCompletionStart(at time.Time) {
 type RequestLogContext struct {
 	RequestID              string                   // Request ID (UUID)
 	CallID                 string                   // LiteLLM correlation ID (supplied or generated)
-	CompletionStartTime    time.Time                // First upstream response headers; never overwritten
+	CompletionStartTime    time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT); never overwritten
 	ShadowContext          shadowcontext.Result     // Verified shadow identity and verification state
 	Billing                BillingContext           // Immutable-value billing envelope
 	StartTime              time.Time                // Request start time
@@ -111,6 +111,7 @@ type RequestLogContext struct {
 	ImageCount             int                      // Number of images to generate (from 'n' param)
 	Logged                 bool                     // True after DB commit or replay-queue acceptance
 	pendingSpendEntry      *litellmdb.SpendLogEntry // Exact event retained when synchronous commit/replay enqueue fails
+	kafkaSpendAttempted    bool                     // Exactly one best-effort Kafka copy per terminal spend event
 	keySpendSnapshot       float64                  // PostgreSQL statement snapshot read after auth and before provider dispatch
 	keySpendSnapshotKnown  bool                     // Never populated from TokenInfo or an in-process cache
 	PromptTokensEstimate   int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
@@ -118,8 +119,8 @@ type RequestLogContext struct {
 	RequestCompleted       bool                     // True only after the response was fully and successfully delivered
 	ActualCredentialName   string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest         bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
+	DeclaredToolNames      []string                 // Runtime-only OpenAI Chat tool declarations; never sent upstream
 	Scope                  scope.Context
-	DeclaredToolNames      []string // Runtime-only OpenAI Chat tool declarations; never sent upstream
 	reservedEntities       []reservedEntity
 	rateLimitedTPMEntities []string
 	budgetReconciled       bool
@@ -1341,7 +1342,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			logCtx.Billing = logCtx.Billing.CompleteLastAttempt(resp.StatusCode, outcome)
 			closeBody()
-			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
 				// Response too large — fatal, another credential won't help
 				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,

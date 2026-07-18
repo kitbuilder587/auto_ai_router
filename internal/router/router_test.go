@@ -33,6 +33,7 @@ type unavailableScopeDB struct {
 }
 
 func (unavailableScopeDB) IsEnabled() bool { return true }
+
 func (unavailableScopeDB) IsHealthy() bool { return false }
 
 type routerAuthTestDB struct {
@@ -676,6 +677,25 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	)
 }
 
+func TestServeHTTPPublicPreflightMatchesConfiguredLiteLLMCORS(t *testing.T) {
+	router := New(nil, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
+	req.Header.Set("Origin", "https://client.example.invalid")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type,x-api-key")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "OK", w.Body.String())
+	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "content-type,x-api-key", w.Header().Get("Access-Control-Allow-Headers"))
+	assert.Equal(t, "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT", w.Header().Get("Access-Control-Allow-Methods"))
+	assert.Equal(t, "600", w.Header().Get("Access-Control-Max-Age"))
+	assert.Equal(t, "text/plain; charset=utf-8", w.Header().Get("Content-Type"))
+}
+
 func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {
 	router := New(nil, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
@@ -694,7 +714,7 @@ func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {
 	assert.Equal(t, http.MethodGet, modelsResult.Header().Get("Allow"))
 
 	// Native Anthropic Messages is intentionally outside the configured public
-	// surface.
+	// surface; adding CORS must not make it look supported.
 	messagesReq := httptest.NewRequest(http.MethodOptions, "/v1/messages", nil)
 	messagesReq.Header.Set("Origin", "https://client.example.invalid")
 	messagesResult := httptest.NewRecorder()

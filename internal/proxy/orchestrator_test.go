@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
@@ -189,17 +190,18 @@ func TestOrchestrateRequestChainsRouterAliasThroughPublicModelToProviderModel(t 
 }
 
 func TestOrchestrateRequestResolvesPublicAliasToCanonicalDeploymentAndBackend(t *testing.T) {
+	const backendModel = "provider-gpt-4.1"
 	logger := testhelpers.NewTestLogger()
 	credential := config.CredentialConfig{
 		Name: "provider", Type: config.ProviderTypeOpenAI,
 		BaseURL: "http://test.local", APIKey: "upstream-key", RPM: 100, TPM: 10000,
 	}
 	manager := models.New(logger, 100, []config.ModelRPMConfig{
-		{Name: "gpt-4.1", Credential: credential.Name, RPM: 100, TPM: 10000},
+		{Name: backendModel, Credential: credential.Name, RPM: 100, TPM: 10000},
 	})
 	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
 	manager.SetCredentials([]config.CredentialConfig{credential})
-	manager.SetModelAliases(map[string]string{"openai/gpt-4.1": "gpt-4.1"})
+	manager.SetModelAliases(map[string]string{"openai/gpt-4.1": backendModel})
 	manager.UpdateDBModels([]config.ModelRPMConfig{{
 		Name: "openai/gpt-4.1", Credential: credential.Name,
 		DeploymentID: "deployment-gpt-4.1", RPM: 100, TPM: 10000,
@@ -223,14 +225,14 @@ func TestOrchestrateRequestResolvesPublicAliasToCanonicalDeploymentAndBackend(t 
 	require.NotNil(t, prepared)
 	assert.Equal(t, "gpt-4.1", logCtx.PublicModelID)
 	assert.Equal(t, "gpt-4.1", logCtx.Billing.PublicModel())
-	assert.Equal(t, "gpt-4.1", prepared.modelID)
-	assert.Equal(t, "gpt-4.1", prepared.realModelID)
+	assert.Equal(t, backendModel, prepared.modelID)
+	assert.Equal(t, backendModel, prepared.realModelID)
 	assert.Equal(t, credential.Name, prepared.cred.Name)
 	deploymentID, found := manager.GetDeploymentID(logCtx.PublicModelID, credential.Name)
 	require.True(t, found)
 	assert.Equal(t, "deployment-gpt-4.1", deploymentID)
 	assert.JSONEq(t,
-		`{"model":"gpt-4.1","messages":[{"role":"user","content":"hello"}]}`,
+		`{"model":"`+backendModel+`","messages":[{"role":"user","content":"hello"}]}`,
 		string(prepared.body),
 	)
 }
@@ -287,6 +289,84 @@ func TestOrchestrateRequestResolvesAcceptedCompletionAliasWithoutChangingPublicS
 		`{"model":"deepseek-v4-flash","prompt":"hello","stream":false}`,
 		string(prepared.body),
 	)
+}
+
+func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T) {
+	const (
+		canonicalModel = "anthropic/claude-sonnet-4.5"
+		backendModel   = "claude-sonnet-4.5"
+	)
+	logger := testhelpers.NewTestLogger()
+	credential := config.CredentialConfig{
+		Name: "provider", Type: config.ProviderTypeOpenAI,
+		APIKey: "provider-key", BaseURL: "http://provider.local", RPM: 100, TPM: 10000,
+	}
+	manager := models.New(logger, 100, []config.ModelRPMConfig{{
+		Name: backendModel, Credential: credential.Name, RPM: 100, TPM: 10000,
+	}})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	manager.SetModelAliases(map[string]string{canonicalModel: backendModel})
+	manager.SetClientModelIDs([]string{canonicalModel})
+	manager.UpdateDBModels([]config.ModelRPMConfig{
+		{Name: canonicalModel, Credential: credential.Name, DeploymentID: "deployment-a", RPM: 100, TPM: 10000},
+		{Name: canonicalModel, Credential: credential.Name, DeploymentID: "deployment-b", RPM: 100, TPM: 10000},
+	}, []config.CredentialConfig{credential}, []config.CredentialConfig{credential})
+	manager.SetAcceptedModelAliases(map[string]string{backendModel: canonicalModel})
+	resolved, accepted, aliasErr := manager.ResolvePublicModelAlias(backendModel)
+	assert.Equal(t, backendModel, resolved)
+	assert.True(t, accepted)
+	require.Error(t, aliasErr, "the collision must fail if it enters the client alias resolver")
+	assert.NotEmpty(t, manager.GetCredentialsForModel(backendModel), "the same ID is an exact configured backend")
+
+	builder := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key")
+	builder.config.ModelManager = manager
+	prx := builder.Build()
+
+	for _, modelID := range []string{backendModel, canonicalModel} {
+		t.Run(modelID, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+				`{"model":"`+modelID+`","messages":[{"role":"user","content":"hello"}]}`,
+			))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			logCtx := &RequestLogContext{Request: req}
+			logCtx.Billing = NewBillingContext("event-"+modelID, "call-"+modelID, req.URL.Path, shadowcontext.Identity{})
+
+			prepared, ok := prx.orchestrateRequest(httptest.NewRecorder(), req, logCtx)
+
+			require.True(t, ok)
+			require.NotNil(t, prepared)
+			assert.Equal(t, modelID, logCtx.PublicModelID)
+			assert.Equal(t, backendModel, prepared.modelID)
+			assert.Equal(t, backendModel, prepared.realModelID)
+			assert.Equal(t, credential.Name, prepared.cred.Name)
+			assert.JSONEq(t,
+				`{"model":"`+backendModel+`","messages":[{"role":"user","content":"hello"}]}`,
+				string(prepared.body),
+			)
+		})
+	}
+
+	clientReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+backendModel+`","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	clientReq.Header.Set("Authorization", "Bearer unrestricted-client-key")
+	clientReq.Header.Set("Content-Type", "application/json")
+	clientWriter := httptest.NewRecorder()
+	prx.LiteLLMDB = &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"unrestricted-client-key": {Token: "unrestricted-client-key-hash"},
+	}}
+	clientLogCtx := &RequestLogContext{Request: clientReq}
+	clientLogCtx.Billing = NewBillingContext(
+		"event-unrestricted-client", "call-unrestricted-client", clientReq.URL.Path, shadowcontext.Identity{},
+	)
+
+	prepared, ok := prx.orchestrateRequest(clientWriter, clientReq, clientLogCtx)
+
+	assert.False(t, ok)
+	assert.Nil(t, prepared)
+	testhelpers.AssertJSONErrorResponse(t, clientWriter, http.StatusNotFound, "not_found_error", "Model "+backendModel+" not found")
 }
 
 func TestOrchestrateRequestRejectsOrphanPublicAliasBeforeProviderSelection(t *testing.T) {

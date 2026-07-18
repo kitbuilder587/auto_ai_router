@@ -16,6 +16,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,6 +186,123 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 	assert.Equal(t, int32(1), providerCalls.Load(), "master-key internal routing must remain available")
 }
 
+func TestDirectAIRConsumesRequestTagsBeforeProviderWhileRetainingSpendTags(t *testing.T) {
+	var providerBody map[string]any
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&providerBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-tags","object":"chat.completion","created":1,"model":"backend-chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"tagged-key": {
+			Token: "tagged-key-hash",
+			Tags:  []string{"identity-tag"},
+		},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	sink := &recordingShadowSpendSink{}
+	prx.spendLogger = sink
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"tags":["local-shadow","chat"],"user":"end-user"}`,
+	))
+	req.Header.Set("Authorization", "Bearer tagged-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, providerBody)
+	assert.NotContains(t, providerBody, "tags", "LiteLLM request tags are billing metadata, not an upstream OpenAI field")
+	assert.Equal(t, "end-user", providerBody["user"], "ordinary provider fields must remain untouched")
+	entries := sink.Entries()
+	require.Len(t, entries, 1)
+	assert.JSONEq(t, `["identity-tag","local-shadow","chat"]`, entries[0].RequestTags)
+}
+
+func TestProxyCredentialPreservesRequestTagsForTheNextPolicyHop(t *testing.T) {
+	var providerBody map[string]any
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&providerBody))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-proxy-tags","object":"chat.completion","created":1,"model":"public/chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"tagged-key": {
+			Token: "tagged-key-hash",
+			Tags:  []string{"identity-tag"},
+		},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeProxy, "provider-key")
+	sink := &recordingShadowSpendSink{}
+	prx.spendLogger = sink
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"tags":["local-shadow","chat"]}`,
+	))
+	req.Header.Set("Authorization", "Bearer tagged-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, providerBody)
+	assert.Equal(t, []any{"local-shadow", "chat"}, providerBody["tags"])
+	entries := sink.Entries()
+	require.Len(t, entries, 1)
+	assert.JSONEq(t, `["identity-tag","local-shadow","chat"]`, entries[0].RequestTags)
+}
+
+func TestExplicitClientModelSurfacePreservesRestrictedACLPrecedenceForUnknownModel(t *testing.T) {
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"unexpected-provider-call"}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"restricted-key": {
+			Token:  "restricted-hash",
+			Models: []string{"public/chat"},
+		},
+		"unrestricted-key": {
+			Token: "unrestricted-hash",
+		},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.modelManager.SetClientModelIDs([]string{"public/chat", "public/embed"})
+
+	request := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"unknown-client-model","messages":[{"role":"user","content":"hello"}]}`,
+		))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		writer := httptest.NewRecorder()
+		prx.ProxyRequest(writer, req)
+		return writer
+	}
+
+	restricted := request("restricted-key")
+	assertAuthErrorShape(t, restricted, http.StatusForbidden)
+	assert.Contains(t, restricted.Body.String(), "Model not allowed")
+
+	unrestricted := request("unrestricted-key")
+	testhelpers.AssertJSONErrorResponse(t, unrestricted, http.StatusNotFound, "not_found_error", "Model unknown-client-model not found")
+
+	trusted := request("master-key")
+	testhelpers.AssertJSONErrorResponse(t, trusted, http.StatusNotFound, "not_found_error", "Model unknown-client-model not found")
+	assert.Zero(t, providerCalls.Load())
+}
+
 func TestClientAuthenticationAuthorizationTakesPrecedenceOverXAPIKey(t *testing.T) {
 	db := &clientAuthTestDB{
 		tokens: map[string]*dbmodels.TokenInfo{"valid-x-key": {Token: "hash"}},
@@ -201,6 +319,34 @@ func TestClientAuthenticationAuthorizationTakesPrecedenceOverXAPIKey(t *testing.
 	assert.False(t, ok)
 	assertAuthErrorShape(t, w, http.StatusUnauthorized)
 	assert.Equal(t, []string{"invalid-bearer"}, db.seenTokens())
+}
+
+func TestAuthenticateClientRequestScopedIsTransportIndependent(t *testing.T) {
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"tenant-key": {Token: "tenant-hash", KeyName: "team-a"},
+	}}
+	prx := newClientAuthTestProxy(t, db, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
+
+	var scopeKeys []string
+	for _, headers := range []map[string]string{
+		{"Authorization": "Bearer tenant-key"},
+		{"x-api-key": "tenant-key"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		w := httptest.NewRecorder()
+		info, visibility, ok := prx.AuthenticateClientRequestScoped(w, req)
+		require.True(t, ok)
+		require.NotNil(t, info)
+		assert.Equal(t, "team-a", info.KeyName)
+		scopeKeys = append(scopeKeys, visibility.Key())
+	}
+
+	require.Len(t, scopeKeys, 2)
+	assert.Equal(t, scopeKeys[0], scopeKeys[1])
+	assert.NotEqual(t, scope.PublicContext().Key(), scopeKeys[0])
 }
 
 func TestClientAuthenticationRejectsAmbiguousHeadersAndNormalizesOWS(t *testing.T) {

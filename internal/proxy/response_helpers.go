@@ -204,6 +204,32 @@ func extractSpendRequestFields(body []byte, contentType string) (map[string]any,
 	return metadata, tags
 }
 
+// stripProviderRequestTags removes LiteLLM's root-level request-tags extension
+// from a JSON body after spend attribution has captured it. Request tags belong
+// to the proxy's billing/policy envelope; they are not an OpenAI provider field
+// and LiteLLM consumes them before dispatch. RawMessage values keep every other
+// client field (including provider-supported metadata) semantically unchanged.
+func stripProviderRequestTags(body []byte, contentType string) []byte {
+	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return body
+	}
+
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	if _, exists := envelope["tags"]; !exists {
+		return body
+	}
+	delete(envelope, "tags")
+
+	stripped, err := json.Marshal(envelope)
+	if err != nil {
+		return body
+	}
+	return stripped
+}
+
 func extractMetadataFromMultipartBody(body []byte, contentType string) (string, string) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {

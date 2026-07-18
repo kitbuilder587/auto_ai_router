@@ -112,3 +112,58 @@ func TestExtractSpendRequestFieldsPreservesJSONValuesAndTags(t *testing.T) {
 	}`, string(encoded))
 	assert.Equal(t, []string{"identity", "", "identity", "request"}, tags)
 }
+
+func TestStripProviderRequestTagsOnlyMutatesValidJSONWithRootTags(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		want        string
+		exact       bool
+	}{
+		{
+			name:        "array tags are consumed and other fields remain",
+			contentType: "application/json; charset=utf-8",
+			body:        `{"model":"gpt-4","tags":["one","two"],"metadata":{"keep":true},"temperature":0.25}`,
+			want:        `{"model":"gpt-4","metadata":{"keep":true},"temperature":0.25}`,
+		},
+		{
+			name:        "malformed extension value still cannot leak",
+			contentType: "application/json",
+			body:        `{"model":"gpt-4","tags":{"unexpected":true},"messages":[]}`,
+			want:        `{"model":"gpt-4","messages":[]}`,
+		},
+		{
+			name:        "body without tags stays byte exact",
+			contentType: "application/json",
+			body:        "{ \"model\" : \"gpt-4\" }",
+			want:        "{ \"model\" : \"gpt-4\" }",
+			exact:       true,
+		},
+		{
+			name:        "invalid json stays byte exact",
+			contentType: "application/json",
+			body:        `{"tags":`,
+			want:        `{"tags":`,
+			exact:       true,
+		},
+		{
+			name:        "multipart decision-required surface stays byte exact",
+			contentType: "multipart/form-data; boundary=test",
+			body:        "--test\r\ncontent-disposition: form-data; name=\"tags\"\r\n\r\none\r\n--test--\r\n",
+			want:        "--test\r\ncontent-disposition: form-data; name=\"tags\"\r\n\r\none\r\n--test--\r\n",
+			exact:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripProviderRequestTags([]byte(tt.body), tt.contentType)
+			if !tt.exact {
+				assert.JSONEq(t, tt.want, string(got))
+				return
+			}
+			assert.Equal(t, tt.want, string(got))
+		})
+	}
+}

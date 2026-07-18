@@ -184,15 +184,18 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:        usage.InputTokens,
-		CompletionTokens:    usage.OutputTokens,
-		CachedTokens:        usage.InputTokensDetails.CachedTokens,
-		CacheCreationTokens: cacheCreationTokens,
-		AudioInputTokens:    usage.InputTokensDetails.AudioTokens,
-		AudioOutputTokens:   usage.OutputTokensDetails.AudioTokens,
-		ImageTokens:         usage.InputTokensDetails.ImageTokens,
-		OutputImageTokens:   usage.OutputTokensDetails.ImageTokens,
-		ReasoningTokens:     usage.OutputTokensDetails.ReasoningTokens,
+		PromptTokens:             usage.InputTokens,
+		CompletionTokens:         usage.OutputTokens,
+		CachedTokens:             usage.InputTokensDetails.CachedTokens,
+		CacheCreationTokens:      cacheCreationTokens,
+		AudioInputTokens:         usage.InputTokensDetails.AudioTokens,
+		AudioOutputTokens:        usage.OutputTokensDetails.AudioTokens,
+		ImageTokens:              usage.InputTokensDetails.ImageTokens,
+		OutputImageTokens:        usage.OutputTokensDetails.ImageTokens,
+		ReasoningTokens:          usage.OutputTokensDetails.ReasoningTokens,
+		AcceptedPredictionTokens: usage.OutputTokensDetails.AcceptedPredictionTokens,
+		RejectedPredictionTokens: usage.OutputTokensDetails.RejectedPredictionTokens,
+		CachedOutputTokens:       usage.OutputTokensDetails.CachedTokens,
 	}
 }
 
@@ -208,9 +211,12 @@ type responsesAPIUsage struct {
 		ImageTokens         int `json:"image_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
-		AudioTokens     int `json:"audio_tokens,omitempty"`
-		ImageTokens     int `json:"image_tokens,omitempty"`
-		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+		AudioTokens              int `json:"audio_tokens,omitempty"`
+		CachedTokens             int `json:"cached_tokens,omitempty"`
+		ImageTokens              int `json:"image_tokens,omitempty"`
+		ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+		RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
 }
 
@@ -881,12 +887,8 @@ func (p *Proxy) streamToClient(
 	endpoint string,
 	onChunk func([]byte),
 	onWriteErr func(),
-	logContexts ...*RequestLogContext,
+	logCtx *RequestLogContext,
 ) error {
-	var logCtx *RequestLogContext
-	if len(logContexts) > 0 {
-		logCtx = logContexts[0]
-	}
 	_, ok := w.(http.Flusher)
 	if !ok {
 		p.logger.ErrorContext(ctx, "Streaming not supported", "credential", credName)

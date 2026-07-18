@@ -85,6 +85,7 @@ func TestStreamToClientPropagatesUnexpectedReadError(t *testing.T) {
 		"/v1/chat/completions",
 		nil,
 		nil,
+		nil,
 	)
 
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
@@ -653,6 +654,7 @@ func TestWriteProxyStreamingResponseWithTokens_DoesNotDisableBufferingForPreStre
 		"test",
 		"test-model",
 		"gpt-4o-mini",
+		nil,
 	)
 
 	require.NoError(t, err)
