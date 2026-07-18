@@ -575,6 +575,28 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
 	// cannot discover or invoke them even when their DB model ACL is empty.
 	trustedInternalModelID := p.isMasterKey(logCtx.Token)
+	// Internal backend deployment IDs are not part of the client-facing product
+	// surface. For ordinary keys they must read as "not found", never "forbidden":
+	// a permission error would leak that the internal ID exists. Resolve this
+	// before the token model-ACL check so a restricted key cannot distinguish a
+	// configured backend ID (404) from a disallowed public model (403). The
+	// trusted LiteLLM -> AIR hop (master key) still routes them exactly.
+	if p.modelManager != nil && !trustedInternalModelID &&
+		!p.modelManager.IsClientModelIDRoutable(modelID) &&
+		len(p.modelManager.GetCredentialsForModel(modelID)) > 0 {
+		p.logger.WarnContext(r.Context(), "Internal backend model identifier is not client-exposed",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		// Product-surface rejection happens before a provider attempt. Suppress
+		// the deferred zero-spend failure row just like an unknown model.
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	}
 	// Token model scopes contain client-visible model IDs. Enforce the scope
 	// before route-surface lookup or alias rewrites. LiteLLM reports a restricted
 	// key's unknown/disallowed model as an authorization failure; unrestricted
