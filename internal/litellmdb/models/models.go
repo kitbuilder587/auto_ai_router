@@ -230,6 +230,18 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 // "all-team-models" / "all-proxy-models" sentinel values LiteLLM stores in
 // VerificationToken.models (see the sentinel constants above).
 func (t *TokenInfo) IsModelAllowed(model string) bool {
+	return t.IsAnyModelAllowed([]string{model})
+}
+
+// IsAnyModelAllowed reports whether at least one of the given candidate names
+// is allowed. The same underlying provider model is often exposed under several
+// route aliases (e.g. "claude-haiku-4.5" and "anthropic/claude-haiku-4.5" for
+// the same credential+model, see config.yaml.example) — an admin restricting a
+// key to one such alias almost certainly means the underlying model, not that
+// specific spelling. Callers resolve the full alias-equivalence group (see
+// models.Manager.GetAliasesForModel) and pass it here so the check isn't
+// defeated by which alias the client happened to call.
+func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
 	effective := t.Models
 
 	if slices.Contains(effective, specialModelAllTeamModels) {
@@ -246,7 +258,12 @@ func (t *TokenInfo) IsModelAllowed(model string) bool {
 		return true
 	}
 
-	return slices.Contains(effective, model)
+	for _, model := range candidates {
+		if slices.Contains(effective, model) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkUserBudget checks user budget (personal key only - embedded, use >)

@@ -284,6 +284,32 @@ func TestTokenInfo_IsModelAllowed_AllTeamModels_KeyTeamModelsIgnoredWithoutSenti
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
+// ==================== IsAnyModelAllowed alias-group tests ====================
+
+func TestTokenInfo_IsAnyModelAllowed_MatchesOnAnyCandidate(t *testing.T) {
+	// Key is restricted to one alias of a model; client called it under a
+	// different alias for the same underlying credential+model.
+	token := &TokenInfo{
+		Models: []string{"claude-haiku-4.5"},
+	}
+
+	assert.True(t, token.IsAnyModelAllowed([]string{"anthropic/claude-haiku-4.5", "claude-haiku-4.5", "claude-haiku-4-5-20251001"}))
+}
+
+func TestTokenInfo_IsAnyModelAllowed_NoneMatch(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4"},
+	}
+
+	assert.False(t, token.IsAnyModelAllowed([]string{"claude-3", "claude-3-opus"}))
+}
+
+func TestTokenInfo_IsAnyModelAllowed_EmptyModelsList(t *testing.T) {
+	token := &TokenInfo{Models: nil}
+
+	assert.True(t, token.IsAnyModelAllowed([]string{"anything"}))
+}
+
 // ==================== Budget Check Helper Tests ====================
 
 func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {
