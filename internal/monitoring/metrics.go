@@ -313,6 +313,19 @@ var (
 		},
 		[]string{"eligibility"},
 	)
+
+	// ShadowSpendPriceMissingTotal counts successful, token-consuming spend rows
+	// whose model price could not be resolved from the registry. Such rows are
+	// persisted with spend=0 — indistinguishable in the `spend` column from a
+	// legitimately free/cache-hit row — so this counter makes the "paid model
+	// without a price" condition observable instead of a silent zero.
+	ShadowSpendPriceMissingTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_shadow_spend_price_missing_total",
+			Help: "Successful, token-consuming spend rows persisted with no resolved price, by price_status",
+		},
+		[]string{"price_status"},
+	)
 )
 
 // ShadowSpendSnapshot contains instantaneous spend writer state. Loss/error

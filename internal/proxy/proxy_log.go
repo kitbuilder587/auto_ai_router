@@ -14,6 +14,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
@@ -415,6 +416,13 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 			"price_status", priceStatus,
 			"model", priceModel,
 		)
+		// A successful, token-consuming request whose model has no price is
+		// persisted with spend=0, which is indistinguishable in the `spend`
+		// column from a legitimately free/cache-hit row. Surface it as an
+		// explicit metric so a paid model without a price is never a silent zero.
+		if status == "success" && usage.Total() > 0 {
+			monitoring.ShadowSpendPriceMissingTotal.WithLabelValues(priceStatus).Inc()
+		}
 	} else if costStatus != "calculated" {
 		p.logger.WarnContext(logCtx.Context(), "Shadow spend row cost cannot be calculated",
 			"cost_status", costStatus,
