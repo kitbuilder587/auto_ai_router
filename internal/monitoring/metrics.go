@@ -210,6 +210,18 @@ var (
 		},
 	)
 
+	// LiteLLMDBDegraded is 1 when litellm_db is enabled but its connection failed
+	// and is_required=false, so the process started on a NoopManager: virtual-key
+	// auth is fail-closed but budget checks and spend logging are silent no-ops.
+	// Production (ru01) runs is_required=true, so this must stay 0 there; a 1 means
+	// billing is being silently dropped and the degrade path was taken.
+	LiteLLMDBDegraded = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_litellm_db_degraded",
+			Help: "1 when optional litellm_db failed and startup degraded to NoopManager (billing/budgets disabled)",
+		},
+	)
+
 	ShadowSpendSinkStartupFailuresTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_shadow_spend_sink_startup_failures_total",

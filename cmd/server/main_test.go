@@ -8,7 +8,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEffectiveServerWriteTimeoutPreservesResponseGrace(t *testing.T) {
@@ -140,4 +142,51 @@ func TestInitializeShadowSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
 
 	assert.False(t, sink.IsEnabled())
 	assert.NoError(t, sink.LogSpend(nil))
+}
+
+// ru01 runs litellm_db with is_required=true. When the database is unreachable
+// the process must NOT start on a NoopManager (which would fail-open budgets and
+// silently drop billing) — resolve must return an error so startup aborts.
+func TestResolveLiteLLMDBManagerRequiredWithoutDBFailsClosed(t *testing.T) {
+	cfg := &config.Config{LiteLLMDB: config.LiteLLMDBConfig{
+		Enabled:        true,
+		IsRequired:     true,
+		DatabaseURL:    "postgres://%zz",
+		ConnectTimeout: 100 * time.Millisecond,
+	}}
+
+	manager, err := resolveLiteLLMDBManager(cfg, slog.New(slog.DiscardHandler))
+
+	require.Error(t, err)
+	assert.Nil(t, manager)
+}
+
+// With is_required=false the degrade path is allowed, but it must be observable:
+// the process comes up on a NoopManager and LiteLLMDBDegraded is raised to 1 so
+// the silent billing/budget loss is not invisible.
+func TestResolveLiteLLMDBManagerOptionalDegradesLoudly(t *testing.T) {
+	monitoring.LiteLLMDBDegraded.Set(0)
+	cfg := &config.Config{LiteLLMDB: config.LiteLLMDBConfig{
+		Enabled:        true,
+		IsRequired:     false,
+		DatabaseURL:    "postgres://%zz",
+		ConnectTimeout: 100 * time.Millisecond,
+	}}
+
+	manager, err := resolveLiteLLMDBManager(cfg, slog.New(slog.DiscardHandler))
+
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	assert.False(t, manager.IsEnabled(), "degraded manager must be the NoopManager")
+	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.LiteLLMDBDegraded))
+}
+
+func TestResolveLiteLLMDBManagerDisabledUsesNoop(t *testing.T) {
+	cfg := &config.Config{LiteLLMDB: config.LiteLLMDBConfig{Enabled: false}}
+
+	manager, err := resolveLiteLLMDBManager(cfg, slog.New(slog.DiscardHandler))
+
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	assert.False(t, manager.IsEnabled())
 }
