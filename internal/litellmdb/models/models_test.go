@@ -156,6 +156,10 @@ func TestTokenInfo_IsBudgetExceeded_SpendLessThanMax(t *testing.T) {
 	assert.False(t, token.IsBudgetExceeded())
 }
 
+// LiteLLM 1.90.0 rejects the request when key spend reaches the budget
+// (litellm/proxy/auth/auth_checks.py: `spend >= valid_token.max_budget`,
+// the GHSA-2rv4-xv66-fpjg defense-in-depth check). AIR must match that
+// boundary for the key/token level.
 func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 	maxBudget := 100.0
 	token := &TokenInfo{
@@ -163,7 +167,7 @@ func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 		MaxBudget: &maxBudget,
 	}
 
-	assert.False(t, token.IsBudgetExceeded())
+	assert.True(t, token.IsBudgetExceeded())
 }
 
 func TestTokenInfo_IsBudgetExceeded_SpendGreaterThanMax(t *testing.T) {
@@ -262,11 +266,78 @@ func TestTokenInfo_IsModelAllowed_AllTeamModelsInheritsTeamScope(t *testing.T) {
 	assert.False(t, broken.IsModelAllowed("public/chat"), "all-team-models without a team must fail closed")
 }
 
+// A token whose team_id references a deleted LiteLLM_TeamTable row gets an
+// empty team scope from the LEFT JOIN. That scope must deny, not degrade to
+// unrestricted — otherwise all-team-models keys would silently gain access
+// to every model.
+func TestTokenInfo_IsModelAllowed_DanglingTeamFailsClosed(t *testing.T) {
+	token := &TokenInfo{
+		Models:       []string{AllTeamModels},
+		TeamID:       "deleted-team",
+		TeamModels:   nil, // LEFT JOIN found no team row
+		TeamDangling: true,
+	}
+
+	assert.False(t, token.IsModelAllowed("public/chat"))
+	assert.False(t, token.IsModelAllowed("any-model"))
+
+	explicit := &TokenInfo{
+		Models:       []string{"public/chat"},
+		TeamID:       "deleted-team",
+		TeamDangling: true,
+	}
+	assert.False(t, explicit.IsModelAllowed("public/chat"),
+		"even a key-allowed model must be denied while the team scope is unresolvable")
+}
+
+// Same fail-closed rule for project_id: a dangling project reference must
+// not leave an unrestricted empty project scope.
+func TestTokenInfo_IsModelAllowed_DanglingProjectFailsClosed(t *testing.T) {
+	token := &TokenInfo{
+		Models:          []string{"public/chat"},
+		ProjectID:       "deleted-project",
+		ProjectModels:   nil, // LEFT JOIN found no project row
+		ProjectDangling: true,
+	}
+
+	assert.False(t, token.IsModelAllowed("public/chat"))
+}
+
+// Contrast with the dangling case: a resolved parent with an empty model
+// list stays unrestricted (LiteLLM semantics), and an orphan user_id stays
+// unrestricted by design (see auth_test.go).
+func TestTokenInfo_IsModelAllowed_ResolvedEmptyParentScopesStayUnrestricted(t *testing.T) {
+	token := &TokenInfo{
+		Models:        []string{"public/chat"},
+		TeamID:        "team",
+		TeamModels:    nil,
+		ProjectID:     "project",
+		ProjectModels: nil,
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
+}
+
 // ==================== Budget Check Helper Tests ====================
 
 func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {
 	userBudget := 100.0
 	userSpend := 150.0
+	token := &TokenInfo{
+		UserID:        "user1",
+		TeamID:        "",
+		UserMaxBudget: &userBudget,
+		UserSpend:     &userSpend,
+	}
+
+	assert.True(t, token.checkUserBudget())
+}
+
+// LiteLLM 1.90.0 user budget check is `user_spend >= user_budget`
+// (auth_checks.py `_user_max_budget_check`). Reaching the budget must reject.
+func TestTokenInfo_checkUserBudget_SpendEqualToMax(t *testing.T) {
+	userBudget := 100.0
+	userSpend := 100.0
 	token := &TokenInfo{
 		UserID:        "user1",
 		TeamID:        "",
@@ -315,6 +386,20 @@ func TestTokenInfo_checkTeamBudget_ExceededEmbedded(t *testing.T) {
 func TestTokenInfo_checkTeamBudget_NotExceeded(t *testing.T) {
 	teamBudget := 100.0
 	teamSpend := 50.0
+	token := &TokenInfo{
+		TeamMaxBudget: &teamBudget,
+		TeamSpend:     &teamSpend,
+	}
+
+	assert.False(t, token.checkTeamBudget())
+}
+
+// LiteLLM 1.90.0 team budget check is `spend > team.max_budget` (auth_checks.py),
+// a deliberately different boundary from the key/user (`>=`) levels: reaching the
+// team budget exactly is still allowed. Lock this in so it is not "unified" away.
+func TestTokenInfo_checkTeamBudget_SpendEqualToMax(t *testing.T) {
+	teamBudget := 100.0
+	teamSpend := 100.0
 	token := &TokenInfo{
 		TeamMaxBudget: &teamBudget,
 		TeamSpend:     &teamSpend,

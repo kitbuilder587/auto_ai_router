@@ -80,12 +80,12 @@ func (c *Cache) Get(hashedToken string) (*models.TokenInfo, bool) {
 		}
 	}
 	atomic.AddUint64(&c.hits, 1)
-	return cached.info, true
+	return cached.info.Clone(), true
 }
 
 // Set adds a token to cache
 func (c *Cache) Set(hashedToken string, info *models.TokenInfo) {
-	if c == nil || c.cache == nil {
+	if c == nil || c.cache == nil || info == nil {
 		return
 	}
 
@@ -93,7 +93,7 @@ func (c *Cache) Set(hashedToken string, info *models.TokenInfo) {
 	defer c.mu.Unlock()
 
 	c.cache.Add(hashedToken, &cachedToken{
-		info:     info,
+		info:     info.Clone(),
 		cachedAt: utils.NowUTC(),
 	})
 }

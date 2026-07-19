@@ -185,6 +185,15 @@ type TokenInfo struct {
 	ProjectBlocked *bool    // Project is blocked
 	Blocked        bool     // Is token blocked
 
+	// TeamDangling / ProjectDangling are set when the token carries a
+	// team_id / project_id but the LEFT JOIN found no parent row (the
+	// team_id_check / project_id_check sentinel scanned as NULL). A dangling
+	// parent fails closed: its scope denies every model instead of degrading
+	// to an unrestricted empty scope. An orphan user_id deliberately stays
+	// unrestricted (production holds valid tokens whose owner row is gone).
+	TeamDangling    bool
+	ProjectDangling bool
+
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name
 	UserEmail     string   // User email (optional)
@@ -336,23 +345,30 @@ func (t *TokenInfo) IsExpired() bool {
 	return utils.NowUTC().After(*t.Expires)
 }
 
-// IsBudgetExceeded checks if token budget is exceeded (embedded, use >)
+// IsBudgetExceeded checks if token budget is exceeded.
+// LiteLLM 1.90.0 rejects at the boundary for keys: `spend >= max_budget`
+// (auth_checks.py, GHSA-2rv4-xv66-fpjg defense-in-depth). Match that exactly.
 func (t *TokenInfo) IsBudgetExceeded() bool {
 	if t.MaxBudget == nil {
 		return false
 	}
-	return t.Spend > *t.MaxBudget
+	return t.Spend >= *t.MaxBudget
 }
 
 // ModelAccessScopes returns the ordered set of allowlists applicable to this
 // token. User models apply only to personal keys. A non-empty team-member
 // scope is an additional restriction; an empty one inherits the team scope.
+// A dangling team/project reference (ID set, parent row gone) yields a
+// DenyAll scope: the parent scope cannot be resolved, so it must not degrade
+// to an unrestricted empty one.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	keyModels := t.Models
 	for _, model := range t.Models {
 		if model == AllTeamModels {
 			// LiteLLM fails closed when all-team-models is used without a team.
 			// With a team it replaces, rather than extends, the key allowlist.
+			// A dangling team keeps TeamModels empty here and is rejected by
+			// the DenyAll team scope below.
 			if t.TeamID != "" {
 				keyModels = t.TeamModels
 			}
@@ -362,9 +378,13 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 
 	scopes := []ModelAccessScope{{Name: "key", Models: keyModels}}
 	if t.TeamID != "" {
-		scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
-		if t.UserID != "" && len(t.TeamMemberModels) > 0 {
-			scopes = append(scopes, ModelAccessScope{Name: "team_member", Models: t.TeamMemberModels})
+		if t.TeamDangling {
+			scopes = append(scopes, ModelAccessScope{Name: "team", DenyAll: true})
+		} else {
+			scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+			if t.UserID != "" && len(t.TeamMemberModels) > 0 {
+				scopes = append(scopes, ModelAccessScope{Name: "team_member", Models: t.TeamMemberModels})
+			}
 		}
 	} else if t.UserID != "" {
 		userScope := ModelAccessScope{Name: "user", Models: t.UserModels}
@@ -377,7 +397,11 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 		scopes = append(scopes, userScope)
 	}
 	if t.ProjectID != "" {
-		scopes = append(scopes, ModelAccessScope{Name: "project", Models: t.ProjectModels})
+		if t.ProjectDangling {
+			scopes = append(scopes, ModelAccessScope{Name: "project", DenyAll: true})
+		} else {
+			scopes = append(scopes, ModelAccessScope{Name: "project", Models: t.ProjectModels})
+		}
 	}
 	return scopes
 }
@@ -412,7 +436,9 @@ func (t *TokenInfo) IsModelAllowed(model string) bool {
 	return t.IsModelAllowedBy(model, exactModelScopeMatch)
 }
 
-// checkUserBudget checks user budget (personal key only - embedded, use >)
+// checkUserBudget checks user budget (personal key only).
+// LiteLLM 1.90.0 uses `user_spend >= user_budget` (auth_checks.py
+// _user_max_budget_check), so reaching the budget rejects.
 func (t *TokenInfo) checkUserBudget() bool {
 	// Only check user budget for personal keys (no team)
 	if t.TeamID != "" {
@@ -421,10 +447,12 @@ func (t *TokenInfo) checkUserBudget() bool {
 	if t.UserMaxBudget == nil || t.UserSpend == nil {
 		return false
 	}
-	return *t.UserSpend > *t.UserMaxBudget
+	return *t.UserSpend >= *t.UserMaxBudget
 }
 
-// checkTeamBudget checks team budget (embedded, use >)
+// checkTeamBudget checks team budget.
+// LiteLLM 1.90.0 uses `spend > team.max_budget` (auth_checks.py) — a deliberately
+// different boundary from key/user: reaching the team budget exactly is allowed.
 func (t *TokenInfo) checkTeamBudget() bool {
 	if t.TeamMaxBudget == nil || t.TeamSpend == nil {
 		return false

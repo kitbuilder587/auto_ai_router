@@ -520,6 +520,22 @@ func initializeModelManager(
 	if len(cfg.ModelAlias) > 0 {
 		modelManager.SetModelAliases(cfg.ModelAlias)
 	}
+	// client_model_ids is a deny-by-default product boundary: an omitted key
+	// preserves the legacy inferred model surface, while an explicitly empty
+	// list intentionally denies every client-facing model ID. yaml.v3 keeps
+	// the slice nil only when the key is absent, so nil means "not configured".
+	if cfg.ClientModelIDs != nil {
+		if len(cfg.ClientModelIDs) == 0 {
+			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
+		}
+		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
+	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
+	}
 
 	// Initialize rate limiters for each model
 	modelsResp := modelManager.GetAllModels()

@@ -3,6 +3,19 @@ package queries
 // SQL query for comprehensive token validation with budget hierarchy
 // Loads all related data in ONE query instead of 5-7 separate queries
 // Uses PostgreSQL JOINs and COALESCE for organization_id resolution
+//
+// The SELECT list is positional: it must stay in lockstep (count and order,
+// currently 51 columns) with the Scan targets in
+// internal/litellmdb/auth/auth.go fetchTokenFromDB. Dropping a column here
+// (as the spend-logs base branch did) breaks every auth query with pgx's
+// "number of field descriptions must equal number of destinations" — this
+// file is deliberately part of the PR diff so such a divergence surfaces as
+// a visible merge conflict instead of a silent runtime failure.
+//
+// The *_check columns (u.user_id, tm.team_id, p.project_id, o.organization_id)
+// are join sentinels: they are NULL when the LEFT JOIN found no parent row,
+// which auth uses to tell "parent not set" apart from "parent set but the row
+// is gone" (dangling reference, must fail closed).
 
 const QueryValidateTokenWithHierarchy = `
 -- Main query with all JOINs
@@ -21,6 +34,9 @@ SELECT
   t.expires,
   t.blocked as token_blocked,
   t.models as token_models,
+  t.allowed_routes as token_allowed_routes,
+  t.project_id,
+  t.agent_id,
   t.metadata as token_metadata,
 
   -- ============ User ============
@@ -31,6 +47,7 @@ SELECT
   u.spend as user_spend,
   u.tpm_limit as user_tpm_limit,
   u.rpm_limit as user_rpm_limit,
+  u.models as user_models,
 
   -- ============ Team ============
   tm.team_id as team_id_check,
@@ -42,6 +59,11 @@ SELECT
   tm.tpm_limit as team_tpm_limit,
   tm.rpm_limit as team_rpm_limit,
   tm.models as team_models,
+
+  -- ============ Project ============
+  p.project_id as project_id_check,
+  p.models as project_models,
+  p.blocked as project_blocked,
 
   -- ============ Organization ============
   o.organization_id as org_id_check,
@@ -55,6 +77,7 @@ SELECT
   b_tmem.max_budget as team_member_max_budget,
   b_tmem.tpm_limit as team_member_tpm_limit,
   b_tmem.rpm_limit as team_member_rpm_limit,
+  b_tmem.allowed_models as team_member_models,
 
   -- ============ OrganizationMembership ============
   omem.spend as org_member_spend,
@@ -69,6 +92,9 @@ LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id
 
 -- Join Team (optional - if team_id exists)
 LEFT JOIN "LiteLLM_TeamTable" tm ON t.team_id = tm.team_id
+
+-- Join Project (optional - if project_id exists)
+LEFT JOIN "LiteLLM_ProjectTable" p ON t.project_id = p.project_id
 
 -- Join Organization
 -- Organization_id resolved from: token.organization_id OR team.organization_id

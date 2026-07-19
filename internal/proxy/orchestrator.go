@@ -77,17 +77,12 @@ func (p *Proxy) orchestrateRequest(
 	// key (admin scope) bypasses this. Previously IsModelAllowed was never checked
 	// in prod because auth ran before the body/model was parsed (todo P0.3).
 	//
-	// Check every alias that resolves to the same provider-facing model, not just
-	// modelID: config.yaml commonly exposes one model under several route aliases
-	// (e.g. "claude-haiku-4.5" and "anthropic/claude-haiku-4.5" for the same
-	// credential+model), and a key restricted to one such alias is meant to allow
-	// the underlying model regardless of which spelling the client calls it by.
 	if !logCtx.Scope.Admin && logCtx.TokenInfo != nil {
-		aliases := []string{modelID}
+		allowed := logCtx.TokenInfo.IsModelAllowed(modelID)
 		if p.modelManager != nil {
-			aliases = p.modelManager.GetAliasesForModel(modelID, realModelID)
+			allowed = logCtx.TokenInfo.IsModelAllowedBy(modelID, p.modelManager.IsModelIDAllowedByScope)
 		}
-		if !logCtx.TokenInfo.IsAnyModelAllowed(aliases) {
+		if !allowed {
 			p.logger.WarnContext(r.Context(), "Model not allowed for this API key",
 				"error_code", http.StatusForbidden, "model", modelID)
 			logCtx.Status = "failure"
