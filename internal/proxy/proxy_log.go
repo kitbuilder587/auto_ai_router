@@ -153,6 +153,41 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
+// litellmCallType translates an AIR request path into the call_type value the
+// LiteLLM proxy records for the same operation (the async method name, e.g.
+// "acompletion" — see litellm route_llm_request.ROUTE_ENDPOINT_MAPPING). The
+// daily aggregation pipeline keys its endpoint dimension off these values, and
+// the shadow comparison relies on them matching the primary accounting.
+// Unknown paths map to "" — the raw spend row is still written, only the daily
+// aggregation is skipped for it.
+func litellmCallType(path string) string {
+	switch {
+	case strings.Contains(path, "/chat/completions"):
+		return "acompletion"
+	case strings.Contains(path, "/embeddings"):
+		return "aembedding"
+	case strings.Contains(path, "/responses"):
+		return "aresponses"
+	case strings.Contains(path, "/images/generations"):
+		return "aimage_generation"
+	case strings.Contains(path, "/images/edits"):
+		return "aimage_edit"
+	case strings.Contains(path, "/audio/transcriptions"):
+		return "atranscription"
+	case strings.Contains(path, "/audio/speech"):
+		return "aspeech"
+	case strings.Contains(path, "/moderations"):
+		return "amoderation"
+	case strings.Contains(path, "/rerank"):
+		return "arerank"
+	// Bare "/completions" must stay below "/chat/completions".
+	case strings.Contains(path, "/completions"):
+		return "atext_completion"
+	default:
+		return ""
+	}
+}
+
 // logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table and, if enabled,
 // publishes an expanded copy of the same event to Kafka for ClickHouse
 // analytics (internal/kafkalog). The two write-paths are independent: either
@@ -198,11 +233,12 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		organizationID = logCtx.TokenInfo.OrganizationID
 	}
 
-	// Determine end user - prefer user email from tokenInfo
+	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
+	// the request body, X-End-User for AIR). The key owner's email must NOT be
+	// used as a fallback: LiteLLM leaves end_user empty for such traffic, and
+	// substituting the email would fabricate EndUserTable/DailyEndUserSpend
+	// rows that have no counterpart in the primary accounting.
 	endUser := extractEndUser(logCtx.Request)
-	if logCtx.TokenInfo != nil && logCtx.TokenInfo.UserEmail != "" {
-		endUser = logCtx.TokenInfo.UserEmail
-	}
 
 	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
 	apiBase := "auto_ai_router"
@@ -268,9 +304,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
 
-	if teamID == "" {
-		teamID = credName
-	}
+	// teamID deliberately stays empty when the key has no team: LiteLLM writes
+	// team_id="" in that case, and inventing one (e.g. the credential name)
+	// would create daily/team rows that never merge with the primary accounting
+	// and UPDATEs against non-existent LiteLLM_TeamTable rows.
 
 	endTime := utils.NowUTC()
 
@@ -302,31 +339,37 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
 	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, kafkaFallbackReason)
 
+	var completionStartTime *time.Time
+	if !logCtx.CompletionStartTime.IsZero() {
+		completionStartTime = &logCtx.CompletionStartTime
+	}
+
 	var pgErr error
 	if litellmEnabled {
 		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
-			RequestID:         logCtx.RequestID,
-			StartTime:         logCtx.StartTime,
-			EndTime:           endTime,
-			CallType:          logCtx.Request.URL.Path,
-			APIBase:           apiBase,
-			Model:             logCtx.ModelID,    // Model name
-			ModelID:           modelIDFormatted,  // credential.name:model_name
-			ModelGroup:        logCtx.ModelID,    // Model name
-			CustomLLMProvider: customLLMProvider, // Provider type as string
-			PromptTokens:      logCtx.TokenUsage.PromptTokens,
-			CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
-			TotalTokens:       logCtx.TokenUsage.Total(),
-			Metadata:          metadata,
-			Spend:             cost, // Calculated cost based on model pricing and token usage
-			APIKey:            hashedToken,
-			UserID:            userID,
-			TeamID:            teamID,
-			OrganizationID:    organizationID,
-			EndUser:           endUser,
-			RequesterIP:       requesterIP,
-			Status:            status,
-			SessionID:         logCtx.SessionID,
+			RequestID:           logCtx.RequestID,
+			StartTime:           logCtx.StartTime,
+			EndTime:             endTime,
+			CompletionStartTime: completionStartTime,
+			CallType:            litellmCallType(logCtx.Request.URL.Path),
+			APIBase:             apiBase,
+			Model:               logCtx.ModelID,    // Model name
+			ModelID:             modelIDFormatted,  // credential.name:model_name
+			ModelGroup:          logCtx.ModelID,    // Model name
+			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			PromptTokens:        logCtx.TokenUsage.PromptTokens,
+			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
+			TotalTokens:         logCtx.TokenUsage.Total(),
+			Metadata:            metadata,
+			Spend:               cost, // Calculated cost based on model pricing and token usage
+			APIKey:              hashedToken,
+			UserID:              userID,
+			TeamID:              teamID,
+			OrganizationID:      organizationID,
+			EndUser:             endUser,
+			RequesterIP:         requesterIP,
+			Status:              status,
+			SessionID:           logCtx.SessionID,
 		})
 	}
 

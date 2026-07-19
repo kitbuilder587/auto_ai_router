@@ -163,10 +163,25 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	}
 
 	// Model aliases
+	if cfg.ClientModelIDs != nil {
+		logger.Info("client_model_ids", "total_count", len(cfg.ClientModelIDs), "enforced", true)
+	}
 	if len(cfg.ModelAlias) > 0 {
 		logger.Info("model_alias", "total_count", len(cfg.ModelAlias))
 		for alias, target := range cfg.ModelAlias {
 			logger.Info("  alias", "from", alias, "to", target)
+		}
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		logger.Info("public_model_alias", "total_count", len(cfg.PublicModelAlias))
+		for alias, target := range cfg.PublicModelAlias {
+			logger.Info("  public alias", "from", alias, "to", target)
+		}
+	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		logger.Info("accepted_model_alias", "total_count", len(cfg.AcceptedModelAlias))
+		for alias, target := range cfg.AcceptedModelAlias {
+			logger.Info("  accepted alias", "from", alias, "to", target)
 		}
 	}
 
@@ -185,9 +200,28 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
 			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
+			"enforce_budget_reservation", cfg.LiteLLMDB.EnforceBudgetReservation,
+			"budget_reservation_ttl", cfg.LiteLLMDB.BudgetReservationTTL.String(),
+			"enforce_key_rate_limits", cfg.LiteLLMDB.EnforceKeyRateLimits,
+			"default_estimated_completion_tokens", cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
+	}
+
+	if cfg.SpendLog.IsEnabled() {
+		logger.Info("spend_log (ENABLED)",
+			"database_url", security.MaskDatabaseURL(cfg.SpendLog.DatabaseURL),
+			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
+			"api_base", cfg.SpendLog.APIBase,
+			"max_conns", cfg.SpendLog.MaxConns,
+			"min_conns", cfg.SpendLog.MinConns,
+			"log_queue_size", cfg.SpendLog.LogQueueSize,
+			"log_batch_size", cfg.SpendLog.LogBatchSize,
+			"log_flush_interval", cfg.SpendLog.LogFlushInterval.String(),
+		)
+	} else {
+		logger.Info("spend_log", "status", "DISABLED")
 	}
 
 	// Kafka spend-log config

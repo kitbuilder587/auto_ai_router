@@ -1,6 +1,7 @@
 package queries
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -314,4 +315,36 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryUpsertDailyOrganizationSpend, "organization_id")
 	assert.Contains(t, QueryUpsertDailyEndUserSpend, "end_user_id")
 	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
+}
+
+// tokenHierarchyScanColumns must equal the number of Scan destinations in
+// auth.Authenticator.fetchTokenFromDB. pgx fails every uncached token lookup
+// with "number of field descriptions must equal number of destinations" when
+// the SELECT list and the Scan call drift apart, so any column added here has
+// to land in both places at once.
+const tokenHierarchyScanColumns = 40
+
+func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
+	selectList := QueryValidateTokenWithHierarchy
+	fromIdx := strings.Index(selectList, `FROM "LiteLLM_VerificationToken"`)
+	if fromIdx < 0 {
+		t.Fatal("FROM clause not found in QueryValidateTokenWithHierarchy")
+	}
+	selectList = selectList[:fromIdx]
+
+	count := 0
+	for _, line := range strings.Split(selectList, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") || strings.HasPrefix(line, "SELECT") {
+			continue
+		}
+		count++
+	}
+	assert.Equal(t, tokenHierarchyScanColumns, count)
+}
+
+func TestTokenValidationQueryLoadsModelAccessHierarchy(t *testing.T) {
+	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id`)
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.models as token_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
 }

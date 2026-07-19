@@ -162,18 +162,18 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(1)
 		assert.Contains(t, query, "INSERT INTO")
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$24")
-		assert.NotContains(t, query, "$25") // 24 params + 2 NULL constants
+		assert.Contains(t, query, "$29")
+		assert.NotContains(t, query, "$30") // 29 params + 3 empty-object constants
 		assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(3)
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$24") // First entry
-		assert.Contains(t, query, "$25") // Second entry start
-		assert.Contains(t, query, "$72") // Third entry end (3 * 24)
-		assert.NotContains(t, query, "$73")
+		assert.Contains(t, query, "$29") // First entry
+		assert.Contains(t, query, "$30") // Second entry start
+		assert.Contains(t, query, "$87") // Third entry end (3 * 29)
+		assert.NotContains(t, query, "$88")
 	})
 
 	t.Run("zero entries", func(t *testing.T) {
@@ -216,7 +216,7 @@ func TestGetSpendLogParams(t *testing.T) {
 
 	params := GetSpendLogParams(entry)
 
-	assert.Len(t, params, 24)
+	assert.Len(t, params, queries.SpendLogParamCount)
 	assert.Equal(t, "req-123", params[0])
 	assert.Equal(t, "/v1/chat/completions", params[1])
 	assert.Equal(t, "hashed-key", params[2])
@@ -225,12 +225,34 @@ func TestGetSpendLogParams(t *testing.T) {
 	assert.Equal(t, 100, params[5])
 	assert.Equal(t, 50, params[6])
 	assert.Equal(t, now, params[7])
-	assert.Equal(t, "gpt-4", params[9])
-	assert.Equal(t, "openai", params[12])      // CustomLLMProvider at position 12
-	assert.Equal(t, "user-1", params[14])      // UserID at position 14
-	assert.Equal(t, "{}", params[15])          // Metadata at position 15
-	assert.Equal(t, "success", params[20])     // Status at position 20
-	assert.Equal(t, "session-123", params[21]) // SessionID at position 21
+	assert.Equal(t, "gpt-4", params[11])
+	assert.Equal(t, "openai", params[14])      // CustomLLMProvider at position 14
+	assert.Equal(t, "user-1", params[16])      // UserID at position 16
+	assert.Equal(t, "{}", params[17])          // Metadata at position 17
+	assert.Equal(t, "session-123", params[25]) // SessionID at position 25
+	assert.Equal(t, "success", params[26])     // Status at position 26
+}
+
+func TestGetSpendLogParamsNormalizesRequestTagsToJSONArray(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: "[]"},
+		{name: "JSON null", raw: "null", want: "[]"},
+		{name: "object", raw: `{}`, want: "[]"},
+		{name: "scalar", raw: `"tag"`, want: "[]"},
+		{name: "malformed", raw: `[`, want: "[]"},
+		{name: "array", raw: `["tag-a", "tag-b"]`, want: `["tag-a","tag-b"]`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := GetSpendLogParams(&models.SpendLogEntry{RequestTags: tt.raw})
+			assert.Equal(t, tt.want, params[20])
+		})
+	}
 }
 
 func TestGetBatchParams(t *testing.T) {
@@ -241,9 +263,9 @@ func TestGetBatchParams(t *testing.T) {
 
 	params := GetBatchParams(entries)
 
-	assert.Len(t, params, 48) // 2 * 24
+	assert.Len(t, params, 2*queries.SpendLogParamCount)
 	assert.Equal(t, "req-1", params[0])
-	assert.Equal(t, "req-2", params[24]) // Second entry starts at position 24
+	assert.Equal(t, "req-2", params[queries.SpendLogParamCount])
 }
 
 // TestLogger_SQLInjectionPrevention validates that SQL injection attacks are prevented
@@ -468,7 +490,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					// Verify params are created without error
 					params := GetSpendLogParams(entry)
 					assert.NotNil(t, params)
-					assert.Len(t, params, 24)
+					assert.Len(t, params, queries.SpendLogParamCount)
 
 					// Verify the malicious string appears unchanged in the params
 					// This proves parameterization treats it as data, not SQL code
@@ -499,7 +521,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					batch := []*models.SpendLogEntry{entry}
 					batchParams := GetBatchParams(batch)
 					assert.NotNil(t, batchParams)
-					assert.Len(t, batchParams, 24)
+					assert.Len(t, batchParams, queries.SpendLogParamCount)
 
 					// All params should be stringifiable (printable)
 					// This would fail if parameterization was broken
@@ -566,12 +588,12 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 				query := queries.BuildBatchInsertQuery(2)
 				assert.NotEmpty(t, query)
 				assert.Contains(t, query, "$1")
-				assert.Contains(t, query, "$48") // 2 * 24 parameters
-				assert.NotContains(t, query, "$49")
+				assert.Contains(t, query, "$58") // 2 * 29 parameters
+				assert.NotContains(t, query, "$59")
 
 				// Get batch params
 				params := GetBatchParams(entries)
-				assert.Len(t, params, 48) // 2 entries * 24 params
+				assert.Len(t, params, 2*queries.SpendLogParamCount)
 
 				// Verify malicious strings are present and unchanged
 				maliciousFound := 0
@@ -619,7 +641,7 @@ func TestLogger_SQLInjectionPrevention_QueryBuilding(t *testing.T) {
 			assert.Contains(t, query, "ON CONFLICT")
 
 			// Count parameter placeholders ($1, $2, etc)
-			paramCount := tc.count * 24 // 24 parameters per entry
+			paramCount := tc.count * queries.SpendLogParamCount
 			expectedLastParam := fmt.Sprintf("$%d", paramCount)
 			assert.Contains(t, query, expectedLastParam)
 
@@ -685,13 +707,13 @@ func TestLogger_SQLInjectionPrevention_ParameterEscaping(t *testing.T) {
 			// Verify exact values are preserved
 			// Position 0: RequestID
 			assert.Equal(t, testValue, params[0])
-			// Position 15: Metadata
-			assert.Equal(t, testValue, params[15])
+			// Position 17: Metadata
+			assert.Equal(t, testValue, params[17])
 
 			// When used in batch, values should remain unchanged
 			batchParams := GetBatchParams([]*models.SpendLogEntry{entry})
 			assert.Equal(t, testValue, batchParams[0])  // RequestID from first entry
-			assert.Equal(t, testValue, batchParams[15]) // Metadata from first entry
+			assert.Equal(t, testValue, batchParams[17]) // Metadata from first entry
 		})
 	}
 }

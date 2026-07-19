@@ -20,6 +20,8 @@ const (
 			completion_tokens,
 			"startTime",
 			"endTime",
+			request_duration_ms,
+			"completionStartTime",
 			model,
 			model_id,
 			model_group,
@@ -27,46 +29,84 @@ const (
 			api_base,
 			"user",
 			"metadata",
+			cache_hit,
+			cache_key,
+			request_tags,
 			team_id,
 			organization_id,
 			end_user,
 			requester_ip_address,
-			status,
 			session_id,
+			status,
 			mcp_namespaced_tool_name,
-			request_tags,
+			agent_id,
 			messages,
-			response
+			response,
+			proxy_server_request
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, NULL, NULL
+			$21, $22, $23, $24, $25, $26, $27, NULLIF($28, ''), $29,
+			'{}'::jsonb, '{}'::jsonb, '{}'::jsonb
 		)
 		ON CONFLICT (request_id) DO NOTHING
+	`
+
+	// QuerySelectSpendLogEventOwners resolves the logical AIR event that owns a
+	// provider-controlled request_id. It must run as a separate statement after
+	// INSERT ... ON CONFLICT so READ COMMITTED can observe a concurrent winner.
+	QuerySelectSpendLogEventOwners = `
+		SELECT
+			request_id,
+			COALESCE(metadata #>> '{spend_logs_metadata,air_event_id}', '')
+		FROM "LiteLLM_SpendLogs"
+		WHERE request_id = ANY($1)
 	`
 
 	// QuerySelectUnprocessedSpendLogs retrieves spend logs by request_ids for aggregation
 	QuerySelectUnprocessedSpendLogs = `
 		SELECT
 			"user",
-			TO_CHAR(DATE("startTime"), 'YYYY-MM-DD') as date,
+			-- "startTime" is timestamp WITHOUT time zone storing UTC wall-clock
+			-- time. Formatted as-is: any timezone conversion here would make
+			-- TO_CHAR render it in the session TimeZone, silently shifting the
+			-- daily bucket around midnight on non-UTC sessions.
+			TO_CHAR("startTime", 'YYYY-MM-DD') as date,
 			api_key,
 			model,
 			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
-			api_base,
+			call_type,
+			COALESCE(
+				NULLIF(call_type, ''),
+				NULLIF(metadata #>> '{spend_logs_metadata,original_call_type}', '')
+			) AS aggregation_call_type,
 			prompt_tokens,
 			completion_tokens,
-			COALESCE(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cached_tokens}', '')::bigint, 0) AS cache_read_input_tokens,
-			COALESCE(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_creation_tokens}', '')::bigint, 0) AS cache_creation_input_tokens,
+			-- Mirrors LiteLLM _extract_cache_read_tokens: Anthropic-style
+			-- top-level usage_object fields win when nonzero, then the
+			-- OpenAI-compatible prompt_tokens_details fallbacks. NULLIF(x,'0')
+			-- reproduces Python's zero-is-falsy fall-through.
+			COALESCE(
+				NULLIF(NULLIF(metadata #>> '{usage_object,cache_read_input_tokens}', ''), '0')::bigint,
+				NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cached_tokens}', '')::bigint,
+				0
+			) AS cache_read_input_tokens,
+			COALESCE(
+				NULLIF(NULLIF(metadata #>> '{usage_object,cache_creation_input_tokens}', ''), '0')::bigint,
+				NULLIF(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_write_tokens}', ''), '0')::bigint,
+				NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_creation_tokens}', '')::bigint,
+				0
+			) AS cache_creation_input_tokens,
 			spend,
 			status,
 			request_id,
 			team_id,
 			organization_id,
 			end_user,
-			request_tags
+			request_tags,
+			agent_id
 		FROM "LiteLLM_SpendLogs"
 		WHERE request_id = ANY($1)
 		ORDER BY "startTime" DESC
@@ -220,6 +260,43 @@ const (
 			updated_at = now()
 	`
 
+	// QueryUpsertDailyAgentSpend upserts into LiteLLM_DailyAgentSpend.
+	QueryUpsertDailyAgentSpend = `
+		INSERT INTO "LiteLLM_DailyAgentSpend" (
+			id,
+			agent_id,
+			date,
+			api_key,
+			model,
+			model_group,
+			custom_llm_provider,
+			mcp_namespaced_tool_name,
+			endpoint,
+			prompt_tokens,
+			completion_tokens,
+			cache_read_input_tokens,
+			cache_creation_input_tokens,
+			spend,
+			api_requests,
+			successful_requests,
+			failed_requests,
+			created_at,
+			updated_at
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now(), now())
+		ON CONFLICT (agent_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
+		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
+			prompt_tokens = "LiteLLM_DailyAgentSpend".prompt_tokens + EXCLUDED.prompt_tokens,
+			completion_tokens = "LiteLLM_DailyAgentSpend".completion_tokens + EXCLUDED.completion_tokens,
+			cache_read_input_tokens = "LiteLLM_DailyAgentSpend".cache_read_input_tokens + EXCLUDED.cache_read_input_tokens,
+			cache_creation_input_tokens = "LiteLLM_DailyAgentSpend".cache_creation_input_tokens + EXCLUDED.cache_creation_input_tokens,
+			spend = "LiteLLM_DailyAgentSpend".spend + EXCLUDED.spend,
+			api_requests = "LiteLLM_DailyAgentSpend".api_requests + EXCLUDED.api_requests,
+			successful_requests = "LiteLLM_DailyAgentSpend".successful_requests + EXCLUDED.successful_requests,
+			failed_requests = "LiteLLM_DailyAgentSpend".failed_requests + EXCLUDED.failed_requests,
+			updated_at = now()
+	`
+
 	// QueryUpsertDailyTagSpend upserts into LiteLLM_DailyTagSpend
 	QueryUpsertDailyTagSpend = `
 		INSERT INTO "LiteLLM_DailyTagSpend" (
@@ -260,7 +337,11 @@ const (
 )
 
 // Number of parameters per SpendLogEntry in batch insert
-const spendLogParamCount = 24
+const SpendLogParamCount = 29
+const (
+	spendLogParamCount                      = SpendLogParamCount
+	spendLogMCPNamespacedToolNameParamIndex = 27
+)
 
 // BuildBatchInsertQuery builds a query for batch INSERT
 func BuildBatchInsertQuery(count int) string {
@@ -275,11 +356,12 @@ func BuildBatchInsertQuery(count int) string {
 		INSERT INTO "LiteLLM_SpendLogs" (
 			request_id, call_type, api_key, spend, total_tokens,
 			prompt_tokens, completion_tokens, "startTime", "endTime",
+			request_duration_ms, "completionStartTime",
 			model, model_id, model_group, custom_llm_provider, api_base,
-			"user", "metadata", team_id, organization_id, end_user,
-			requester_ip_address, status, session_id,
-			mcp_namespaced_tool_name, request_tags,
-			messages, response
+			"user", "metadata", cache_hit, cache_key, request_tags,
+			team_id, organization_id, end_user, requester_ip_address,
+			session_id, status, mcp_namespaced_tool_name, agent_id,
+			messages, response, proxy_server_request
 		) VALUES `)
 
 	paramIdx := 1
@@ -292,10 +374,18 @@ func BuildBatchInsertQuery(count int) string {
 			if j > 0 {
 				b.WriteString(", ")
 			}
-			fmt.Fprintf(&b, "$%d", paramIdx)
+			if j == spendLogMCPNamespacedToolNameParamIndex {
+				// Optional mcp_namespaced_tool_name is SQL NULL when absent.
+				fmt.Fprintf(&b, "NULLIF($%d, '')", paramIdx)
+			} else {
+				fmt.Fprintf(&b, "$%d", paramIdx)
+			}
 			paramIdx++
 		}
-		b.WriteString(", NULL, NULL)") // messages, response = NULL
+		// LiteLLM's payload-disabled writer persists empty JSON objects for these
+		// privacy fields. AIR matches that shape without retaining request or
+		// response content.
+		b.WriteString(", '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
 	}
 
 	b.WriteString(" ON CONFLICT (request_id) DO NOTHING RETURNING request_id")
