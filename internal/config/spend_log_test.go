@@ -71,6 +71,14 @@ func TestSpendLogConfigDefaultsToDisabled(t *testing.T) {
 	assert.False(t, cfg.SpendLog.IsEnabled())
 }
 
+func TestSpendLogConfigLegacyProgrammaticDestinationIsEnabled(t *testing.T) {
+	cfg := SpendLogConfig{DatabaseURL: "postgresql://localhost/test-db"}
+	assert.True(t, cfg.IsEnabled())
+
+	cfg.Mode = SpendLogModeDisabled
+	assert.False(t, cfg.IsEnabled(), "explicit disabled mode must override a stale destination")
+}
+
 func TestLoadSpendLogDirectModeRequiresFailClosedControlPlane(t *testing.T) {
 	t.Setenv("DIRECT_DATABASE_URL", "postgresql://direct:secret@db.example/direct-db")
 	path := filepath.Join(t.TempDir(), "config.yaml")

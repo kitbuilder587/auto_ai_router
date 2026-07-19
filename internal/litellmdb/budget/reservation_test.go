@@ -3,6 +3,7 @@ package budget
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -26,7 +27,10 @@ func reserverForTest(t *testing.T, prefix string) *Reserver {
 		t.Fatalf("failed to create valkey client: %v", err)
 	}
 	t.Cleanup(client.Close)
-	return New(client, prefix, time.Minute, nil)
+	// The test Valkey may be shared by repeated local/CI invocations. Give every
+	// test process a fresh namespace so a prior reservation cannot poison a
+	// later run while still preserving all within-test counter interactions.
+	return New(client, prefix+strconv.FormatInt(time.Now().UnixNano(), 10)+":", time.Minute, nil)
 }
 
 func TestTryReserve_SeedsFromDBSpendAndAllows(t *testing.T) {

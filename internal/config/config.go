@@ -842,7 +842,8 @@ type SpendLogConfig struct {
 
 // IsEnabled reports whether an isolated spend destination is configured.
 func (s SpendLogConfig) IsEnabled() bool {
-	return s.Mode == SpendLogModeShadow || s.Mode == SpendLogModeDirect
+	return s.Mode == SpendLogModeShadow || s.Mode == SpendLogModeDirect ||
+		(s.Mode == "" && strings.TrimSpace(s.DatabaseURL) != "")
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
