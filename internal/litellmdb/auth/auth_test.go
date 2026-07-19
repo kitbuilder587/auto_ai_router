@@ -286,6 +286,28 @@ func TestTokenInfo_Validate(t *testing.T) {
 		}
 		assert.NoError(t, info.Validate("gpt-4"))
 	})
+
+	t.Run("dangling team reference fails closed", func(t *testing.T) {
+		// Unlike an orphan user (intentionally unrestricted, see above), a
+		// team_id whose LiteLLM_TeamTable row is gone must deny: the team
+		// scope cannot be resolved, and an empty scope would otherwise be
+		// treated as unrestricted — a fail-open for all-team-models keys.
+		info := &models.TokenInfo{
+			Models:       []string{models.AllTeamModels},
+			TeamID:       "deleted-team",
+			TeamDangling: true,
+		}
+		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
+	})
+
+	t.Run("dangling project reference fails closed", func(t *testing.T) {
+		info := &models.TokenInfo{
+			Models:          []string{"gpt-4"},
+			ProjectID:       "deleted-project",
+			ProjectDangling: true,
+		}
+		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
+	})
 }
 
 func TestCache_Auth_SetGet(t *testing.T) {

@@ -407,12 +407,13 @@ func (m *Manager) deploymentIDForModelLocked(publicModel, credential string) (st
 	return uniqueDeploymentID, uniqueDeploymentID != ""
 }
 
+// publicModelAliasTargetActiveLocked reports whether a public alias target is
+// active. Activation depends only on routability: LiteLLM deployment-ID
+// attribution is a separate best-effort concern (blank when ambiguous, see
+// addUniqueDeploymentID), so a missing DB sync or a primary+fallback pair with
+// distinct deployment IDs must not deactivate the alias.
 func (m *Manager) publicModelAliasTargetActiveLocked(target string) bool {
-	if target == "" || len(m.modelToCredentials[target]) == 0 {
-		return false
-	}
-	_, uniqueDeployment := m.deploymentIDForModelLocked(target, "")
-	return uniqueDeployment
+	return target != "" && len(m.modelToCredentials[target]) > 0
 }
 
 // responsesAPIModelPrefixes lists model name substrings that natively support
@@ -542,7 +543,7 @@ func (m *Manager) SetModelAliases(aliases map[string]string) {
 	// Public model discovery includes aliases, so a changed alias set invalidates
 	// both the rendered response and the accumulated discovery snapshot.
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 }
 
 // SetClientModelIDs installs an explicit product boundary between identifiers
@@ -562,7 +563,7 @@ func (m *Manager) SetClientModelIDs(modelIDs []string) {
 		m.clientModelIDs[modelID] = struct{}{}
 	}
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 }
 
 // SetPublicModelAliases configures client-visible aliases that share the
@@ -585,7 +586,7 @@ func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
 		m.logger.Info("Registered public model alias", "alias", alias, "target", target)
 	}
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 }
 
 // SetAcceptedModelAliases configures compatibility-only request identifiers.
@@ -607,7 +608,7 @@ func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
 	// still invalidates cached discovery because an ID that was previously a
 	// normal routable model may now need to be filtered out.
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 }
 
 func (m *Manager) canonicalPublicAliasLocked(modelID string) (string, bool, bool) {
@@ -626,8 +627,9 @@ func (m *Manager) canonicalPublicAliasLocked(modelID string) (string, bool, bool
 }
 
 // ResolvePublicModelAlias resolves a client alias to one unambiguous canonical
-// LiteLLM public deployment. Orphan targets and targets whose model-table rows
-// disagree on deployment ID fail closed.
+// LiteLLM public deployment. Orphan targets fail closed. Deployment-ID
+// attribution is deliberately not part of activation: it stays best-effort in
+// GetDeploymentID and resolves to blank when the model-table rows disagree.
 func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -636,7 +638,7 @@ func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) 
 		return modelID, false, nil
 	}
 	if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
-		return modelID, true, fmt.Errorf("public model alias %q has no unique routable deployment", modelID)
+		return modelID, true, fmt.Errorf("public model alias %q has no active routable deployment", modelID)
 	}
 	return target, true, nil
 }
@@ -971,7 +973,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 
 	if len(m.modelLimits) == 0 {
 		m.allModels = nil
-		m.allModelsCache = allModelsCache{}
+		m.invalidateAllModelsCachesLocked()
 		m.logger.Debug("No models in config to load")
 		return
 	}
@@ -1062,7 +1064,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 		"global_models", globalModelsCount,
 	)
 	m.allModels = nil
-	m.allModelsCache = allModelsCache{}
+	m.invalidateAllModelsCachesLocked()
 }
 
 func addUniqueDeploymentID(index map[string]map[string]string, publicModel, credential, deploymentID string) {
@@ -2500,6 +2502,20 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 		}
 	}
 
+	// An alias is listed for a key only when the key could see the alias target
+	// itself: the alias must not widen the scoped view onto foreign models.
+	aliasTargetVisible := func(target string) bool {
+		for _, credName := range m.modelToCredentials[target] {
+			if _, visible := credProvider[credName]; !visible {
+				continue
+			}
+			if m.modelScopeAllowsLocked(target, credName, visibility) {
+				return true
+			}
+		}
+		return false
+	}
+
 	seen := make(map[string]bool)
 	result := make([]Model, 0, len(m.modelToCredentials)+len(activeAliases)+len(activeDeploymentAliases))
 
@@ -2531,8 +2547,8 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 			})
 		}
 	}
-	for alias := range activeAliases {
-		if seen[alias] {
+	for alias, target := range activeAliases {
+		if seen[alias] || !aliasTargetVisible(target) {
 			continue
 		}
 		seen[alias] = true
@@ -2543,8 +2559,8 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 			OwnedBy: "system",
 		})
 	}
-	for alias := range activeDeploymentAliases {
-		if seen[alias] {
+	for alias, target := range activeDeploymentAliases {
+		if seen[alias] || !aliasTargetVisible(target) {
 			continue
 		}
 		seen[alias] = true

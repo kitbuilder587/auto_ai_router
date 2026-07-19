@@ -2,11 +2,23 @@ package models
 
 import "regexp"
 
-// liteLLMFutureClaudeModelPattern mirrors the conservative fallback in the
-// pinned LiteLLM get_llm_provider implementation. Other short model IDs are
-// accepted only when they are present in the pinned/current model registry
-// subset used by this deployment. Unknown IDs deliberately fail closed.
-var liteLLMFutureClaudeModelPattern = regexp.MustCompile(`(?i)^claude-[a-z]+-\d+-\d+(?:-\d{8})?$`)
+// liteLLMBedrockClaudeModelPattern mirrors the "bedrock-claude-ids" routing
+// rule in the pinned LiteLLM fallback_generalizations: a case-insensitive,
+// unanchored re.search for the dotted "anthropic.claude-" segment, so bare
+// (anthropic.claude-...), region-prefixed (us./eu./au./jp./apac.) and
+// global.-prefixed Bedrock Claude IDs of every version route to bedrock
+// (which also covers LiteLLM's bedrock_converse model list).
+var liteLLMBedrockClaudeModelPattern = regexp.MustCompile(`(?i)anthropic\.claude-`)
+
+// liteLLMFutureClaudeModelPattern mirrors the "anthropic-claude-ids" routing
+// rule in the pinned LiteLLM fallback_generalizations: a bare Claude
+// family-major ID with an optional minor (dash or dot separated) and an
+// optional 8-digit date suffix, anchored to the whole name, so
+// claude-newfamily-5 routes like claude-newfamily-5-1 does. Other short model
+// IDs are accepted only when they are present in the pinned/current model
+// registry subset used by this deployment. Unknown IDs deliberately fail
+// closed.
+var liteLLMFutureClaudeModelPattern = regexp.MustCompile(`(?i)^claude-[a-z]+-\d+(?:[-.]\d+)?(?:-\d{8})?$`)
 
 // inferLiteLLMShortModelProvider returns the provider prefix that pinned
 // LiteLLM's get_llm_provider assigns to a provider-less model ID. This is
@@ -65,6 +77,12 @@ func inferLiteLLMShortModelProvider(modelID string) (string, bool) {
 		"anthropic.claude-3-5-sonnet-20241022-v2:0",
 		"anthropic.claude-3-7-sonnet-20250219-v1:0",
 		"amazon.titan-text-lite-v1":
+		return "bedrock", true
+	}
+
+	// The Bedrock rule is consulted before the bare-id Anthropic fallback,
+	// matching the rule order in LiteLLM's fallback_generalizations.
+	if liteLLMBedrockClaudeModelPattern.MatchString(modelID) {
 		return "bedrock", true
 	}
 

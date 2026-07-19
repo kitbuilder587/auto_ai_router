@@ -342,9 +342,16 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamRPMLimit = teamRPMLimit
 	info.TeamModels = teamModels
 
-	// Project model scope is enforced whenever the token has a project_id. A
-	// missing joined row leaves an unrestricted empty scope, matching LiteLLM's
-	// optional project lookup.
+	// team_id_check / project_id_check are join sentinels: a NULL there while
+	// the token carries the reference means the parent row is gone. Such a
+	// dangling parent must fail closed (see TokenInfo.TeamDangling) instead of
+	// leaving an unrestricted empty scope. An orphan user_id intentionally
+	// keeps its optional user policy unrestricted — production holds valid
+	// tokens whose owner row no longer exists (see auth_test.go).
+	info.TeamDangling = teamID != nil && teamIDCheck == nil
+	info.ProjectDangling = projectID != nil && projectIDCheck == nil
+
+	// Project model scope is enforced whenever the token has a project_id.
 	info.ProjectModels = projectModels
 	info.ProjectBlocked = projectBlocked
 
