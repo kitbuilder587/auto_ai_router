@@ -269,10 +269,11 @@ litellm_db:
   log_retry_attempts: 3  # Spend log retry attempts (default: 3)
   log_retry_delay: 1s  # Spend log retry delay (default: 1s)
 
-# Isolated LiteLLM-compatible writer. It is enabled when database_url is set.
-# A database-name mismatch disables only this writer; client routing remains
-# available.
+# Isolated LiteLLM-compatible writer. Shadow failures invalidate comparison but
+# remain fail-open. Direct mode is authoritative and refuses startup/readiness
+# when auth, pricing, Redis enforcement, or this destination is unavailable.
 spend_log:
+  mode: shadow  # disabled | shadow | direct
   database_url: "os.environ/SHADOW_SPEND_DATABASE_URL"
   expected_database_name: "test-db"     # Exact current_database() guard
   api_base: "http://air-ru01/v1"        # Fixed comparison contract

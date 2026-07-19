@@ -211,6 +211,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 
 	if cfg.SpendLog.IsEnabled() {
 		logger.Info("spend_log (ENABLED)",
+			"mode", cfg.SpendLog.Mode,
 			"database_url", security.MaskDatabaseURL(cfg.SpendLog.DatabaseURL),
 			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 			"api_base", cfg.SpendLog.APIBase,

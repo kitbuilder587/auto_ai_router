@@ -764,6 +764,21 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 		}
 	}
+	if p.spendLogMode == config.SpendLogModeDirect {
+		// Streaming headers have already been sent, so there is nowhere to expose
+		// the inclusive key-spend snapshot. Direct mode must still make the same
+		// synchronous commit-or-exact-replay-retention decision as non-streaming
+		// responses instead of relying on a process-local async queue surviving.
+		result, err := p.commitShadowSpendBeforeResponse(logCtx.Context(), make(http.Header), logCtx)
+		if err != nil {
+			p.logger.WarnContext(logCtx.Context(), "Failed to synchronously commit streaming spend log",
+				"error", err,
+				"disposition", result.Disposition,
+				"request_id", logCtx.RequestID,
+			)
+		}
+		return
+	}
 	if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue streaming spend log",
 			"error", err,

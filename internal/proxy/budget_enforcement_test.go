@@ -1,9 +1,16 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,6 +29,51 @@ func TestBudgetLevelsFollowLiteLLMHierarchy(t *testing.T) {
 		"token:token-hash", "team:team-1", "org:org-1",
 		"teammember:team-1:user-1", "orgmember:org-1:user-1",
 	}, []string{levels[0].entity, levels[1].entity, levels[2].entity, levels[3].entity, levels[4].entity})
+	assert.Equal(t, []bool{true, false, true, true, true}, []bool{
+		levels[0].rejectAtLimit,
+		levels[1].rejectAtLimit,
+		levels[2].rejectAtLimit,
+		levels[3].rejectAtLimit,
+		levels[4].rejectAtLimit,
+	})
+}
+
+type failingBudgetReserver struct{}
+
+func (failingBudgetReserver) TryReserve(context.Context, string, float64, float64, float64, bool) (bool, error) {
+	return false, errors.New("redis unavailable")
+}
+
+func (failingBudgetReserver) Reconcile(context.Context, string, float64) error { return nil }
+
+func TestBudgetReservationFailureRejectsBeforeProvider(t *testing.T) {
+	registry := aimodels.NewModelPriceRegistry()
+	registry.Update(map[string]*aimodels.ModelPrice{
+		"backend-model": {InputCostPerToken: 0.001, OutputCostPerToken: 0.002},
+	})
+	maxBudget := 100.0
+	prx := &Proxy{
+		logger:                   slog.New(slog.DiscardHandler),
+		priceRegistry:            registry,
+		budgetReservationEnabled: true,
+		budgetReserver:           failingBudgetReserver{},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public-model","messages":[{"role":"user","content":"synthetic"}],"max_tokens":1}`,
+	))
+	logCtx := &RequestLogContext{TokenInfo: &dbmodels.TokenInfo{
+		Token: "key-hash", MaxBudget: &maxBudget,
+	}}
+	w := httptest.NewRecorder()
+
+	allowed := prx.enforceBudgetAndRateLimits(
+		w, req, logCtx, "public-model", "backend-model", []byte(`{"max_tokens":1}`),
+	)
+
+	assert.False(t, allowed)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.True(t, logCtx.Logged)
+	assert.Equal(t, "budget enforcement unavailable", logCtx.ErrorMsg)
 }
 
 func TestBudgetLevelsUsePersonalUserLimitsWithoutTeam(t *testing.T) {

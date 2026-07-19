@@ -71,6 +71,33 @@ func TestSpendLogConfigDefaultsToDisabled(t *testing.T) {
 	assert.False(t, cfg.SpendLog.IsEnabled())
 }
 
+func TestLoadSpendLogDirectModeRequiresFailClosedControlPlane(t *testing.T) {
+	t.Setenv("DIRECT_DATABASE_URL", "postgresql://direct:secret@db.example/direct-db")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  port: 8080
+  master_key: test-master-key
+credentials:
+  - name: upstream
+    type: openai
+    api_key: test-key
+    base_url: https://api.openai.com
+    rpm: 10
+monitoring:
+  prometheus_enabled: false
+spend_log:
+  mode: direct
+  database_url: os.environ/DIRECT_DATABASE_URL
+  expected_database_name: direct-db
+  api_base: http://air-ru01/v1
+`), 0o600))
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "direct mode requires litellm_db.enabled=true")
+}
+
 func TestValidateSpendLogConfig(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -152,12 +179,44 @@ func TestValidateSpendLogConfig(t *testing.T) {
 	}
 }
 
+func TestValidateDirectSpendLogDependencies(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "required control plane", mutate: func(cfg *Config) { cfg.LiteLLMDB.IsRequired = false }, wantErr: "litellm_db.is_required"},
+		{name: "model table", mutate: func(cfg *Config) { cfg.LiteLLMDB.LoadLitellmDBModels = false }, wantErr: "litellm_db.load_db_models"},
+		{name: "budget reservation", mutate: func(cfg *Config) { cfg.LiteLLMDB.EnforceBudgetReservation = false }, wantErr: "enforce_budget_reservation"},
+		{name: "key rate limits", mutate: func(cfg *Config) { cfg.LiteLLMDB.EnforceKeyRateLimits = false }, wantErr: "enforce_key_rate_limits"},
+		{name: "redis", mutate: func(cfg *Config) { cfg.Redis.Enabled = false }, wantErr: "redis.enabled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validDirectConfig()
+			if tt.mutate != nil {
+				tt.mutate(cfg)
+			}
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 func validShadowSpendLogConfig() SpendLogConfig {
 	return defaultSpendLogConfigWithDestination("postgres://localhost/test-db", "test-db")
 }
 
 func defaultSpendLogConfigWithDestination(databaseURL, expectedDatabaseName string) SpendLogConfig {
 	cfg := defaultSpendLogConfig()
+	cfg.Mode = SpendLogModeShadow
 	cfg.DatabaseURL = databaseURL
 	cfg.ExpectedDatabaseName = expectedDatabaseName
 	return cfg
@@ -180,4 +239,23 @@ func minimalValidConfig() *Config {
 		}},
 		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 	}
+}
+
+func validDirectConfig() *Config {
+	cfg := minimalValidConfig()
+	cfg.SpendLog = defaultSpendLogConfigWithDestination(
+		"postgres://localhost/direct-db", "direct-db",
+	)
+	cfg.SpendLog.Mode = SpendLogModeDirect
+	cfg.LiteLLMDB = defaultLiteLLMDBConfig()
+	cfg.LiteLLMDB.Enabled = true
+	cfg.LiteLLMDB.IsRequired = true
+	cfg.LiteLLMDB.LoadLitellmDBModels = true
+	cfg.LiteLLMDB.DatabaseURL = "postgres://localhost/control-db"
+	cfg.LiteLLMDB.EnforceBudgetReservation = true
+	cfg.LiteLLMDB.EnforceKeyRateLimits = true
+	cfg.Redis = defaultRedisConfig()
+	cfg.Redis.Enabled = true
+	cfg.Redis.InitAddresses = []string{"localhost:6379"}
+	return cfg
 }

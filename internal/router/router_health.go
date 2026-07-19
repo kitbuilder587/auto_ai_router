@@ -45,7 +45,7 @@ type Readiness struct {
 }
 
 func (r *Router) handleReadiness(w http.ResponseWriter, req *http.Request) {
-	ready := r.isReady.Load()
+	ready := r.isReady.Load() && r.proxy.IsReadyForTraffic(req.Context())
 
 	status := "ready"
 	httpStatus := http.StatusOK

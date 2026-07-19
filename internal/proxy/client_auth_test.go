@@ -11,12 +11,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
+	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -184,6 +187,114 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 
 	assert.Equal(t, http.StatusOK, internalRecorder.Code)
 	assert.Equal(t, int32(1), providerCalls.Load(), "master-key internal routing must remain available")
+}
+
+func TestDirectModeRejectsMissingPriceBeforeProviderAndSpend(t *testing.T) {
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"must-not-run"}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"direct-key": {Token: "direct-key-hash"},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	sink := &recordingShadowSpendSink{}
+	prx.spendLogger = sink
+	prx.spendLogMode = config.SpendLogModeDirect
+	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
+	prx.budgetReservationEnabled = true
+	prx.keyRateLimiter = prx.rateLimiter
+	prx.keyRateLimitsEnabled = true
+	prx.enforcementHealth = func(context.Context) bool { return true }
+	prx.priceRegistry = aimodels.NewModelPriceRegistry()
+	prx.priceRegistry.Update(map[string]*aimodels.ModelPrice{
+		"unrelated-priced-model": {InputCostPerToken: 0.001},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"synthetic"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer direct-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	testhelpers.AssertJSONErrorResponse(t, w, http.StatusServiceUnavailable, "server_error", "Model pricing unavailable")
+	assert.Zero(t, providerCalls.Load(), "unpriced direct request reached the provider")
+	assert.Empty(t, sink.Entries(), "unpriced direct request created a spend side effect")
+}
+
+func TestDirectModeRejectsMissingDeploymentIdentityBeforeProviderAndSpend(t *testing.T) {
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"must-not-run"}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"direct-key": {Token: "direct-key-hash"},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	sink := &recordingShadowSpendSink{}
+	prx.spendLogger = sink
+	prx.spendLogMode = config.SpendLogModeDirect
+	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
+	prx.budgetReservationEnabled = true
+	prx.keyRateLimiter = prx.rateLimiter
+	prx.keyRateLimitsEnabled = true
+	prx.enforcementHealth = func(context.Context) bool { return true }
+	prx.priceRegistry = aimodels.NewModelPriceRegistry()
+	prx.priceRegistry.Update(map[string]*aimodels.ModelPrice{
+		"backend-chat": {InputCostPerToken: 0.001},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"synthetic"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer direct-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	testhelpers.AssertJSONErrorResponse(t, w, http.StatusServiceUnavailable, "server_error", "Deployment identity unavailable")
+	assert.Zero(t, providerCalls.Load(), "identity-less direct request reached the provider")
+	assert.Empty(t, sink.Entries(), "identity-less direct request created a spend side effect")
+}
+
+func TestDirectModeReadinessFailsClosedOnRuntimeDependencyLoss(t *testing.T) {
+	prx := newClientAuthTestProxy(
+		t,
+		&clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{}},
+		"http://example.invalid",
+		config.ProviderTypeOpenAI,
+		"provider-key",
+	)
+	prx.spendLogMode = config.SpendLogModeDirect
+	prx.spendLogger = &recordingShadowSpendSink{}
+	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
+	prx.budgetReservationEnabled = true
+	prx.keyRateLimiter = prx.rateLimiter
+	prx.keyRateLimitsEnabled = true
+	prx.priceRegistry = aimodels.NewModelPriceRegistry()
+	prx.priceRegistry.Update(map[string]*aimodels.ModelPrice{
+		"backend-chat": {InputCostPerToken: 0.001},
+	})
+	prx.enforcementHealth = func(context.Context) bool { return true }
+
+	assert.True(t, prx.IsReadyForTraffic(context.Background()))
+	prx.enforcementHealth = func(context.Context) bool { return false }
+	assert.False(t, prx.IsReadyForTraffic(context.Background()), "Redis loss must remove direct readiness")
+	prx.enforcementHealth = func(context.Context) bool { return true }
+	prx.spendLogger = shadowspend.NewDisabledSink("database lost")
+	assert.False(t, prx.IsReadyForTraffic(context.Background()), "spend DB loss must remove direct readiness")
 }
 
 func TestDirectAIRConsumesRequestTagsBeforeProviderWhileRetainingSpendTags(t *testing.T) {

@@ -61,6 +61,14 @@ func (p *Proxy) orchestrateRequest(
 	logCtx *RequestLogContext,
 ) (*orchestratedRequest, bool) {
 	r = initializeRetryTrackingContext(r)
+	if !p.IsReadyForTraffic(r.Context()) {
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusServiceUnavailable
+		logCtx.ErrorMsg = "required direct-mode dependency is unavailable"
+		logCtx.Logged = true
+		WriteErrorServiceUnavailable(w, "Service unavailable")
+		return nil, false
+	}
 
 	isLiteLLMHealthy := p.isLiteLLMHealthy()
 
@@ -77,12 +85,6 @@ func (p *Proxy) orchestrateRequest(
 
 	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
-		return nil, false
-	}
-
-	// Atomic Redis budget reservation + per-key/team/org RPM/TPM enforcement
-	// (no-op when Redis is disabled; admin bypasses). Runs after the model is known.
-	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
 		return nil, false
 	}
 
@@ -199,6 +201,42 @@ func (p *Proxy) orchestrateRequest(
 	proxyBody = credentialReq.proxyBody
 	realModelID = credentialReq.realModelID
 	r.URL.Path = credentialReq.path
+	if p.spendLogMode == config.SpendLogModeDirect && !p.hasResolvablePrice(modelID, realModelID) {
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusServiceUnavailable
+		logCtx.ErrorMsg = "model price unavailable"
+		logCtx.Logged = true
+		p.logger.ErrorContext(r.Context(), "Direct request rejected before provider: model price unavailable",
+			"model", modelID, "provider_model", realModelID)
+		WriteErrorServiceUnavailable(w, "Model pricing unavailable")
+		return nil, false
+	}
+	if p.spendLogMode == config.SpendLogModeDirect {
+		if p.modelManager == nil {
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusServiceUnavailable
+			logCtx.ErrorMsg = "deployment identity unavailable"
+			logCtx.Logged = true
+			WriteErrorServiceUnavailable(w, "Deployment identity unavailable")
+			return nil, false
+		}
+		if _, found := p.modelManager.GetDeploymentID(logCtx.PublicModelID, cred.Name); !found {
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusServiceUnavailable
+			logCtx.ErrorMsg = "deployment identity unavailable"
+			logCtx.Logged = true
+			p.logger.ErrorContext(r.Context(), "Direct request rejected before provider: deployment identity unavailable",
+				"model", logCtx.PublicModelID, "credential", cred.Name)
+			WriteErrorServiceUnavailable(w, "Deployment identity unavailable")
+			return nil, false
+		}
+	}
+
+	// Reserve against the final credential-specific provider model so retries or
+	// provider rewrites cannot price the request against an intermediate route.
+	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
+		return nil, false
+	}
 
 	logCtx.Credential = cred
 	r = markCredentialAsTried(r, cred.Name)

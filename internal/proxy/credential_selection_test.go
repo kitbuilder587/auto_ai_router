@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	litellmdbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -19,19 +20,26 @@ import (
 const credentialSelectionKnownModel = "known-model"
 
 type recordingShadowSpendSink struct {
-	mu      sync.Mutex
-	entries []*litellmdbmodels.SpendLogEntry
+	mu          sync.Mutex
+	entries     []*litellmdbmodels.SpendLogEntry
+	logCalls    int
+	commitCalls int
 }
 
 func (s *recordingShadowSpendSink) LogSpend(entry *litellmdbmodels.SpendLogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.logCalls++
 	s.entries = append(s.entries, entry)
 	return nil
 }
 
 func (s *recordingShadowSpendSink) CommitSpend(_ context.Context, entry *litellmdbmodels.SpendLogEntry) (shadowspend.CommitResult, error) {
-	return shadowspend.CommitResult{}, s.LogSpend(entry)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commitCalls++
+	s.entries = append(s.entries, entry)
+	return shadowspend.CommitResult{}, nil
 }
 
 func (s *recordingShadowSpendSink) ReadKeySpend(context.Context, string) (float64, bool, error) {
@@ -49,6 +57,39 @@ func (s *recordingShadowSpendSink) Entries() []*litellmdbmodels.SpendLogEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*litellmdbmodels.SpendLogEntry(nil), s.entries...)
+}
+
+func (s *recordingShadowSpendSink) Calls() (logCalls, commitCalls int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.logCalls, s.commitCalls
+}
+
+func TestFinalizeStreamingLogDirectModeUsesSynchronousCommit(t *testing.T) {
+	credential := config.CredentialConfig{
+		Name: "provider", Type: config.ProviderTypeOpenAI, BaseURL: "http://provider.invalid", APIKey: "provider-key",
+	}
+	prx := NewTestProxyBuilder().WithCredentials(credential).Build()
+	sink := &recordingShadowSpendSink{}
+	prx.spendLogger = sink
+	prx.spendLogMode = config.SpendLogModeDirect
+
+	logCtx := &RequestLogContext{
+		RequestID:     "stream-event",
+		StartTime:     time.Now().Add(-time.Second),
+		Request:       httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		PublicModelID: "public/chat",
+		ModelID:       "backend-chat",
+		RealModelID:   "backend-chat",
+		Credential:    &credential,
+	}
+
+	prx.finalizeStreamingLog(logCtx, 2, nil, "openai", http.StatusOK)
+
+	logCalls, commitCalls := sink.Calls()
+	require.Zero(t, logCalls, "direct streaming spend must not depend on an unflushed async enqueue")
+	require.Equal(t, 1, commitCalls, "direct streaming spend must synchronously commit or retain the exact event")
+	require.True(t, logCtx.Logged)
 }
 
 func TestProxyRequestUnknownModelReturnsNotFoundWithoutSpendLog(t *testing.T) {

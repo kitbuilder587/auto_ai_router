@@ -34,7 +34,7 @@ func TestTryReserve_SeedsFromDBSpendAndAllows(t *testing.T) {
 	ctx := context.Background()
 	entity := "token:seed"
 
-	allowed, err := r.TryReserve(ctx, entity, 90, 5, 100)
+	allowed, err := r.TryReserve(ctx, entity, 90, 5, 100, true)
 	if err != nil {
 		t.Fatalf("TryReserve error: %v", err)
 	}
@@ -48,14 +48,14 @@ func TestTryReserve_RejectsAndRollsBack(t *testing.T) {
 	ctx := context.Background()
 	entity := "token:reject"
 
-	allowed, err := r.TryReserve(ctx, entity, 99, 5, 100)
+	allowed, err := r.TryReserve(ctx, entity, 99, 5, 100, true)
 	if err != nil {
 		t.Fatalf("TryReserve error: %v", err)
 	}
 	if allowed {
 		t.Fatal("expected reservation over budget to be rejected")
 	}
-	allowed, err = r.TryReserve(ctx, entity, 99, 0.5, 100)
+	allowed, err = r.TryReserve(ctx, entity, 99, 0.5, 100, true)
 	if err != nil {
 		t.Fatalf("TryReserve error: %v", err)
 	}
@@ -64,9 +64,30 @@ func TestTryReserve_RejectsAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestTryReserve_ExactBoundaryMatchesLiteLLM190(t *testing.T) {
+	r := reserverForTest(t, "test:budget:boundary:")
+	ctx := context.Background()
+
+	keyAllowed, err := r.TryReserve(ctx, "token:key", 99, 1, 100, true)
+	if err != nil {
+		t.Fatalf("key TryReserve error: %v", err)
+	}
+	if keyAllowed {
+		t.Fatal("key reservation at max_budget must be rejected (>= boundary)")
+	}
+
+	teamAllowed, err := r.TryReserve(ctx, "team:team", 99, 1, 100, false)
+	if err != nil {
+		t.Fatalf("team TryReserve error: %v", err)
+	}
+	if !teamAllowed {
+		t.Fatal("team reservation at max_budget must remain allowed (> boundary)")
+	}
+}
+
 func TestTryReserve_UnlimitedAlwaysAllows(t *testing.T) {
 	r := reserverForTest(t, "test:budget:unlimited:")
-	allowed, err := r.TryReserve(context.Background(), "token:unlimited", 1e9, 1e9, -1)
+	allowed, err := r.TryReserve(context.Background(), "token:unlimited", 1e9, 1e9, -1, true)
 	if err != nil {
 		t.Fatalf("TryReserve error: %v", err)
 	}
@@ -79,14 +100,14 @@ func TestReconcile_AdjustsCounter(t *testing.T) {
 	r := reserverForTest(t, "test:budget:reconcile:")
 	ctx := context.Background()
 	entity := "token:reconcile"
-	allowed, err := r.TryReserve(ctx, entity, 50, 40, 100)
+	allowed, err := r.TryReserve(ctx, entity, 50, 40, 100, true)
 	if err != nil || !allowed {
 		t.Fatalf("setup reservation failed: allowed=%v err=%v", allowed, err)
 	}
 	if err := r.Reconcile(ctx, entity, -30); err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
-	allowed, err = r.TryReserve(ctx, entity, 50, 39, 100)
+	allowed, err = r.TryReserve(ctx, entity, 50, 39, 100, true)
 	if err != nil {
 		t.Fatalf("TryReserve error: %v", err)
 	}
@@ -96,7 +117,7 @@ func TestReconcile_AdjustsCounter(t *testing.T) {
 	if err := r.Reconcile(ctx, entity, 50); err != nil {
 		t.Fatalf("Reconcile error: %v", err)
 	}
-	allowed, err = r.TryReserve(ctx, entity, 50, 1, 100)
+	allowed, err = r.TryReserve(ctx, entity, 50, 1, 100, true)
 	if err != nil {
 		t.Fatalf("TryReserve error: %v", err)
 	}
@@ -108,7 +129,7 @@ func TestReconcile_AdjustsCounter(t *testing.T) {
 func TestNilReserver_NoOp(t *testing.T) {
 	ctx := context.Background()
 	var nilReserver *Reserver
-	allowed, err := nilReserver.TryReserve(ctx, "e", 0, 1, 1)
+	allowed, err := nilReserver.TryReserve(ctx, "e", 0, 1, 1, true)
 	if err != nil || !allowed {
 		t.Fatalf("nil Reserver TryReserve should be no-op allow: allowed=%v err=%v", allowed, err)
 	}
@@ -116,7 +137,7 @@ func TestNilReserver_NoOp(t *testing.T) {
 		t.Fatalf("nil Reserver Reconcile should be no-op: %v", err)
 	}
 	rc := New(nil, "test:budget:nilclient:", time.Minute, nil)
-	allowed, err = rc.TryReserve(ctx, "e", 100, 100, 1)
+	allowed, err = rc.TryReserve(ctx, "e", 100, 100, 1, true)
 	if err != nil || !allowed {
 		t.Fatalf("nil-client Reserver TryReserve should be no-op allow: allowed=%v err=%v", allowed, err)
 	}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -8,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,6 +138,7 @@ func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *test
 
 func TestInitializeShadowSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
 	cfg := &config.Config{SpendLog: config.SpendLogConfig{
+		Mode:                 config.SpendLogModeShadow,
 		DatabaseURL:          "postgres://%zz",
 		ExpectedDatabaseName: "test-db",
 	}}
@@ -142,6 +146,24 @@ func TestInitializeShadowSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
 
 	assert.False(t, sink.IsEnabled())
 	assert.NoError(t, sink.LogSpend(nil))
+}
+
+func TestResolveSpendSinkDirectConnectionFailureFailsClosed(t *testing.T) {
+	cfg := &config.Config{SpendLog: config.SpendLogConfig{
+		Mode:           config.SpendLogModeDirect,
+		ConnectTimeout: time.Second,
+	}}
+	factory := func(context.Context, config.SpendLogConfig, *slog.Logger) (shadowspend.Sink, error) {
+		return nil, errors.New("database unavailable")
+	}
+
+	sink, err := resolveSpendSink(
+		cfg, slog.New(slog.DiscardHandler), monitoring.New(false), factory,
+	)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "required direct spend sink")
+	assert.Nil(t, sink)
 }
 
 // ru01 runs litellm_db with is_required=true. When the database is unreachable

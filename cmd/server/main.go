@@ -255,6 +255,14 @@ func main() {
 	}
 
 	// ==================== Create Proxy ====================
+	enforcementHealth := func(ctx context.Context) bool {
+		if redisBackend == nil {
+			return false
+		}
+		pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
+		defer pingCancel()
+		return redisBackend.Ping(pingCtx) == nil
+	}
 	prx := proxy.New(&proxy.Config{
 		Balancer:                         bal,
 		Logger:                           log,
@@ -274,6 +282,7 @@ func main() {
 		LiteLLMDB:                        litellmDBManager,
 		KafkaLog:                         kafkaLogManager,
 		SpendLogger:                      shadowSpendSink,
+		SpendLogMode:                     cfg.SpendLog.Mode,
 		SpendAPIBase:                     cfg.SpendLog.APIBase,
 		ShadowContextVerifier:            shadowContextVerifier,
 		HealthChecker:                    healthChecker,
@@ -290,6 +299,7 @@ func main() {
 		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation,
 		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
+		EnforcementHealth:                enforcementHealth,
 	})
 
 	// ==================== Background Goroutines ====================
@@ -919,34 +929,55 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 	return manager
 }
 
-func initializeShadowSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) shadowspend.Sink {
+type spendSinkFactory func(context.Context, config.SpendLogConfig, *slog.Logger) (shadowspend.Sink, error)
+
+func resolveSpendSink(
+	cfg *config.Config,
+	log *slog.Logger,
+	metrics *monitoring.Metrics,
+	factory spendSinkFactory,
+) (shadowspend.Sink, error) {
 	if !cfg.SpendLog.IsEnabled() {
 		metrics.SetShadowSpendSinkHealthy(false)
-		log.Info("Shadow spend logging disabled")
-		return shadowspend.NewDisabledSink("disabled by configuration")
+		log.Info("Spend logging disabled")
+		return shadowspend.NewDisabledSink("disabled by configuration"), nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.SpendLog.ConnectTimeout)
 	defer cancel()
-	sink, err := shadowspend.New(ctx, cfg.SpendLog, log)
+	sink, err := factory(ctx, cfg.SpendLog, log)
 	if err != nil {
 		reason := "connection_or_preflight"
 		if errors.Is(err, shadowspend.ErrUnexpectedDatabase) {
 			reason = "unexpected_database"
 		}
 		metrics.RecordShadowSpendSinkStartupFailure(reason)
-		log.Error("CRITICAL: shadow spend sink disabled; proxy traffic remains available",
+		log.Error("CRITICAL: spend sink initialization failed",
 			"error", err,
 			"reason", reason,
+			"mode", cfg.SpendLog.Mode,
 			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 		)
-		return shadowspend.NewDisabledSink(reason)
+		if cfg.SpendLog.Mode == config.SpendLogModeDirect {
+			return nil, fmt.Errorf("required direct spend sink is unavailable: %w", err)
+		}
+		return shadowspend.NewDisabledSink(reason), nil
 	}
 
-	log.Info("Shadow spend sink initialized",
+	log.Info("Spend sink initialized",
+		"mode", cfg.SpendLog.Mode,
 		"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 		"api_base", cfg.SpendLog.APIBase,
 	)
+	return sink, nil
+}
+
+func initializeShadowSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) shadowspend.Sink {
+	sink, err := resolveSpendSink(cfg, log, metrics, shadowspend.New)
+	if err != nil {
+		log.Error("CRITICAL: direct spend sink is required; refusing to start", "error", err)
+		os.Exit(1)
+	}
 	return sink
 }
 

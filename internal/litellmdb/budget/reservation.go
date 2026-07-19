@@ -25,6 +25,8 @@ const commandTimeout = 3 * time.Second
 // luaTryReserve atomically seeds the counter from db_spend (only when the key is
 // absent), adds est_cost, refreshes the TTL, and checks against max_budget.
 // Rolls back the increment and returns 0 when the new total exceeds max_budget.
+// reject_at_limit=1 implements LiteLLM's >= boundary for key/user/external
+// budgets; 0 preserves the embedded team budget's deliberately softer > rule.
 // max_budget < 0 means unlimited (always allowed, spend still tracked).
 // Returns 1 if allowed, 0 if rejected.
 const luaTryReserve = `
@@ -33,12 +35,13 @@ local db_spend = tonumber(ARGV[1])
 local est_cost = tonumber(ARGV[2])
 local max_budget = tonumber(ARGV[3])
 local ttl = tonumber(ARGV[4])
+local reject_at_limit = tonumber(ARGV[5])
 if redis.call('EXISTS', key) == 0 then
   redis.call('SET', key, db_spend)
 end
 local new_val = redis.call('INCRBYFLOAT', key, est_cost)
 redis.call('EXPIRE', key, ttl)
-if max_budget >= 0 and tonumber(new_val) > max_budget then
+if max_budget >= 0 and ((reject_at_limit == 1 and tonumber(new_val) >= max_budget) or (reject_at_limit == 0 and tonumber(new_val) > max_budget)) then
   redis.call('INCRBYFLOAT', key, -est_cost)
   return 0
 end
@@ -88,12 +91,16 @@ func (r *Reserver) cmdCtx(parent context.Context) (context.Context, context.Canc
 // allowed=false and rolls back the increment if the new total exceeds maxBudget.
 // maxBudget < 0 means unlimited (always allowed, still tracks spend).
 // A nil client/Reserver is a no-op that allows the request.
-func (r *Reserver) TryReserve(ctx context.Context, entity string, dbSpend, estimatedCost, maxBudget float64) (bool, error) {
+func (r *Reserver) TryReserve(ctx context.Context, entity string, dbSpend, estimatedCost, maxBudget float64, rejectAtLimit bool) (bool, error) {
 	if !r.enabled() {
 		return true, nil
 	}
 	cmdCtx, cancel := r.cmdCtx(ctx)
 	defer cancel()
+	boundary := "0"
+	if rejectAtLimit {
+		boundary = "1"
+	}
 
 	res, err := r.client.Do(cmdCtx, r.client.B().Eval().
 		Script(luaTryReserve).
@@ -103,6 +110,7 @@ func (r *Reserver) TryReserve(ctx context.Context, entity string, dbSpend, estim
 		Arg(strconv.FormatFloat(estimatedCost, 'f', -1, 64)).
 		Arg(strconv.FormatFloat(maxBudget, 'f', -1, 64)).
 		Arg(strconv.FormatInt(int64(r.ttl.Seconds()), 10)).
+		Arg(boundary).
 		Build()).AsInt64()
 	if err != nil {
 		return false, err

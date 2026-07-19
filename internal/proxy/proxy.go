@@ -25,7 +25,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
-	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -131,6 +130,11 @@ type HealthChecker interface {
 	IsDBHealthy() bool
 }
 
+type BudgetReserver interface {
+	TryReserve(context.Context, string, float64, float64, float64, bool) (bool, error)
+	Reconcile(context.Context, string, float64) error
+}
+
 // Config holds all configuration needed to create a Proxy
 type Config struct {
 	Balancer                         *balancer.RoundRobin
@@ -151,6 +155,7 @@ type Config struct {
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration (optional)
 	KafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	SpendLogger                      shadowspend.Sink           // Isolated shadow spend writer
+	SpendLogMode                     config.SpendLogMode        // Shadow is diagnostic; direct is authoritative.
 	SpendAPIBase                     string                     // Client-facing AIR base stored in shadow rows
 	ShadowContextVerifier            *shadowcontext.Verifier    // Signed LiteLLM shadow identity receiver
 	HealthChecker                    HealthChecker              // Optional: cached DB health status (updated by health monitor)
@@ -163,11 +168,12 @@ type Config struct {
 	SessionStoreTTL                  time.Duration
 	RouterID                         string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort             bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	BudgetReserver                   *budget.Reserver
+	BudgetReserver                   BudgetReserver
 	KeyRateLimiter                   *ratelimit.RPMLimiter
 	BudgetReservationEnabled         bool
 	KeyRateLimitsEnabled             bool
 	DefaultEstimatedCompletionTokens int
+	EnforcementHealth                func(context.Context) bool // Redis/Valkey health for direct enforcement.
 }
 
 type Proxy struct {
@@ -186,6 +192,7 @@ type Proxy struct {
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
 	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	spendLogger                      shadowspend.Sink           // Isolated shadow spend writer
+	spendLogMode                     config.SpendLogMode        // Runtime billing safety policy.
 	spendAPIBase                     string                     // Client-facing AIR base stored in shadow rows
 	shadowContextVerifier            *shadowcontext.Verifier    // Signed LiteLLM shadow identity receiver
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
@@ -197,11 +204,12 @@ type Proxy struct {
 	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
 	bedrockDailyQuota                *bedrockDailyQuotaTracker
-	budgetReserver                   *budget.Reserver
+	budgetReserver                   BudgetReserver
 	keyRateLimiter                   *ratelimit.RPMLimiter
 	budgetReservationEnabled         bool
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
+	enforcementHealth                func(context.Context) bool
 	version                          string
 	commit                           string
 }
@@ -266,6 +274,7 @@ func New(cfg *Config) *Proxy {
 		LiteLLMDB:                        cfg.LiteLLMDB,
 		kafkaLog:                         cfg.KafkaLog,
 		spendLogger:                      spendLogger,
+		spendLogMode:                     cfg.SpendLogMode,
 		spendAPIBase:                     spendAPIBase,
 		shadowContextVerifier:            cfg.ShadowContextVerifier,
 		healthChecker:                    cfg.HealthChecker,
@@ -282,10 +291,30 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		enforcementHealth:                cfg.EnforcementHealth,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 	}
+}
+
+// IsReadyForTraffic keeps direct ingress closed whenever an authoritative
+// auth, pricing, billing, or atomic-enforcement dependency is unavailable.
+// Shadow/disabled modes retain their diagnostic fail-open semantics.
+func (p *Proxy) IsReadyForTraffic(ctx context.Context) bool {
+	if p == nil || p.spendLogMode != config.SpendLogModeDirect {
+		return true
+	}
+	if p.spendLogger == nil || !p.spendLogger.IsEnabled() || !p.spendLogger.IsHealthy() {
+		return false
+	}
+	if !p.isLiteLLMHealthy() || p.priceRegistry == nil || p.priceRegistry.Count() == 0 {
+		return false
+	}
+	if !p.budgetReservationEnabled || p.budgetReserver == nil || !p.keyRateLimitsEnabled || p.keyRateLimiter == nil {
+		return false
+	}
+	return p.enforcementHealth != nil && p.enforcementHealth(ctx)
 }
 
 // Start launches background workers owned by Proxy.

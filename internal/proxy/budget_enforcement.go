@@ -21,6 +21,9 @@ type budgetLevel struct {
 	dbSpend   float64
 	rpm       *int64
 	tpm       *int64
+	// LiteLLM 1.90 rejects key/user/external budgets at equality, while the
+	// embedded team budget alone uses a strict greater-than boundary.
+	rejectAtLimit bool
 }
 
 func entityKind(entity string) string {
@@ -51,19 +54,21 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 		return nil
 	}
 	levels := []budgetLevel{{
-		entity:    "token:" + info.Token,
-		maxBudget: info.MaxBudget,
-		dbSpend:   info.Spend,
-		rpm:       info.RPMLimit,
-		tpm:       info.TPMLimit,
+		entity:        "token:" + info.Token,
+		maxBudget:     info.MaxBudget,
+		dbSpend:       info.Spend,
+		rpm:           info.RPMLimit,
+		tpm:           info.TPMLimit,
+		rejectAtLimit: true,
 	}}
 	if info.TeamID == "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
-			entity:    "user:" + info.UserID,
-			maxBudget: info.UserMaxBudget,
-			dbSpend:   dereferenceFloat(info.UserSpend),
-			rpm:       info.UserRPMLimit,
-			tpm:       info.UserTPMLimit,
+			entity:        "user:" + info.UserID,
+			maxBudget:     info.UserMaxBudget,
+			dbSpend:       dereferenceFloat(info.UserSpend),
+			rpm:           info.UserRPMLimit,
+			tpm:           info.UserTPMLimit,
+			rejectAtLimit: true,
 		})
 	}
 	if info.TeamID != "" {
@@ -77,29 +82,32 @@ func budgetLevels(info *dbmodels.TokenInfo) []budgetLevel {
 	}
 	if info.OrganizationID != "" {
 		levels = append(levels, budgetLevel{
-			entity:    "org:" + info.OrganizationID,
-			maxBudget: info.OrgMaxBudget,
-			dbSpend:   dereferenceFloat(info.OrgSpend),
-			rpm:       info.OrgRPMLimit,
-			tpm:       info.OrgTPMLimit,
+			entity:        "org:" + info.OrganizationID,
+			maxBudget:     info.OrgMaxBudget,
+			dbSpend:       dereferenceFloat(info.OrgSpend),
+			rpm:           info.OrgRPMLimit,
+			tpm:           info.OrgTPMLimit,
+			rejectAtLimit: true,
 		})
 	}
 	if info.TeamID != "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
-			entity:    "teammember:" + info.TeamID + ":" + info.UserID,
-			maxBudget: info.TeamMemberMaxBudget,
-			dbSpend:   dereferenceFloat(info.TeamMemberSpend),
-			rpm:       info.TeamMemberRPMLimit,
-			tpm:       info.TeamMemberTPMLimit,
+			entity:        "teammember:" + info.TeamID + ":" + info.UserID,
+			maxBudget:     info.TeamMemberMaxBudget,
+			dbSpend:       dereferenceFloat(info.TeamMemberSpend),
+			rpm:           info.TeamMemberRPMLimit,
+			tpm:           info.TeamMemberTPMLimit,
+			rejectAtLimit: true,
 		})
 	}
 	if info.OrganizationID != "" && info.UserID != "" {
 		levels = append(levels, budgetLevel{
-			entity:    "orgmember:" + info.OrganizationID + ":" + info.UserID,
-			maxBudget: info.OrgMemberMaxBudget,
-			dbSpend:   dereferenceFloat(info.OrgMemberSpend),
-			rpm:       info.OrgMemberRPMLimit,
-			tpm:       info.OrgMemberTPMLimit,
+			entity:        "orgmember:" + info.OrganizationID + ":" + info.UserID,
+			maxBudget:     info.OrgMemberMaxBudget,
+			dbSpend:       dereferenceFloat(info.OrgMemberSpend),
+			rpm:           info.OrgMemberRPMLimit,
+			tpm:           info.OrgMemberTPMLimit,
+			rejectAtLimit: true,
 		})
 	}
 	return levels
@@ -124,6 +132,16 @@ func (p *Proxy) estimateCompletionTokens(body []byte) int {
 		}
 	}
 	return fallback
+}
+
+func (p *Proxy) hasResolvablePrice(modelID, realModelID string) bool {
+	if p == nil || p.priceRegistry == nil {
+		return false
+	}
+	if p.priceRegistry.GetPrice(realModelID) != nil {
+		return true
+	}
+	return realModelID != modelID && p.priceRegistry.GetPrice(modelID) != nil
 }
 
 func (p *Proxy) estimateRequestCost(modelID, realModelID string, body []byte) (float64, bool) {
@@ -196,14 +214,18 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 				continue
 			}
 			allowed, err := p.budgetReserver.TryReserve(
-				r.Context(), level.entity, level.dbSpend, estimatedCost, *level.maxBudget,
+				r.Context(), level.entity, level.dbSpend, estimatedCost, *level.maxBudget, level.rejectAtLimit,
 			)
 			if err != nil {
-				// Preserve the existing PostgreSQL auth check as the fallback when
-				// Redis is unavailable; availability wins over the race hardening.
-				p.logger.WarnContext(r.Context(), "Budget reservation unavailable; request allowed",
+				p.releaseBudgetReservations(r.Context(), logCtx)
+				p.logger.ErrorContext(r.Context(), "Budget reservation unavailable; request rejected",
 					"entity_kind", entityKind(level.entity), "error", err)
-				continue
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusServiceUnavailable
+				logCtx.ErrorMsg = "budget enforcement unavailable"
+				logCtx.Logged = true
+				WriteErrorServiceUnavailable(w, "Budget enforcement unavailable")
+				return false
 			}
 			if !allowed {
 				p.releaseBudgetReservations(r.Context(), logCtx)
