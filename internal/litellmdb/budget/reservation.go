@@ -55,12 +55,13 @@ type Reserver struct {
 
 // New creates a Reserver. A nil client yields a no-op Reserver (all methods
 // succeed without touching Redis), so callers can wire it unconditionally.
-func New(client valkey.Client, keyPrefix string, ttl time.Duration, logger *slog.Logger) *Reserver {
+func New(client valkey.Client, keyPrefix string, ttl time.Duration, loggers ...*slog.Logger) *Reserver {
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
-	if logger == nil {
-		logger = slog.Default()
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
 	}
 	return &Reserver{
 		client:    client,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
+	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
+	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
 	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
@@ -47,6 +50,20 @@ var (
 	Version = "dev"
 	Commit  = "unknown"
 )
+
+const timeoutResponseWriteGrace = 5 * time.Second
+
+// effectiveServerWriteTimeout reserves enough time for the proxy's upstream
+// request timeout to be converted into a complete client-facing JSON error.
+// An http.Server WriteTimeout equal to (or shorter than) RequestTimeout can
+// close the socket at the exact moment the handler tries to write that error.
+// Non-positive WriteTimeout keeps Go's explicit "disabled" semantics.
+func effectiveServerWriteTimeout(requestTimeout, writeTimeout time.Duration) time.Duration {
+	if writeTimeout <= 0 || requestTimeout <= 0 || writeTimeout > requestTimeout {
+		return writeTimeout
+	}
+	return requestTimeout + timeoutResponseWriteGrace
+}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
@@ -132,30 +149,35 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 
-	// ==================== Budget reservation & key-level RPM/TPM ====================
-	// Both are Redis-backed and reuse the shared valkey client with isolated key
-	// namespaces. When Redis is disabled they stay nil and the proxy falls back to
-	// snapshot-only budget checks (see todo_auth_billing.md P1.4).
 	var budgetReserver *budget.Reserver
 	var keyRateLimiter *ratelimit.RPMLimiter
-	if redisBackend != nil && cfg.LiteLLMDB.Enabled {
+	if litellmDBManager.IsEnabled() && redisBackend != nil {
 		if cfg.LiteLLMDB.EnforceBudgetReservation {
-			budgetReserver = budget.New(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmbudget:", cfg.LiteLLMDB.BudgetReservationTTL, log)
-			log.Info("Budget reservation: enabled (Redis-backed, atomic overspend protection)")
+			budgetReserver = budget.New(
+				redisBackend.Client(),
+				cfg.Redis.KeyPrefix+"litellmbudget:",
+				cfg.LiteLLMDB.BudgetReservationTTL,
+			)
+			log.Info("Atomic budget reservation enabled", "backend", "redis")
 		}
 		if cfg.LiteLLMDB.EnforceKeyRateLimits {
-			authRedisBackend := ratelimit.NewRedisBackendFromClient(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:")
+			authBackend := ratelimit.NewRedisBackendFromClient(
+				redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:",
+			)
 			if cfg.Redis.Hybrid {
-				hybridAuthBackend := ratelimit.NewHybridBackend(authRedisBackend, cfg.Redis.SyncInterval)
+				hybridAuthBackend := ratelimit.NewHybridBackend(authBackend, cfg.Redis.SyncInterval)
 				defer hybridAuthBackend.Close()
 				keyRateLimiter = ratelimit.NewWithHybrid(hybridAuthBackend)
 			} else {
-				keyRateLimiter = ratelimit.NewWithRedis(authRedisBackend)
+				keyRateLimiter = ratelimit.NewWithRedis(authBackend)
 			}
-			log.Info("Key-level TPM/RPM enforcement: enabled (Redis-backed, per key/user/team/org)")
+			log.Info("Hierarchical key rate limits enabled", "backend", "redis")
 		}
-	} else if cfg.LiteLLMDB.Enabled {
-		log.Warn("Budget reservation and key-level rate limits disabled: Redis is not enabled (redis.enabled=false). Falling back to snapshot-only budget checks (see todo_auth_billing.md P1.4 for the overspend race this leaves open).")
+	} else if cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits {
+		log.Warn("Redis-backed LiteLLM enforcement requested but unavailable; using authenticated DB snapshots only",
+			"litellm_db_enabled", litellmDBManager.IsEnabled(),
+			"redis_available", redisBackend != nil,
+		)
 	}
 
 	// ==================== Initialize Balancer & Model Manager (YAML-only) ====================
@@ -184,6 +206,15 @@ func main() {
 	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
 	// endpoint and the push pipeline are wired up separately below.
 	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
+	shadowSpendSink := initializeShadowSpendSink(cfg, log, metrics)
+	shadowContextVerifier, shadowContextErr := shadowcontext.NewVerifier(cfg.SpendLog.AuthContext)
+	if shadowContextErr != nil {
+		log.Error("CRITICAL: signed shadow context verification is disabled",
+			"error", shadowContextErr,
+			"impact", "shadow rows will be comparison-ineligible",
+		)
+		shadowContextVerifier = nil
+	}
 
 	// ==================== Initialize Model Pricing ====================
 	if cfg.Server.ModelPricesLink != "" {
@@ -225,36 +256,39 @@ func main() {
 
 	// ==================== Create Proxy ====================
 	prx := proxy.New(&proxy.Config{
-		Balancer:                   bal,
-		Logger:                     log,
-		MaxBodySizeMB:              cfg.Server.MaxBodySizeMB,
-		ResponseBodyMultiplier:     cfg.Server.ResponseBodyMultiplier,
-		RequestTimeout:             cfg.Server.RequestTimeout,
-		MaxIdleConns:               cfg.Server.MaxIdleConns,
-		MaxIdleConnsPerHost:        cfg.Server.MaxIdleConnsPerHost,
-		IdleConnTimeout:            cfg.Server.IdleConnTimeout,
-		Metrics:                    metrics,
-		MasterKey:                  cfg.Server.MasterKey,
-		RateLimiter:                rateLimiter,
-		TokenManager:               tokenManager,
-		ModelManager:               modelManager,
-		Version:                    Version,
-		Commit:                     Commit,
-		LiteLLMDB:                  litellmDBManager,
-		KafkaLog:                   kafkaLogManager,
-		HealthChecker:              healthChecker,
-		PriceRegistry:              priceRegistry,
-		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
-		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
-		ResponseStore:              respStore,
-		SessionStickyEnabled:       cfg.Server.SessionStickyEnabled,
-		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
-		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
-		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
-
+		Balancer:                         bal,
+		Logger:                           log,
+		MaxBodySizeMB:                    cfg.Server.MaxBodySizeMB,
+		ResponseBodyMultiplier:           cfg.Server.ResponseBodyMultiplier,
+		RequestTimeout:                   cfg.Server.RequestTimeout,
+		MaxIdleConns:                     cfg.Server.MaxIdleConns,
+		MaxIdleConnsPerHost:              cfg.Server.MaxIdleConnsPerHost,
+		IdleConnTimeout:                  cfg.Server.IdleConnTimeout,
+		Metrics:                          metrics,
+		MasterKey:                        cfg.Server.MasterKey,
+		RateLimiter:                      rateLimiter,
+		TokenManager:                     tokenManager,
+		ModelManager:                     modelManager,
+		Version:                          Version,
+		Commit:                           Commit,
+		LiteLLMDB:                        litellmDBManager,
+		KafkaLog:                         kafkaLogManager,
+		SpendLogger:                      shadowSpendSink,
+		SpendAPIBase:                     cfg.SpendLog.APIBase,
+		ShadowContextVerifier:            shadowContextVerifier,
+		HealthChecker:                    healthChecker,
+		PriceRegistry:                    priceRegistry,
+		MaxProviderRetries:               cfg.Server.MaxProviderRetries,
+		MaxFallbackAttempts:              cfg.Server.MaxFallbackAttempts,
+		ResponseStore:                    respStore,
+		SessionStickyEnabled:             cfg.Server.SessionStickyEnabled,
+		SessionStickyAutoCacheCtrl:       cfg.Server.SessionStickyAutoCacheCtrl,
+		SessionStoreTTL:                  time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
+		DrainUpstreamOnAbort:             cfg.Server.DrainUpstreamOnAbort,
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
-		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits,
+		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation,
+		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 
@@ -330,11 +364,20 @@ func main() {
 		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router", otelOpts...)
 	}
 
+	serverWriteTimeout := effectiveServerWriteTimeout(cfg.Server.RequestTimeout, cfg.Server.WriteTimeout)
+	if serverWriteTimeout != cfg.Server.WriteTimeout {
+		log.Warn("HTTP write timeout extended to preserve timeout error responses",
+			"configured_write_timeout", cfg.Server.WriteTimeout,
+			"request_timeout", cfg.Server.RequestTimeout,
+			"effective_write_timeout", serverWriteTimeout,
+		)
+	}
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      rootHandler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: cfg.Server.WriteTimeout,
+		WriteTimeout: serverWriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
@@ -401,6 +444,16 @@ func main() {
 	}
 
 	// Shutdown LiteLLM DB
+	if shadowSpendSink.IsEnabled() {
+		log.Info("Shutting down shadow spend sink...")
+		shadowShutdownCtx, shadowShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := shadowSpendSink.Shutdown(shadowShutdownCtx); err != nil {
+			log.Error("Shadow spend sink shutdown error", "error", err)
+		}
+		shadowShutdownCancel()
+	}
+
+	// Shutdown LiteLLM control-plane DB
 	if litellmDBManager.IsEnabled() {
 		log.Info("Shutting down LiteLLM DB...")
 		dbShutdownCtx, dbShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -537,10 +590,12 @@ func initializeModelManager(
 		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
 	}
 
-	// Initialize rate limiters for each model
-	modelsResp := modelManager.GetAllModels()
+	// Initialize rate limiters from internal credential routing IDs, not from
+	// the client-facing catalog. An explicit client_model_ids boundary hides
+	// provider backends from /v1/models, but those backends remain the IDs used
+	// after canonical alias resolution.
 	for _, cred := range cfg.Credentials {
-		for _, model := range modelsResp.Data {
+		for _, model := range modelManager.GetModelsForCredential(cred.Name) {
 			if modelManager.HasModel(cred.Name, model.ID) {
 				rpm := modelManager.GetModelRPMForCredential(model.ID, cred.Name)
 				tpm := modelManager.GetModelTPMForCredential(model.ID, cred.Name)
@@ -765,6 +820,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogQueueSize:          cfg.LiteLLMDB.LogQueueSize,
 		LogBatchSize:          cfg.LiteLLMDB.LogBatchSize,
 		LogFlushInterval:      cfg.LiteLLMDB.LogFlushInterval,
+		DisableSpendLogging:   true,
 		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
 		Logger:                log,
 	}
@@ -844,6 +900,37 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 	}
 	log.Info("Kafka spend-log publisher initialized successfully")
 	return manager
+}
+
+func initializeShadowSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) shadowspend.Sink {
+	if !cfg.SpendLog.IsEnabled() {
+		metrics.SetShadowSpendSinkHealthy(false)
+		log.Info("Shadow spend logging disabled")
+		return shadowspend.NewDisabledSink("disabled by configuration")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.SpendLog.ConnectTimeout)
+	defer cancel()
+	sink, err := shadowspend.New(ctx, cfg.SpendLog, log)
+	if err != nil {
+		reason := "connection_or_preflight"
+		if errors.Is(err, shadowspend.ErrUnexpectedDatabase) {
+			reason = "unexpected_database"
+		}
+		metrics.RecordShadowSpendSinkStartupFailure(reason)
+		log.Error("CRITICAL: shadow spend sink disabled; proxy traffic remains available",
+			"error", err,
+			"reason", reason,
+			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
+		)
+		return shadowspend.NewDisabledSink(reason)
+	}
+
+	log.Info("Shadow spend sink initialized",
+		"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
+		"api_base", cfg.SpendLog.APIBase,
+	)
+	return sink
 }
 
 // loadAndUpdateModelPrices loads model prices and updates the registry

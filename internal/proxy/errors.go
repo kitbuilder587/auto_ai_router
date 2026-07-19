@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // APIErrorResponse represents an OpenAI-compatible error response.
@@ -33,7 +34,7 @@ func errorTypeForStatus(statusCode int) string {
 		return "not_found_error"
 	case http.StatusMethodNotAllowed:
 		return "invalid_request_error"
-	case http.StatusRequestTimeout:
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		return "timeout_error"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"
@@ -85,6 +86,80 @@ func maskedUpstreamErrorBody(statusCode int) []byte {
 		return []byte(`{"error":{"message":"Upstream provider error","type":"api_error","param":null,"code":"upstream_error"}}`)
 	}
 	return append(body, '\n')
+}
+
+// normalizeUpstreamErrorBody converts provider-specific errors to the stable
+// OpenAI error envelope exposed by AIR. A provider's non-empty string error
+// type is preserved (for example Anthropic's overloaded_error); malformed or
+// untyped envelopes fall back to the HTTP-derived public type.
+func normalizeUpstreamErrorBody(statusCode int, body []byte) []byte {
+	type providerError struct {
+		Message string          `json:"message"`
+		Type    json.RawMessage `json:"type"`
+		Param   *string         `json:"param"`
+		Code    json.RawMessage `json:"code"`
+	}
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+
+	message := "Upstream provider error"
+	errorType := errorTypeForStatus(statusCode)
+	var param *string
+	var code *string
+	if json.Unmarshal(body, &envelope) == nil && len(envelope.Error) > 0 {
+		var detail providerError
+		if json.Unmarshal(envelope.Error, &detail) == nil {
+			if strings.TrimSpace(detail.Message) != "" {
+				message = detail.Message
+			}
+			if value := decodeJSONString(detail.Type); value != "" {
+				errorType = value
+			}
+			param = detail.Param
+			if value := decodeJSONString(detail.Code); value != "" {
+				code = &value
+			}
+		} else {
+			var text string
+			if json.Unmarshal(envelope.Error, &text) == nil && strings.TrimSpace(text) != "" {
+				message = text
+			}
+		}
+	}
+
+	encoded, err := json.Marshal(APIErrorResponse{Error: APIError{
+		Message: message,
+		Type:    errorType,
+		Param:   param,
+		Code:    code,
+	}})
+	if err != nil {
+		return maskedUpstreamErrorBody(statusCode)
+	}
+	return append(encoded, '\n')
+}
+
+func decodeJSONString(raw json.RawMessage) string {
+	var value string
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func invalidUpstreamResponseBody() []byte {
+	code := "invalid_upstream_response"
+	encoded, err := json.Marshal(APIErrorResponse{Error: APIError{
+		Message: "Upstream provider returned an invalid JSON response",
+		Type:    "api_connection_error",
+		Param:   nil,
+		Code:    &code,
+	}})
+	if err != nil {
+		return []byte(`{"error":{"message":"Upstream provider returned an invalid JSON response","type":"api_connection_error","param":null,"code":"invalid_upstream_response"}}` + "\n")
+	}
+	return append(encoded, '\n')
 }
 
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.
@@ -140,4 +215,9 @@ func WriteErrorBadGateway(w http.ResponseWriter, message string) {
 // WriteErrorTimeout writes a 408 Request Timeout JSON error.
 func WriteErrorTimeout(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusRequestTimeout, message, errorTypeForStatus(http.StatusRequestTimeout), nil, nil)
+}
+
+// WriteErrorGatewayTimeout writes the gateway-facing 504 timeout contract.
+func WriteErrorGatewayTimeout(w http.ResponseWriter, message string) {
+	WriteJSONError(w, http.StatusGatewayTimeout, message, errorTypeForStatus(http.StatusGatewayTimeout), nil, nil)
 }

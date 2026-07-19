@@ -113,8 +113,10 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 	switch event.Type {
 	case "message_start":
 		if event.Message != nil {
-			acc.inputTokens = event.Message.Usage.InputTokens
-			acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
+			if event.Message.Usage != nil {
+				acc.inputTokens = event.Message.Usage.InputTokens
+				acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
+			}
 		}
 
 	case "content_block_start":
@@ -216,8 +218,8 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		if event.Delta != nil && event.Delta.StopReason != "" {
 			acc.stopReason = event.Delta.StopReason
 		}
-		if event.Usage != nil {
-			acc.outputTokens = event.Usage.OutputTokens
+		if event.Usage != nil && event.Usage.OutputTokens != nil {
+			acc.outputTokens = *event.Usage.OutputTokens
 		}
 
 	case "message_stop":
@@ -302,6 +304,7 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			"type":         "response.function_call_arguments.done",
 			"item_id":      itemID,
 			"output_index": acc.currentToolOutputIndex,
+			"name":         acc.currentBlockName,
 			"arguments":    argsJSON,
 		}, acc); err != nil {
 			return err

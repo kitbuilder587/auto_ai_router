@@ -71,6 +71,13 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 	return scope.NewContext(allowed, denied)
 }
 
+// ScopeContextFromTokenInfo derives the model/credential visibility scope from
+// an identity that has already passed the shared client authentication path.
+// Public endpoints use this to avoid validating the same token twice.
+func ScopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
+	return scopeContextFromTokenInfo(info)
+}
+
 func isLiteLLMMasterTokenInfo(info *dbmodels.TokenInfo) bool {
 	return info != nil && info.UserID == liteLLMMasterKeyIdentity
 }
