@@ -801,10 +801,18 @@ func applyInitialDBModelTable(
 	)
 }
 
-func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager {
+// resolveLiteLLMDBManager applies the litellm_db startup policy without any
+// os.Exit side effect, so the fail-closed contract is unit-testable. A nil
+// manager together with a non-nil error means startup MUST abort: litellm_db is
+// enabled, required (is_required=true, as on ru01), and the database is
+// unreachable. When it is enabled but optional and unreachable, the process
+// degrades to a NoopManager — virtual-key auth stays fail-closed, but budget
+// checks and spend logging become silent no-ops, so we raise
+// LiteLLMDBDegraded=1 to make that data loss observable instead of silent.
+func resolveLiteLLMDBManager(cfg *config.Config, log *slog.Logger) (litellmdb.Manager, error) {
 	if !cfg.LiteLLMDB.Enabled {
 		log.Info("LiteLLM DB integration disabled - using NoopManager (no security checks)")
-		return litellmdb.NewNoopManager()
+		return litellmdb.NewNoopManager(), nil
 	}
 
 	log.Info("Initializing LiteLLM DB integration...", "is_required", cfg.LiteLLMDB.IsRequired)
@@ -828,21 +836,30 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 	manager, err := litellmdb.New(litellmCfg)
 	if err != nil {
 		if cfg.LiteLLMDB.IsRequired {
-			log.Error("CRITICAL: Failed to initialize required LiteLLM DB integration",
-				"error", err,
-				"reason", "LiteLLM DB is configured as required (is_required=true)",
-				"action", "Fix database connectivity or set is_required=false",
-			)
-			os.Exit(1)
+			return nil, fmt.Errorf("required LiteLLM DB integration is unavailable: %w", err)
 		}
 
 		log.Warn("Failed to initialize optional LiteLLM DB, degrading to NoopManager",
 			"error", err,
-			"impact", "Budget checks, rate limits, and token auth validation will be disabled",
+			"impact", "Budget checks and spend logging will be silent no-ops; virtual-key auth stays fail-closed",
 		)
-		return litellmdb.NewNoopManager()
+		monitoring.LiteLLMDBDegraded.Set(1)
+		return litellmdb.NewNoopManager(), nil
 	}
 	log.Info("LiteLLM DB integration initialized successfully")
+	return manager, nil
+}
+
+func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager {
+	manager, err := resolveLiteLLMDBManager(cfg, log)
+	if err != nil {
+		log.Error("CRITICAL: Failed to initialize required LiteLLM DB integration",
+			"error", err,
+			"reason", "LiteLLM DB is configured as required (is_required=true)",
+			"action", "Fix database connectivity or set is_required=false",
+		)
+		os.Exit(1)
+	}
 	return manager
 }
 

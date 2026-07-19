@@ -15,7 +15,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -770,6 +772,74 @@ func TestBuildShadowSpendEntryWithMissingPriceIsFinanciallyIneligible(t *testing
 	assert.Equal(t, "missing_registry", extension["price_status"])
 	assert.Equal(t, "price_missing", extension["cost_status"])
 	assert.Nil(t, metadata["cost_breakdown"])
+}
+
+// A successful, token-consuming request for a model with no resolvable price is
+// persisted with spend=0. That is indistinguishable in the `spend` column from a
+// legitimately free/cache-hit row, so the paid-model-without-price condition must
+// increment a dedicated counter rather than pass as a silent zero. A priced model
+// must not increment it.
+func TestBuildShadowSpendEntryMissingPriceIncrementsCounter(t *testing.T) {
+	missingModel := func() *litellmdb.SpendLogEntry {
+		p := &Proxy{logger: slog.New(slog.DiscardHandler)}
+		identity := shadowcontext.Identity{
+			APIKeyHash: testClientKeyHash, PublicModel: "public-model", DeploymentID: "deployment-1", CallID: "call-1",
+		}
+		billing := NewBillingContext("event-1", "call-1", "/v1/chat/completions", identity).
+			WithRouting("backend-model", "unpriced-provider-model", "openai", "credential-1", "https://provider.example.invalid/v1")
+		return p.buildShadowSpendEntry(&RequestLogContext{
+			RequestID:     "event-1",
+			CallID:        "call-1",
+			ShadowContext: shadowcontext.Result{State: shadowcontext.StateValid, Identity: identity},
+			Billing:       billing,
+			StartTime:     time.Now().Add(-time.Millisecond),
+			Request:       httptest.NewRequest("POST", "/v1/chat/completions", nil),
+			Status:        "success",
+			HTTPStatus:    200,
+			TokenUsage:    &converter.TokenUsage{PromptTokens: 10, CompletionTokens: 5},
+			Credential:    &config.CredentialConfig{Name: "credential-1", Type: config.ProviderTypeOpenAI},
+			ModelID:       "backend-model",
+			RealModelID:   "unpriced-provider-model",
+		})
+	}
+
+	before := testutil.ToFloat64(monitoring.ShadowSpendPriceMissingTotal.WithLabelValues("missing_registry"))
+	entry := missingModel()
+	require.NotNil(t, entry)
+	assert.Zero(t, entry.Spend)
+	after := testutil.ToFloat64(monitoring.ShadowSpendPriceMissingTotal.WithLabelValues("missing_registry"))
+	assert.Equal(t, before+1, after, "paid model without a price must not be a silent spend=0")
+
+	// A priced model produces a real cost and must not touch the counter.
+	registry := models.NewModelPriceRegistry()
+	registry.Update(map[string]*models.ModelPrice{
+		"provider-model": {InputCostPerToken: 0.000001, OutputCostPerToken: 0.000004},
+	})
+	p := &Proxy{logger: slog.New(slog.DiscardHandler), priceRegistry: registry}
+	identity := shadowcontext.Identity{
+		APIKeyHash: testClientKeyHash, PublicModel: "public-model", DeploymentID: "deployment-1", CallID: "call-2",
+	}
+	billing := NewBillingContext("event-2", "call-2", "/v1/chat/completions", identity).
+		WithRouting("backend-model", "provider-model", "openai", "credential-1", "https://provider.example.invalid/v1")
+	pricedBefore := testutil.ToFloat64(monitoring.ShadowSpendPriceMissingTotal.WithLabelValues("missing_registry"))
+	pricedEntry := p.buildShadowSpendEntry(&RequestLogContext{
+		RequestID:     "event-2",
+		CallID:        "call-2",
+		ShadowContext: shadowcontext.Result{State: shadowcontext.StateValid, Identity: identity},
+		Billing:       billing,
+		StartTime:     time.Now().Add(-time.Millisecond),
+		Request:       httptest.NewRequest("POST", "/v1/chat/completions", nil),
+		Status:        "success",
+		HTTPStatus:    200,
+		TokenUsage:    &converter.TokenUsage{PromptTokens: 10, CompletionTokens: 5},
+		Credential:    &config.CredentialConfig{Name: "credential-1", Type: config.ProviderTypeOpenAI},
+		ModelID:       "backend-model",
+		RealModelID:   "provider-model",
+	})
+	require.NotNil(t, pricedEntry)
+	assert.Greater(t, pricedEntry.Spend, 0.0)
+	pricedAfter := testutil.ToFloat64(monitoring.ShadowSpendPriceMissingTotal.WithLabelValues("missing_registry"))
+	assert.Equal(t, pricedBefore, pricedAfter, "priced model must not increment the missing-price counter")
 }
 
 func TestBuildShadowSpendEntryPriceSnapshotUsesResolvedBackendFallback(t *testing.T) {

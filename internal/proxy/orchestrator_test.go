@@ -369,6 +369,57 @@ func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T
 	testhelpers.AssertJSONErrorResponse(t, clientWriter, http.StatusNotFound, "not_found_error", "Model "+backendModel+" not found")
 }
 
+// A restricted (non-empty ACL) key that does not list an internal backend
+// deployment ID must get 404 "not found", not 403 "Model not allowed": a
+// permission error would leak that the internal ID exists. This is the
+// stack-#83..#85 fix (a) "404 for internal backend IDs for ordinary keys",
+// which previously only held for empty-ACL keys because the ACL check fired
+// first. A truly unknown (non-configured) model still returns the ACL 403.
+func TestOrchestrateRequestRestrictedKeyGetsNotFoundForInternalBackendID(t *testing.T) {
+	const (
+		canonicalModel = "anthropic/claude-sonnet-4.5"
+		backendModel   = "claude-sonnet-4.5"
+	)
+	logger := testhelpers.NewTestLogger()
+	credential := config.CredentialConfig{
+		Name: "provider", Type: config.ProviderTypeOpenAI,
+		APIKey: "provider-key", BaseURL: "http://provider.local", RPM: 100, TPM: 10000,
+	}
+	manager := models.New(logger, 100, []config.ModelRPMConfig{{
+		Name: backendModel, Credential: credential.Name, RPM: 100, TPM: 10000,
+	}})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	manager.SetModelAliases(map[string]string{canonicalModel: backendModel})
+	manager.SetClientModelIDs([]string{canonicalModel})
+	require.NotEmpty(t, manager.GetCredentialsForModel(backendModel), "backend ID is a configured deployment")
+	require.False(t, manager.IsClientModelIDRoutable(backendModel), "backend ID is not client-routable")
+
+	builder := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key")
+	builder.config.ModelManager = manager
+	prx := builder.Build()
+	prx.LiteLLMDB = &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		// Restricted key: allows one unrelated model, not the backend ID.
+		"restricted-client-key": {Token: "restricted-client-key-hash", Models: []string{"openai/gpt-4o-mini"}},
+	}}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"`+backendModel+`","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer restricted-client-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{Request: req}
+	logCtx.Billing = NewBillingContext("event-restricted", "call-restricted", req.URL.Path, shadowcontext.Identity{})
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+
+	assert.False(t, ok)
+	assert.Nil(t, prepared)
+	testhelpers.AssertJSONErrorResponse(t, w, http.StatusNotFound, "not_found_error", "Model "+backendModel+" not found")
+	assert.True(t, logCtx.Logged, "internal-ID rejection must not create a zero-spend row")
+}
+
 func TestOrchestrateRequestRejectsOrphanPublicAliasBeforeProviderSelection(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	manager := models.New(logger, 100, nil)
