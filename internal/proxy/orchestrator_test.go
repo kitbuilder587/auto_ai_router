@@ -291,7 +291,7 @@ func TestOrchestrateRequestResolvesAcceptedCompletionAliasWithoutChangingPublicS
 	)
 }
 
-func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T) {
+func TestOrchestrateRequestAcceptedAliasCollisionPreservesTrustedBackendAndClientSurface(t *testing.T) {
 	const (
 		canonicalModel = "anthropic/claude-sonnet-4.5"
 		backendModel   = "claude-sonnet-4.5"
@@ -364,9 +364,11 @@ func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T
 
 	prepared, ok := prx.orchestrateRequest(clientWriter, clientReq, clientLogCtx)
 
-	assert.False(t, ok)
-	assert.Nil(t, prepared)
-	testhelpers.AssertJSONErrorResponse(t, clientWriter, http.StatusNotFound, "not_found_error", "Model "+backendModel+" not found")
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+	assert.Equal(t, backendModel, clientLogCtx.PublicModelID)
+	assert.Equal(t, backendModel, prepared.modelID)
+	assert.Equal(t, backendModel, prepared.realModelID)
 }
 
 // A restricted (non-empty ACL) key that does not list an internal backend
