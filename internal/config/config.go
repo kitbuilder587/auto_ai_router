@@ -803,7 +803,7 @@ type KafkaConfig struct {
 }
 
 const (
-	ShadowSpendAPIBase = "http://air-ru01/v1"
+	SpendAPIBase = "http://air-ru01/v1"
 )
 
 // SpendLogConfig owns a database connection that is independent from the
@@ -1083,7 +1083,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// UnmarshalYAML resolves environment-backed shadow-writer settings and applies
+// UnmarshalYAML resolves environment-backed spend-writer settings and applies
 // safe defaults even when only part of spend_log is configured.
 func (s *SpendLogConfig) UnmarshalYAML(value *yaml.Node) error {
 	type rawSpendLog struct {
@@ -1431,7 +1431,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 
 func defaultSpendLogConfig() SpendLogConfig {
 	return SpendLogConfig{
-		APIBase:             ShadowSpendAPIBase,
+		APIBase:             SpendAPIBase,
 		MaxConns:            10,
 		MinConns:            2,
 		HealthCheckInterval: 10 * time.Second,
@@ -1747,8 +1747,8 @@ func (c *Config) Validate() error {
 		if c.SpendLog.ExpectedDatabaseName == "" {
 			return fmt.Errorf("spend_log.expected_database_name is required when spend_log is configured")
 		}
-		if c.SpendLog.APIBase != ShadowSpendAPIBase {
-			return fmt.Errorf("spend_log.api_base must be %s", ShadowSpendAPIBase)
+		if c.SpendLog.APIBase != SpendAPIBase {
+			return fmt.Errorf("spend_log.api_base must be %s", SpendAPIBase)
 		}
 		if c.SpendLog.MaxConns <= 0 || c.SpendLog.MinConns < 0 || c.SpendLog.MinConns > c.SpendLog.MaxConns {
 			return fmt.Errorf("spend_log connection limits must satisfy max_conns > 0 and 0 <= min_conns <= max_conns")

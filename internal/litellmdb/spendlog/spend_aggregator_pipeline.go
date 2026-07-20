@@ -64,7 +64,7 @@ var dailyEndpointByCallType = map[string]string{
 }
 
 // dailyEndpoint mirrors LiteLLM ROUTE_ENDPOINT_MAPPING for AIR-supported
-// shadow routes. Unknown call types intentionally yield an empty/NULL-like
+// spend routes. Unknown call types intentionally yield an empty/NULL-like
 // endpoint rather than leaking api_base into the daily dimension.
 func dailyEndpoint(callType string) string {
 	return dailyEndpointByCallType[callType]

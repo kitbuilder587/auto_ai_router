@@ -11,7 +11,7 @@ import (
 )
 
 func TestLoadSpendLogConfig(t *testing.T) {
-	t.Setenv("SHADOW_DATABASE_URL", "postgresql://shadow:secret@db.example/test-db")
+	t.Setenv("SPEND_DATABASE_URL", "postgresql://spend:secret@db.example/test-db")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 server:
@@ -26,7 +26,7 @@ credentials:
 monitoring:
   prometheus_enabled: false
 spend_log:
-  database_url: os.environ/SHADOW_DATABASE_URL
+  database_url: os.environ/SPEND_DATABASE_URL
   expected_database_name: test-db
   api_base: http://air-ru01/v1
   max_conns: 7
@@ -41,7 +41,7 @@ spend_log:
 	require.NoError(t, err)
 
 	assert.True(t, cfg.SpendLog.IsEnabled())
-	assert.Equal(t, "postgresql://shadow:secret@db.example/test-db", cfg.SpendLog.DatabaseURL)
+	assert.Equal(t, "postgresql://spend:secret@db.example/test-db", cfg.SpendLog.DatabaseURL)
 	assert.Equal(t, "test-db", cfg.SpendLog.ExpectedDatabaseName)
 	assert.Equal(t, "http://air-ru01/v1", cfg.SpendLog.APIBase)
 	assert.Equal(t, 7, cfg.SpendLog.MaxConns)
@@ -92,13 +92,13 @@ func TestValidateSpendLogConfig(t *testing.T) {
 		},
 		{
 			name:        "configured writer is valid",
-			spendLog:    validShadowSpendLogConfig(),
+			spendLog:    validSpendLogConfig(),
 			wantNoError: true,
 		},
 		{
 			name: "configured writer requires canonical api base",
 			spendLog: func() SpendLogConfig {
-				cfg := validShadowSpendLogConfig()
+				cfg := validSpendLogConfig()
 				cfg.APIBase = "http://another-air/v1"
 				return cfg
 			}(),
@@ -107,7 +107,7 @@ func TestValidateSpendLogConfig(t *testing.T) {
 		{
 			name: "configured writer rejects unsafe queue values",
 			spendLog: func() SpendLogConfig {
-				cfg := validShadowSpendLogConfig()
+				cfg := validSpendLogConfig()
 				cfg.LogBatchSize = -1
 				return cfg
 			}(),
@@ -116,7 +116,7 @@ func TestValidateSpendLogConfig(t *testing.T) {
 		{
 			name: "configured writer rejects invalid pool limits",
 			spendLog: func() SpendLogConfig {
-				cfg := validShadowSpendLogConfig()
+				cfg := validSpendLogConfig()
 				cfg.MinConns = cfg.MaxConns + 1
 				return cfg
 			}(),
@@ -139,7 +139,7 @@ func TestValidateSpendLogConfig(t *testing.T) {
 	}
 }
 
-func validShadowSpendLogConfig() SpendLogConfig {
+func validSpendLogConfig() SpendLogConfig {
 	return defaultSpendLogConfigWithDestination("postgres://localhost/test-db", "test-db")
 }
 

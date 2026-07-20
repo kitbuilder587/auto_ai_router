@@ -157,7 +157,7 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 // LiteLLM proxy records for the same operation (the async method name, e.g.
 // "acompletion" — see litellm route_llm_request.ROUTE_ENDPOINT_MAPPING). The
 // daily aggregation pipeline keys its endpoint dimension off these values, and
-// the shadow comparison relies on them matching the primary accounting.
+// the spend comparison relies on them matching the primary accounting.
 // Unknown paths map to "" — the raw spend row is still written, only the daily
 // aggregation is skipped for it.
 func litellmCallType(path string) string {

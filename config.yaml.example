@@ -273,7 +273,7 @@ litellm_db:
 # A database-name mismatch disables only this writer; client routing remains
 # available.
 spend_log:
-  database_url: "os.environ/SHADOW_SPEND_DATABASE_URL"
+  database_url: "os.environ/SPEND_DATABASE_URL"
   expected_database_name: "test-db"     # Exact current_database() guard
   api_base: "http://air-ru01/v1"        # Fixed comparison contract
   max_conns: 10
