@@ -296,7 +296,26 @@ func TestLivePublicModelAliasesResolveToExactDeploymentAndBackend(t *testing.T) 
 	}
 }
 
-func TestPublicModelAliasFailsClosedForOrphanAndAmbiguousDeployment(t *testing.T) {
+func TestPublicModelAliasFailsClosedForOrphanTarget(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, -1, nil)
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	manager.SetPublicModelAliases(map[string]string{
+		"alias/orphan": "canonical/missing",
+	})
+
+	resolved, configured, err := manager.ResolvePublicModelAlias("alias/orphan")
+	assert.Equal(t, "alias/orphan", resolved)
+	assert.True(t, configured)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"alias/orphan"`)
+	_, ok := manager.GetDeploymentID("alias/orphan", credential.Name)
+	assert.False(t, ok)
+	assert.False(t, manager.IsModelIDAllowedByScope("alias/orphan", []string{"*"}))
+}
+
+func TestPublicModelAliasStaysActiveWithAmbiguousDeploymentAttribution(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
 	manager := New(logger, -1, nil)
@@ -306,18 +325,76 @@ func TestPublicModelAliasFailsClosedForOrphanAndAmbiguousDeployment(t *testing.T
 		{Name: "canonical/ambiguous", Credential: credential.Name, DeploymentID: "deployment-b"},
 	}, []config.CredentialConfig{credential}, []config.CredentialConfig{credential})
 	manager.SetPublicModelAliases(map[string]string{
-		"alias/orphan":    "canonical/missing",
 		"alias/ambiguous": "canonical/ambiguous",
 	})
 
-	for _, alias := range []string{"alias/orphan", "alias/ambiguous"} {
-		resolved, configured, err := manager.ResolvePublicModelAlias(alias)
-		assert.Equal(t, alias, resolved)
-		assert.True(t, configured)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), fmt.Sprintf("%q", alias))
-		_, ok := manager.GetDeploymentID(alias, credential.Name)
-		assert.False(t, ok)
-		assert.False(t, manager.IsModelIDAllowedByScope(alias, []string{"*"}))
+	// Two LiteLLM deployments behind one public model (e.g. primary+fallback)
+	// must not kill the alias: activation follows routability only.
+	resolved, configured, err := manager.ResolvePublicModelAlias("alias/ambiguous")
+	require.NoError(t, err)
+	assert.True(t, configured)
+	assert.Equal(t, "canonical/ambiguous", resolved)
+	assert.True(t, manager.IsModelIDAllowedByScope("alias/ambiguous", []string{"*"}))
+
+	// Deployment attribution stays best-effort: ambiguity resolves to no ID.
+	_, ok := manager.GetDeploymentID("alias/ambiguous", credential.Name)
+	assert.False(t, ok)
+}
+
+func TestPublicModelAliasActiveWithoutDeploymentMetadata(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, -1, []config.ModelRPMConfig{{
+		Name:       "openai/gpt-4o",
+		Credential: credential.Name,
+	}})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	// No UpdateDBModels: the LiteLLM model table is unavailable, so no
+	// deployment IDs exist at all. The alias must still be active.
+	manager.SetPublicModelAliases(map[string]string{
+		"gpt-4o": "openai/gpt-4o",
+	})
+
+	resolved, configured, err := manager.ResolvePublicModelAlias("gpt-4o")
+	require.NoError(t, err)
+	assert.True(t, configured)
+	assert.Equal(t, "openai/gpt-4o", resolved)
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o", []string{"gpt-4o"}))
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o", []string{"openai/gpt-4o"}))
+
+	catalog := manager.GetAllModels()
+	catalogIDs := make(map[string]struct{}, len(catalog.Data))
+	for _, model := range catalog.Data {
+		catalogIDs[model.ID] = struct{}{}
 	}
+	_, published := catalogIDs["gpt-4o"]
+	assert.True(t, published, "alias must be projected without LiteLLM deployment metadata")
+
+	_, ok := manager.GetDeploymentID("gpt-4o", credential.Name)
+	assert.False(t, ok, "no deployment attribution is available without the LiteLLM model table")
+}
+
+func TestPublicModelAliasDoesNotRevokeDirectScopeAccess(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, -1, []config.ModelRPMConfig{
+		{Name: "gpt-4o", Credential: credential.Name},
+		{Name: "openai/gpt-4o", Credential: credential.Name},
+	})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o", []string{"gpt-4o"}),
+		"baseline: the short name is directly allowed by the scope")
+
+	// Registering a public alias for the same short name must not revoke the
+	// already granted direct scope access.
+	manager.SetPublicModelAliases(map[string]string{
+		"gpt-4o": "openai/gpt-4o",
+	})
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o", []string{"gpt-4o"}),
+		"adding public_model_alias must not revoke previously issued short-name access")
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o", []string{"openai/gpt-4o"}),
+		"the alias also inherits permission from its canonical target")
 }

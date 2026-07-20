@@ -199,8 +199,8 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 	}
 }
 
-// TryLog performs the fail-open shadow enqueue. It never waits for queue space;
-// callers can return the provider response without shadow DB backpressure. A
+// TryLog performs the fail-open spend enqueue. It never waits for queue space;
+// callers can return the provider response without spend DB backpressure. A
 // full writer queue is not itself data loss: the exact entry is retained in the
 // bounded DLQ and recovered by the same idempotent atomic writer. Only a later
 // DLQ overflow is a terminal loss and invalidates the comparison window.
@@ -269,7 +269,7 @@ func (sl *Logger) tryEnqueueNow(entry *models.SpendLogEntry) bool {
 func (sl *Logger) recordQueueDrop(entry *models.SpendLogEntry, reason string) {
 	atomic.AddUint64(&sl.dropped, 1)
 	atomic.AddUint64(&sl.queueFullCount, 1)
-	monitoring.RecordShadowSpendDropped(1)
+	monitoring.RecordSpendDropped(1)
 	sl.publishSnapshot()
 	sl.logger.Error("[DB] SpendLog entry dropped: queue full",
 		"request_id", entry.RequestID,
@@ -315,7 +315,7 @@ func (sl *Logger) Shutdown(ctx context.Context) error {
 		if sl.writeCancel != nil {
 			sl.writeCancel()
 		}
-		// Retain shutdownDone for a later caller. The owning ShadowSink must not
+		// Retain shutdownDone for a later caller. The owning PostgresSink must not
 		// close the pool until a subsequent call observes terminal completion.
 		return ctx.Err()
 	}
@@ -402,7 +402,7 @@ func (sl *Logger) publishSnapshot() {
 }
 
 func observeSnapshot(stats models.SpendLoggerStats) {
-	monitoring.ObserveShadowSpendSnapshot(monitoring.ShadowSpendSnapshot{
+	monitoring.ObserveSpendSnapshot(monitoring.SpendSnapshot{
 		QueueDepth:            stats.QueueLen,
 		PendingEntries:        stats.PendingEntries,
 		PendingAggregation:    stats.PendingAggregation,
@@ -522,6 +522,11 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Apply exponential backoff before attempt (except first)
 		if attempt > 0 {
+			// Jitter (up to +50%): without it, every pod retries on the exact
+			// same fixed schedule, so two batches that just deadlocked on the
+			// same rows (see sortedKeys in spend_updater.go) retry in lockstep
+			// and can deadlock again. litellm's db_spend_update_writer.py hits
+			// the same problem and randomizes retry sleep for this reason.
 			backoff := backoffDurations[attempt]
 			// Desynchronize replicas after a transient lock conflict. Fixed retry
 			// intervals can make the same batches collide again in lockstep.
@@ -719,7 +724,7 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 		dropped := sl.dlq[0]
 		sl.dlq = sl.dlq[1:]
 		atomic.AddUint64(&sl.dlqOverflow, 1)
-		monitoring.RecordShadowSpendDLQOverflow(1)
+		monitoring.RecordSpendDLQOverflow(1)
 		sl.resolvePendingEntries(len(dropped.batch))
 
 		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped (billing data loss)",
@@ -882,7 +887,7 @@ func (sl *Logger) restoreFailedDLQBatches(failed []*deadLetterBatch) {
 
 	for _, batch := range dropped {
 		atomic.AddUint64(&sl.dlqOverflow, 1)
-		monitoring.RecordShadowSpendDLQOverflow(1)
+		monitoring.RecordSpendDLQOverflow(1)
 		sl.resolvePendingEntries(len(batch.batch))
 		sl.logger.Error("[DB] SpendLog DLQ overflow while restoring failed recovery batch",
 			"dropped_batch_size", len(batch.batch),
@@ -983,14 +988,14 @@ func (sl *Logger) recordCommittedBatch(batch []*models.SpendLogEntry, insertedID
 	atomic.AddUint64(&sl.comparisonIneligible, ineligible)
 	sl.resolvePendingEntries(len(batch))
 
-	monitoring.RecordShadowSpendDuplicates(uint64(duplicateCount))
-	monitoring.RecordShadowSpendComparisonRows(true, eligible)
-	monitoring.RecordShadowSpendComparisonRows(false, ineligible)
+	monitoring.RecordSpendDuplicates(uint64(duplicateCount))
+	monitoring.RecordSpendComparisonRows(true, eligible)
+	monitoring.RecordSpendComparisonRows(false, ineligible)
 }
 
 func (sl *Logger) recordAggregationError() {
 	atomic.AddUint64(&sl.aggregationErrors, 1)
-	monitoring.RecordShadowSpendAggregationErrors(1)
+	monitoring.RecordSpendAggregationErrors(1)
 	sl.publishSnapshot()
 }
 

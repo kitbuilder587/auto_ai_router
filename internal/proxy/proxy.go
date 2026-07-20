@@ -34,7 +34,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -150,8 +150,8 @@ type Config struct {
 	Commit                           string
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration (optional)
 	KafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	SpendLogger                      shadowspend.Sink           // Isolated shadow spend writer
-	SpendAPIBase                     string                     // Client-facing AIR base stored in shadow rows
+	SpendLogger                      spendsink.Sink           // Isolated spend writer
+	SpendAPIBase                     string                     // Client-facing AIR base stored in spend rows
 	ShadowContextVerifier            *shadowcontext.Verifier    // Signed LiteLLM shadow identity receiver
 	HealthChecker                    HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
@@ -185,8 +185,8 @@ type Proxy struct {
 	modelManager                     *models.Manager            // Model manager for getting configured models
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
 	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	spendLogger                      shadowspend.Sink           // Isolated shadow spend writer
-	spendAPIBase                     string                     // Client-facing AIR base stored in shadow rows
+	spendLogger                      spendsink.Sink           // Isolated spend writer
+	spendAPIBase                     string                     // Client-facing AIR base stored in spend rows
 	shadowContextVerifier            *shadowcontext.Verifier    // Signed LiteLLM shadow identity receiver
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
@@ -244,11 +244,11 @@ func New(cfg *Config) *Proxy {
 	}
 	spendLogger := cfg.SpendLogger
 	if spendLogger == nil {
-		spendLogger = shadowspend.NewDisabledSink("not configured")
+		spendLogger = spendsink.NewDisabledSink("not configured")
 	}
 	spendAPIBase := cfg.SpendAPIBase
 	if spendAPIBase == "" {
-		spendAPIBase = config.ShadowSpendAPIBase
+		spendAPIBase = config.SpendAPIBase
 	}
 
 	return &Proxy{
@@ -511,7 +511,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Log request only if we have a credential (successful auth path)
 			// For auth/credential selection errors, log directly at the error point instead
 			if logCtx.Credential != nil {
-				if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
+				if err := p.finalizeDeferredSpend(logCtx); err != nil {
 					p.logger.WarnContext(r.Context(), "Spend log dropped after deferred replay attempt",
 						"error", err,
 						"request_id", requestID,
@@ -737,7 +737,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
 			logCtx.TargetURL = cred.BaseURL
-			commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+			commitResult, err := p.commitSpendBeforeResponse(r.Context(), w.Header(), logCtx)
 			if err != nil {
 				p.logger.WarnContext(r.Context(), "Failed to commit proxy transport failure spend before response",
 					"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
@@ -967,7 +967,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if proxyResp.StatusCode >= 400 {
 				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
 			}
-			commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+			commitResult, err := p.commitSpendBeforeResponse(r.Context(), w.Header(), logCtx)
 			if err != nil {
 				p.logger.WarnContext(r.Context(), "Failed to commit proxy spend before response",
 					"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
@@ -1430,7 +1430,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
 		logCtx.TargetURL = targetURL
-		commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+		commitResult, err := p.commitSpendBeforeResponse(r.Context(), w.Header(), logCtx)
 		if err != nil {
 			p.logger.WarnContext(r.Context(), "Failed to commit provider transport failure spend before response",
 				"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)
@@ -1632,7 +1632,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
 			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
-		commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx)
+		commitResult, err := p.commitSpendBeforeResponse(r.Context(), w.Header(), logCtx)
 		if err != nil {
 			p.logger.WarnContext(r.Context(), "Failed to commit spend log before response",
 				"error", err, "replay_outcome", commitResult.Disposition, "request_id", logCtx.RequestID)

@@ -340,7 +340,7 @@ func (p *Proxy) writeFallbackResponse(
 				logCtx.TokenUsage = streamUsage
 			}
 			if logCtx != nil && !logCtx.Logged {
-				if queueErr := p.finalizeDeferredShadowSpend(logCtx); queueErr != nil {
+				if queueErr := p.finalizeDeferredSpend(logCtx); queueErr != nil {
 					p.logger.WarnContext(r.Context(), "Failed to queue fallback stream failure spend log",
 						"error", queueErr,
 						"request_id", logCtx.RequestID,
@@ -407,14 +407,14 @@ func (p *Proxy) writeFallbackResponse(
 			logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
 		}
 		if proxyResp.IsStreaming {
-			if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
+			if err := p.finalizeDeferredSpend(logCtx); err != nil {
 				p.logger.WarnContext(r.Context(), "Failed to queue fallback spend log",
 					"error", err,
 					"request_id", logCtx.RequestID,
 					"fallback_credential", fallbackCred.Name,
 				)
 			}
-		} else if commitResult, err := p.commitShadowSpendBeforeResponse(r.Context(), w.Header(), logCtx); err != nil {
+		} else if commitResult, err := p.commitSpendBeforeResponse(r.Context(), w.Header(), logCtx); err != nil {
 			p.logger.WarnContext(r.Context(), "Failed to commit fallback spend before response",
 				"error", err,
 				"replay_outcome", commitResult.Disposition,

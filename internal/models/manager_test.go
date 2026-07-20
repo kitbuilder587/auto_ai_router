@@ -108,6 +108,59 @@ func TestGetAllModelsScoped_ProjectsExplicitClientSurfaceAfterVisibility(t *test
 	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsWithAccessGroupsScoped(visibility)))
 }
 
+func TestGetAllModelsWithAccessGroupsScoped_FiltersAliasesByScope(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{
+		{Name: "team-a-model", Credential: "team-a-cred"},
+		{Name: "team-b-model", Credential: "team-b-cred"},
+	})
+	credentials := []config.CredentialConfig{
+		{Name: "team-a-cred", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-a"}},
+		{Name: "team-b-cred", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-b"}},
+	}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+	manager.SetModelAliases(map[string]string{
+		"team-a-alias": "team-a-model",
+		"team-b-alias": "team-b-model",
+	})
+	manager.SetPublicModelAliases(map[string]string{
+		"team-a-public": "team-a-model",
+		"team-b-public": "team-b-model",
+	})
+
+	visibility := scope.NewContext([]string{"team-a"}, nil)
+	ids := responseModelIDs(manager.GetAllModelsWithAccessGroupsScoped(visibility))
+
+	// Aliases inherit the scope visibility of their target: a team-a key must
+	// not discover team-b models through either alias mechanism.
+	assert.Equal(t, []string{"openai/team-a-model", "team-a-alias", "team-a-public"}, ids)
+}
+
+func TestSetClientModelIDsInvalidatesScopedCatalogCache(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{
+		{Name: "backend-a", Credential: "team-a"},
+	})
+	credentials := []config.CredentialConfig{
+		{Name: "team-a", Type: config.ProviderTypeOpenAI},
+	}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
+	manager.SetModelAliases(map[string]string{
+		"public/a": "backend-a",
+	})
+
+	before := responseModelIDs(manager.GetAllModelsScoped(scope.AdminContext()))
+	assert.Equal(t, []string{"backend-a", "public/a"}, before)
+
+	// The setter must purge the scoped discovery cache as well, otherwise the
+	// pre-boundary catalog keeps being served for the cache TTL.
+	manager.SetClientModelIDs([]string{"public/a"})
+	after := responseModelIDs(manager.GetAllModelsScoped(scope.AdminContext()))
+	assert.Equal(t, []string{"public/a"}, after)
+}
+
 func TestGetAllModelsScoped_AdminExcludesCredentialsWithoutRoute(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	staticModels := []config.ModelRPMConfig{{Name: "blocked-model", Credential: "proxy"}}
@@ -696,6 +749,33 @@ func TestGetCredentialsForModel(t *testing.T) {
 	// Test non-existing model
 	creds3 := manager.GetCredentialsForModel("non-existing-model")
 	assert.Nil(t, creds3)
+}
+
+func TestGetAliasesForModel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Same provider-facing model exposed under three route aliases, mirroring
+	// config.yaml.example's "Comet API Claude aliases for public model names".
+	staticModels := []config.ModelRPMConfig{
+		{Name: "anthropic/claude-haiku-4.5", Model: "claude-haiku-4-5-20251001", Credential: "comet"},
+		{Name: "claude-haiku-4.5", Model: "claude-haiku-4-5-20251001", Credential: "comet"},
+		{Name: "claude-haiku-4-5-20251001", Credential: "comet"},
+		{Name: "gpt-4o", Credential: "openai"},
+	}
+	manager := New(logger, 100, staticModels)
+	credentials := []config.CredentialConfig{{Name: "comet"}, {Name: "openai"}}
+	manager.LoadModelsFromConfig(credentials)
+
+	aliases := manager.GetAliasesForModel("claude-haiku-4.5", "claude-haiku-4-5-20251001")
+	assert.ElementsMatch(t, []string{"claude-haiku-4.5", "anthropic/claude-haiku-4.5", "claude-haiku-4-5-20251001"}, aliases)
+
+	// A model with no other aliases just returns itself.
+	aliases2 := manager.GetAliasesForModel("gpt-4o", "gpt-4o")
+	assert.Equal(t, []string{"gpt-4o"}, aliases2)
+
+	// Empty realModelID (e.g. no alias configured) - no lookup possible, returns modelID only.
+	aliases3 := manager.GetAliasesForModel("unknown-model", "")
+	assert.Equal(t, []string{"unknown-model"}, aliases3)
 }
 
 func TestHasModel(t *testing.T) {

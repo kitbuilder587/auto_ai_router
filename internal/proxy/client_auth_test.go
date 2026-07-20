@@ -159,7 +159,7 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
 	prx.modelManager.SetClientModelIDs([]string{"public/chat", "public/embed"})
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	rejected := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
@@ -202,11 +202,11 @@ func TestDirectAIRConsumesRequestTagsBeforeProviderWhileRetainingSpendTags(t *te
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
-		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"tags":["local-shadow","chat"],"user":"end-user"}`,
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"tags":["local-spend","chat"],"user":"end-user"}`,
 	))
 	req.Header.Set("Authorization", "Bearer tagged-key")
 	req.Header.Set("Content-Type", "application/json")
@@ -220,7 +220,7 @@ func TestDirectAIRConsumesRequestTagsBeforeProviderWhileRetainingSpendTags(t *te
 	assert.Equal(t, "end-user", providerBody["user"], "ordinary provider fields must remain untouched")
 	entries := sink.Entries()
 	require.Len(t, entries, 1)
-	assert.JSONEq(t, `["identity-tag","local-shadow","chat"]`, entries[0].RequestTags)
+	assert.JSONEq(t, `["identity-tag","local-spend","chat"]`, entries[0].RequestTags)
 }
 
 func TestProxyCredentialPreservesRequestTagsForTheNextPolicyHop(t *testing.T) {
@@ -239,11 +239,11 @@ func TestProxyCredentialPreservesRequestTagsForTheNextPolicyHop(t *testing.T) {
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeProxy, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
-		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"tags":["local-shadow","chat"]}`,
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"tags":["local-spend","chat"]}`,
 	))
 	req.Header.Set("Authorization", "Bearer tagged-key")
 	req.Header.Set("Content-Type", "application/json")
@@ -253,10 +253,10 @@ func TestProxyCredentialPreservesRequestTagsForTheNextPolicyHop(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.NotNil(t, providerBody)
-	assert.Equal(t, []any{"local-shadow", "chat"}, providerBody["tags"])
+	assert.Equal(t, []any{"local-spend", "chat"}, providerBody["tags"])
 	entries := sink.Entries()
 	require.Len(t, entries, 1)
-	assert.JSONEq(t, `["identity-tag","local-shadow","chat"]`, entries[0].RequestTags)
+	assert.JSONEq(t, `["identity-tag","local-spend","chat"]`, entries[0].RequestTags)
 }
 
 func TestExplicitClientModelSurfacePreservesRestrictedACLPrecedenceForUnknownModel(t *testing.T) {
@@ -473,7 +473,7 @@ func TestManagementOnlyVirtualKeyCannotReachInferenceOrSpendWriter(t *testing.T)
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(

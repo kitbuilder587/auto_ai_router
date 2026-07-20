@@ -17,7 +17,7 @@ import (
 // reflects broker connectivity independently, see
 // auto_ai_router_kafka_spend_log_tz.md section 6) — but the returned error is
 // still surfaced to the caller so a queue-full failure can be flagged on the
-// request's shadow Postgres row for later re-send, instead of being silently
+// request's spend Postgres row for later re-send, instead of being silently
 // dropped.
 func (p *Proxy) logSpendToKafka(
 	logCtx *RequestLogContext,
@@ -132,9 +132,9 @@ func parseShadowKafkaMetadata(entry *litellmdb.SpendLogEntry) (converter.TokenUs
 	}
 }
 
-// publishKafkaSpendCopy projects the already-finalized shadow SpendLog entry
+// publishKafkaSpendCopy projects the already-finalized SpendLog entry
 // into Kafka exactly once. Kafka remains best-effort and independent from the
-// authoritative shadow writer; a failed enqueue is recorded on the same
+// authoritative spend writer; a failed enqueue is recorded on the same
 // Postgres row's metadata before that row is queued or committed.
 func (p *Proxy) publishKafkaSpendCopy(logCtx *RequestLogContext, entry *litellmdb.SpendLogEntry) error {
 	if logCtx == nil || entry == nil || p.kafkaLog == nil || !p.kafkaLog.IsEnabled() || logCtx.kafkaSpendAttempted {
@@ -216,7 +216,7 @@ func (p *Proxy) publishKafkaSpendCopy(logCtx *RequestLogContext, entry *litellmd
 			reason = "queue_full"
 		}
 		if annotationErr := annotateKafkaFallback(entry, reason); annotationErr != nil {
-			p.logger.WarnContext(logCtx.Context(), "Failed to annotate Kafka fallback on shadow spend entry",
+			p.logger.WarnContext(logCtx.Context(), "Failed to annotate Kafka fallback on spend entry",
 				"error", annotationErr,
 				"request_id", entry.RequestID,
 			)

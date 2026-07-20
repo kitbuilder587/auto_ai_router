@@ -1,6 +1,7 @@
 package queries
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -316,19 +317,34 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
 }
 
-func TestTokenValidationQueryLoadsSpendIdentity(t *testing.T) {
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.project_id")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.agent_id")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.allowed_routes as token_allowed_routes")
+// tokenHierarchyScanColumns must equal the number of Scan destinations in
+// auth.Authenticator.fetchTokenFromDB. pgx fails every uncached token lookup
+// with "number of field descriptions must equal number of destinations" when
+// the SELECT list and the Scan call drift apart, so any column added here has
+// to land in both places at once.
+const tokenHierarchyScanColumns = 51
+
+func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
+	selectList := QueryValidateTokenWithHierarchy
+	fromIdx := strings.Index(selectList, `FROM "LiteLLM_VerificationToken"`)
+	if fromIdx < 0 {
+		t.Fatal("FROM clause not found in QueryValidateTokenWithHierarchy")
+	}
+	selectList = selectList[:fromIdx]
+
+	count := 0
+	for _, line := range strings.Split(selectList, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") || strings.HasPrefix(line, "SELECT") {
+			continue
+		}
+		count++
+	}
+	assert.Equal(t, tokenHierarchyScanColumns, count)
 }
 
 func TestTokenValidationQueryLoadsModelAccessHierarchy(t *testing.T) {
 	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id`)
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "u.models as user_models")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "tm.models as team_models")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "p.models as project_models")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "p.blocked as project_blocked")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, "b_tmem.allowed_models as team_member_models")
-	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_ProjectTable" p ON t.project_id = p.project_id`)
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.models as token_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
 }

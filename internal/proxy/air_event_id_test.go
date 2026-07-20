@@ -38,7 +38,7 @@ func TestAIREventIDBindsResponseUpstreamHopAndSpendLog(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			sink := &recordingShadowSpendSink{}
+			sink := &recordingSpendSink{}
 			prx := NewTestProxyBuilder().
 				WithSingleCredential("air-event", providerType, upstream.URL, "upstream-key").
 				Build()
@@ -87,7 +87,7 @@ func TestAIREventIDIsHopLocalAcrossAIRRelay(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	innerSink := &recordingShadowSpendSink{}
+	innerSink := &recordingSpendSink{}
 	inner := NewTestProxyBuilder().
 		WithSingleCredential("inner-provider", config.ProviderTypeOpenAI, provider.URL, "provider-key").
 		Build()
@@ -100,7 +100,7 @@ func TestAIREventIDIsHopLocalAcrossAIRRelay(t *testing.T) {
 	}))
 	defer innerServer.Close()
 
-	outerSink := &recordingShadowSpendSink{}
+	outerSink := &recordingSpendSink{}
 	outer := NewTestProxyBuilder().
 		WithSingleCredential("inner-air", config.ProviderTypeProxy, innerServer.URL, "master-key").
 		Build()
@@ -158,7 +158,7 @@ func TestAIREventIDIsStableAcrossProviderRetries(t *testing.T) {
 		{Name: "event-retry-1", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "key-1", RPM: 100, TPM: 10000},
 		{Name: "event-retry-2", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "key-2", RPM: 100, TPM: 10000},
 	}
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx := NewTestProxyBuilder().
 		WithCredentials(credentials...).
 		WithMaxProviderRetries(1).
@@ -206,7 +206,7 @@ func TestConcurrentRequestsReceiveUniqueAIREventIDs(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx := NewTestProxyBuilder().
 		WithSingleCredential("event-concurrent", config.ProviderTypeOpenAI, upstream.URL, "upstream-key").
 		Build()

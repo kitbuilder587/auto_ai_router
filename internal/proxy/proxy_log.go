@@ -158,17 +158,17 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
-func (p *Proxy) finalizeDeferredShadowSpend(logCtx *RequestLogContext) error {
+func (p *Proxy) finalizeDeferredSpend(logCtx *RequestLogContext) error {
 	if logCtx == nil {
 		return nil
 	}
 	entry := logCtx.pendingSpendEntry
 	if entry == nil {
-		entry = p.buildShadowSpendEntry(logCtx)
+		entry = p.buildSpendEntry(logCtx)
 		logCtx.pendingSpendEntry = entry
 	}
 	_ = p.publishKafkaSpendCopy(logCtx, entry)
-	if err := p.queueShadowSpendEntry(entry); err != nil {
+	if err := p.queueSpendEntry(entry); err != nil {
 		return err
 	}
 	logCtx.pendingSpendEntry = nil
@@ -176,7 +176,7 @@ func (p *Proxy) finalizeDeferredShadowSpend(logCtx *RequestLogContext) error {
 	return nil
 }
 
-func (p *Proxy) queueShadowSpendEntry(entry *litellmdb.SpendLogEntry) error {
+func (p *Proxy) queueSpendEntry(entry *litellmdb.SpendLogEntry) error {
 	if entry == nil || p.spendLogger == nil || !p.spendLogger.IsEnabled() {
 		return nil
 	}
@@ -187,13 +187,13 @@ func (p *Proxy) queueShadowSpendEntry(entry *litellmdb.SpendLogEntry) error {
 // response headers can be written. It intentionally ignores the auth cache:
 // cached TokenInfo may be stale or may describe AIR's master key on a signed
 // LiteLLM -> AIR request.
-const shadowSpendResponseBudget = 2 * time.Second
+const spendResponseBudget = 2 * time.Second
 
-func boundedShadowSpendContext(parent context.Context) (context.Context, context.CancelFunc) {
+func boundedSpendContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	return context.WithTimeout(parent, shadowSpendResponseBudget)
+	return context.WithTimeout(parent, spendResponseBudget)
 }
 
 func (p *Proxy) setCommittedKeySpendSnapshot(ctx context.Context, headers http.Header, logCtx *RequestLogContext) {
@@ -207,7 +207,7 @@ func (p *Proxy) setCommittedKeySpendSnapshot(ctx context.Context, headers http.H
 		return
 	}
 
-	dbCtx, cancel := boundedShadowSpendContext(ctx)
+	dbCtx, cancel := boundedSpendContext(ctx)
 	defer cancel()
 	spend, known, err := p.spendLogger.ReadKeySpend(dbCtx, apiKeyHash)
 	if err != nil {
@@ -241,26 +241,26 @@ func setKeySpendHeaderFromSnapshot(headers http.Header, logCtx *RequestLogContex
 	)
 }
 
-type shadowSpendCommitDisposition string
+type spendCommitDisposition string
 
 const (
-	shadowSpendCommitSkipped       shadowSpendCommitDisposition = "skipped"
-	shadowSpendCommitted           shadowSpendCommitDisposition = "committed"
-	shadowSpendReplayQueued        shadowSpendCommitDisposition = "replay_queued"
-	shadowSpendReplayEnqueueFailed shadowSpendCommitDisposition = "replay_enqueue_failed"
+	spendCommitSkipped       spendCommitDisposition = "skipped"
+	spendCommitted           spendCommitDisposition = "committed"
+	spendReplayQueued        spendCommitDisposition = "replay_queued"
+	spendReplayEnqueueFailed spendCommitDisposition = "replay_enqueue_failed"
 )
 
-type shadowSpendCommitResult struct {
-	Disposition shadowSpendCommitDisposition
+type spendCommitResult struct {
+	Disposition spendCommitDisposition
 }
 
-// commitShadowSpendBeforeResponse synchronously commits one non-stream spend
+// commitSpendBeforeResponse synchronously commits one non-stream spend
 // effect and publishes the inclusive key total only after PostgreSQL has
 // acknowledged the transaction. If the logger retains an ambiguous attempt for
 // exact idempotent replay, only a known pre-request PostgreSQL snapshot may be
 // reused; unclassified hard failures omit the header.
-func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers http.Header, logCtx *RequestLogContext) (shadowSpendCommitResult, error) {
-	entry := p.buildShadowSpendEntry(logCtx)
+func (p *Proxy) commitSpendBeforeResponse(ctx context.Context, headers http.Header, logCtx *RequestLogContext) (spendCommitResult, error) {
+	entry := p.buildSpendEntry(logCtx)
 	if entry != nil {
 		setLiteLLMResponseCostHeaderForRequest(headers, entry.Spend, logCtx)
 		_ = p.publishKafkaSpendCopy(logCtx, entry)
@@ -269,10 +269,10 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 		if logCtx != nil {
 			logCtx.Logged = true
 		}
-		return shadowSpendCommitResult{Disposition: shadowSpendCommitSkipped}, nil
+		return spendCommitResult{Disposition: spendCommitSkipped}, nil
 	}
 
-	dbCtx, cancel := boundedShadowSpendContext(ctx)
+	dbCtx, cancel := boundedSpendContext(ctx)
 	defer cancel()
 	result, err := p.spendLogger.CommitSpend(dbCtx, entry)
 	if err != nil {
@@ -289,7 +289,7 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 				logCtx.pendingSpendEntry = nil
 				logCtx.Logged = true
 			}
-			return shadowSpendCommitResult{Disposition: shadowSpendReplayQueued}, err
+			return spendCommitResult{Disposition: spendReplayQueued}, err
 		}
 		// Without lifecycle-owned exact retention, do not allow an earlier
 		// value to survive an unclassified hard failure.
@@ -297,15 +297,15 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 		if logCtx != nil {
 			logCtx.pendingSpendEntry = entry
 		}
-		queueErr := p.queueShadowSpendEntry(entry)
+		queueErr := p.queueSpendEntry(entry)
 		if queueErr == nil && logCtx != nil {
 			logCtx.pendingSpendEntry = nil
 			logCtx.Logged = true
 		}
 		if queueErr != nil {
-			return shadowSpendCommitResult{Disposition: shadowSpendReplayEnqueueFailed}, errors.Join(err, queueErr)
+			return spendCommitResult{Disposition: spendReplayEnqueueFailed}, errors.Join(err, queueErr)
 		}
-		return shadowSpendCommitResult{Disposition: shadowSpendReplayQueued}, err
+		return spendCommitResult{Disposition: spendReplayQueued}, err
 	}
 
 	if logCtx != nil {
@@ -319,10 +319,10 @@ func (p *Proxy) commitShadowSpendBeforeResponse(ctx context.Context, headers htt
 		logCtx.pendingSpendEntry = nil
 		logCtx.Logged = true
 	}
-	return shadowSpendCommitResult{Disposition: shadowSpendCommitted}, nil
+	return spendCommitResult{Disposition: spendCommitted}, nil
 }
 
-func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.SpendLogEntry {
+func (p *Proxy) buildSpendEntry(logCtx *RequestLogContext) *litellmdb.SpendLogEntry {
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
 		return nil
 	}
@@ -412,7 +412,7 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 		cost = tokenCosts.TotalCost
 	}
 	if priceStatus != "found" {
-		p.logger.WarnContext(logCtx.Context(), "Shadow spend row has no price",
+		p.logger.WarnContext(logCtx.Context(), "Spend row has no price",
 			"price_status", priceStatus,
 			"model", priceModel,
 		)
@@ -421,10 +421,10 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 		// column from a legitimately free/cache-hit row. Surface it as an
 		// explicit metric so a paid model without a price is never a silent zero.
 		if status == "success" && usage.Total() > 0 {
-			monitoring.ShadowSpendPriceMissingTotal.WithLabelValues(priceStatus).Inc()
+			monitoring.SpendPriceMissingTotal.WithLabelValues(priceStatus).Inc()
 		}
 	} else if costStatus != "calculated" {
-		p.logger.WarnContext(logCtx.Context(), "Shadow spend row cost cannot be calculated",
+		p.logger.WarnContext(logCtx.Context(), "Spend row cost cannot be calculated",
 			"cost_status", costStatus,
 			"usage_source", usageSource,
 			"model", resolvedPriceModel,
@@ -486,7 +486,7 @@ func (p *Proxy) buildShadowSpendEntry(logCtx *RequestLogContext) *litellmdb.Spen
 	}
 	apiBase := p.spendAPIBase
 	if apiBase == "" {
-		apiBase = config.ShadowSpendAPIBase
+		apiBase = config.SpendAPIBase
 	}
 	var completionStartTime *time.Time
 	if !logCtx.CompletionStartTime.IsZero() {
