@@ -699,3 +699,26 @@ func TestAuthenticator_CacheHitRate(t *testing.T) {
 	assert.Greater(t, stats.HitRate, 0.0)
 	assert.LessOrEqual(t, stats.HitRate, 100.0)
 }
+
+func TestFetchMasterKey_ConfigKeyCachedWhenDBUnavailable(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	require.NoError(t, auth.FetchMasterKey(context.Background(), "sk-config-master"))
+
+	info, ok := cache.Get(HashToken("sk-config-master"))
+	require.True(t, ok)
+	assert.Equal(t, "litellm-master-key", info.UserID)
+	assert.Equal(t, "litellm-master-key", info.KeyName)
+}
+
+func TestFetchMasterKey_EmptyConfigAndNoDB(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	assert.ErrorIs(t, auth.FetchMasterKey(context.Background(), ""), models.ErrTokenNotFound)
+	_, ok := cache.Get(HashToken(""))
+	assert.False(t, ok)
+}
