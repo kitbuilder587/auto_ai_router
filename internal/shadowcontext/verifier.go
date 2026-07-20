@@ -128,7 +128,7 @@ type Verifier struct {
 	now      func() time.Time
 }
 
-func NewVerifier(cfg config.ShadowAuthContextConfig) (*Verifier, error) {
+func NewVerifier(cfg config.SignedAuthContextConfig) (*Verifier, error) {
 	keys := make(map[string]ed25519.PublicKey, len(cfg.PublicKeys))
 	for kid, encoded := range cfg.PublicKeys {
 		if strings.TrimSpace(kid) == "" {

@@ -242,7 +242,7 @@ func TestResolveUsesSignedOrSuppliedCallIDAndRejectsMismatch(t *testing.T) {
 
 func newTestVerifier(t *testing.T, publicKey ed25519.PublicKey, now time.Time) *Verifier {
 	t.Helper()
-	verifier, err := NewVerifier(config.ShadowAuthContextConfig{
+	verifier, err := NewVerifier(config.SignedAuthContextConfig{
 		Issuer:          "litellm",
 		Audience:        "air-ru01",
 		PublicKeys:      map[string]string{"key-1": base64.RawURLEncoding.EncodeToString(publicKey)},

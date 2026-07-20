@@ -19,7 +19,7 @@ import (
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -162,7 +162,7 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
 	prx.modelManager.SetClientModelIDs([]string{"public/chat", "public/embed"})
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	rejected := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
@@ -189,7 +189,7 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 	assert.Equal(t, int32(1), providerCalls.Load(), "master-key internal routing must remain available")
 }
 
-func TestDirectModeRejectsMissingPriceBeforeProviderAndSpend(t *testing.T) {
+func TestSpendWriterRejectsMissingPriceBeforeProviderAndSpend(t *testing.T) {
 	var providerCalls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		providerCalls.Add(1)
@@ -202,9 +202,9 @@ func TestDirectModeRejectsMissingPriceBeforeProviderAndSpend(t *testing.T) {
 		"direct-key": {Token: "direct-key-hash"},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
-	prx.spendLogMode = config.SpendLogModeDirect
+	prx.spendLoggingRequired = true
 	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
 	prx.budgetReservationEnabled = true
 	prx.keyRateLimiter = prx.rateLimiter
@@ -229,7 +229,7 @@ func TestDirectModeRejectsMissingPriceBeforeProviderAndSpend(t *testing.T) {
 	assert.Empty(t, sink.Entries(), "unpriced direct request created a spend side effect")
 }
 
-func TestDirectModeRejectsMissingDeploymentIdentityBeforeProviderAndSpend(t *testing.T) {
+func TestSpendWriterRejectsMissingDeploymentIdentityBeforeProviderAndSpend(t *testing.T) {
 	var providerCalls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		providerCalls.Add(1)
@@ -242,9 +242,9 @@ func TestDirectModeRejectsMissingDeploymentIdentityBeforeProviderAndSpend(t *tes
 		"direct-key": {Token: "direct-key-hash"},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
-	prx.spendLogMode = config.SpendLogModeDirect
+	prx.spendLoggingRequired = true
 	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
 	prx.budgetReservationEnabled = true
 	prx.keyRateLimiter = prx.rateLimiter
@@ -269,7 +269,7 @@ func TestDirectModeRejectsMissingDeploymentIdentityBeforeProviderAndSpend(t *tes
 	assert.Empty(t, sink.Entries(), "identity-less direct request created a spend side effect")
 }
 
-func TestDirectModeReadinessFailsClosedOnRuntimeDependencyLoss(t *testing.T) {
+func TestSpendWriterReadinessFailsClosedOnRuntimeDependencyLoss(t *testing.T) {
 	prx := newClientAuthTestProxy(
 		t,
 		&clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{}},
@@ -277,8 +277,8 @@ func TestDirectModeReadinessFailsClosedOnRuntimeDependencyLoss(t *testing.T) {
 		config.ProviderTypeOpenAI,
 		"provider-key",
 	)
-	prx.spendLogMode = config.SpendLogModeDirect
-	prx.spendLogger = &recordingShadowSpendSink{}
+	prx.spendLoggingRequired = true
+	prx.spendLogger = &recordingSpendSink{}
 	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
 	prx.budgetReservationEnabled = true
 	prx.keyRateLimiter = prx.rateLimiter
@@ -293,7 +293,7 @@ func TestDirectModeReadinessFailsClosedOnRuntimeDependencyLoss(t *testing.T) {
 	prx.enforcementHealth = func(context.Context) bool { return false }
 	assert.False(t, prx.IsReadyForTraffic(context.Background()), "Redis loss must remove direct readiness")
 	prx.enforcementHealth = func(context.Context) bool { return true }
-	prx.spendLogger = shadowspend.NewDisabledSink("database lost")
+	prx.spendLogger = spendsink.NewNoopSink("database lost")
 	assert.False(t, prx.IsReadyForTraffic(context.Background()), "spend DB loss must remove direct readiness")
 }
 
@@ -313,7 +313,7 @@ func TestDirectAIRConsumesRequestTagsBeforeProviderWhileRetainingSpendTags(t *te
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
@@ -350,7 +350,7 @@ func TestProxyCredentialPreservesRequestTagsForTheNextPolicyHop(t *testing.T) {
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeProxy, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
@@ -584,7 +584,7 @@ func TestManagementOnlyVirtualKeyCannotReachInferenceOrSpendWriter(t *testing.T)
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(

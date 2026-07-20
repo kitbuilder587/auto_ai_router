@@ -10,7 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,9 +98,9 @@ func TestSplitCredentialModel(t *testing.T) {
 	}
 }
 
-func TestInitializeShadowSpendSinkDisabledDoesNotCreateWriter(t *testing.T) {
+func TestInitializeSpendSinkDisabledDoesNotCreateWriter(t *testing.T) {
 	cfg := &config.Config{SpendLog: config.SpendLogConfig{}}
-	sink := initializeShadowSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
+	sink := initializeSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
 
 	assert.False(t, sink.IsEnabled())
 	assert.NoError(t, sink.LogSpend(nil))
@@ -136,24 +136,13 @@ func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *test
 	}
 }
 
-func TestInitializeShadowSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
+func TestResolveConfiguredSpendSinkConnectionFailureFailsClosed(t *testing.T) {
 	cfg := &config.Config{SpendLog: config.SpendLogConfig{
-		Mode:                 config.SpendLogModeShadow,
-		DatabaseURL:          "postgres://%zz",
+		DatabaseURL:          "postgres://localhost/test-db",
 		ExpectedDatabaseName: "test-db",
+		ConnectTimeout:       time.Second,
 	}}
-	sink := initializeShadowSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
-
-	assert.False(t, sink.IsEnabled())
-	assert.NoError(t, sink.LogSpend(nil))
-}
-
-func TestResolveSpendSinkDirectConnectionFailureFailsClosed(t *testing.T) {
-	cfg := &config.Config{SpendLog: config.SpendLogConfig{
-		Mode:           config.SpendLogModeDirect,
-		ConnectTimeout: time.Second,
-	}}
-	factory := func(context.Context, config.SpendLogConfig, *slog.Logger) (shadowspend.Sink, error) {
+	factory := func(context.Context, config.SpendLogConfig, *slog.Logger) (spendsink.Sink, error) {
 		return nil, errors.New("database unavailable")
 	}
 
@@ -162,7 +151,7 @@ func TestResolveSpendSinkDirectConnectionFailureFailsClosed(t *testing.T) {
 	)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "required direct spend sink")
+	assert.Contains(t, err.Error(), "required spend sink")
 	assert.Nil(t, sink)
 }
 

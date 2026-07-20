@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -802,20 +803,11 @@ type KafkaConfig struct {
 	SASLPassword  string `yaml:"sasl_password,omitempty"`
 }
 
-// SpendLogMode controls whether the isolated LiteLLM-compatible writer is
-// disabled, diagnostic-only, or authoritative for direct client traffic.
-type SpendLogMode string
+const SpendAPIBase = "http://air-ru01/v1"
 
-const (
-	SpendLogModeDisabled SpendLogMode = "disabled"
-	SpendLogModeShadow   SpendLogMode = "shadow"
-	SpendLogModeDirect   SpendLogMode = "direct"
-	ShadowSpendAPIBase                = "http://air-ru01/v1"
-)
-
-// ShadowAuthContextConfig configures verification of x-vsellm-auth-context.
+// SignedAuthContextConfig configures verification of x-vsellm-auth-context.
 // PublicKeys maps a JWS kid to a base64/base64url encoded Ed25519 public key.
-type ShadowAuthContextConfig struct {
+type SignedAuthContextConfig struct {
 	Issuer          string            `yaml:"issuer"`
 	Audience        string            `yaml:"audience"`
 	PublicKeys      map[string]string `yaml:"public_keys"`
@@ -826,7 +818,6 @@ type ShadowAuthContextConfig struct {
 // SpendLogConfig owns a database connection that is independent from the
 // LiteLLM control-plane/auth connection.
 type SpendLogConfig struct {
-	Mode                 SpendLogMode            `yaml:"mode"`
 	DatabaseURL          string                  `yaml:"database_url"`
 	ExpectedDatabaseName string                  `yaml:"expected_database_name"`
 	APIBase              string                  `yaml:"api_base"`
@@ -837,13 +828,12 @@ type SpendLogConfig struct {
 	LogQueueSize         int                     `yaml:"log_queue_size"`
 	LogBatchSize         int                     `yaml:"log_batch_size"`
 	LogFlushInterval     time.Duration           `yaml:"log_flush_interval"`
-	AuthContext          ShadowAuthContextConfig `yaml:"auth_context"`
+	AuthContext          SignedAuthContextConfig `yaml:"auth_context"`
 }
 
 // IsEnabled reports whether an isolated spend destination is configured.
 func (s SpendLogConfig) IsEnabled() bool {
-	return s.Mode == SpendLogModeShadow || s.Mode == SpendLogModeDirect ||
-		(s.Mode == "" && strings.TrimSpace(s.DatabaseURL) != "")
+	return strings.TrimSpace(s.DatabaseURL) != "" || strings.TrimSpace(s.ExpectedDatabaseName) != ""
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1102,7 +1092,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// UnmarshalYAML resolves environment-backed shadow-writer settings and applies
+// UnmarshalYAML resolves environment-backed spend-writer settings and applies
 // safe defaults even when only part of spend_log is configured.
 func (s *SpendLogConfig) UnmarshalYAML(value *yaml.Node) error {
 	type rawAuthContext struct {
@@ -1131,20 +1121,13 @@ func (s *SpendLogConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
+	if strings.TrimSpace(resolveEnvString(raw.Mode)) != "" {
+		return errors.New("spend_log.mode has been removed; configure spend_log.database_url directly")
+	}
 
 	defaults := defaultSpendLogConfig()
-	s.Mode = SpendLogMode(strings.ToLower(strings.TrimSpace(resolveEnvString(raw.Mode))))
 	s.DatabaseURL = resolveEnvString(raw.DatabaseURL)
 	s.ExpectedDatabaseName = resolveEnvString(raw.ExpectedDatabaseName)
-	if s.Mode == "" {
-		// Preserve the pre-mode configuration contract: a configured destination
-		// was the old spelling of shadow mode. A fully omitted block is disabled.
-		if s.DatabaseURL != "" || s.ExpectedDatabaseName != "" {
-			s.Mode = SpendLogModeShadow
-		} else {
-			s.Mode = defaults.Mode
-		}
-	}
 	s.APIBase = resolveEnvString(raw.APIBase)
 	if s.APIBase == "" {
 		s.APIBase = defaults.APIBase
@@ -1482,8 +1465,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 
 func defaultSpendLogConfig() SpendLogConfig {
 	return SpendLogConfig{
-		Mode:                SpendLogModeDisabled,
-		APIBase:             ShadowSpendAPIBase,
+		APIBase:             SpendAPIBase,
 		MaxConns:            10,
 		MinConns:            2,
 		HealthCheckInterval: 10 * time.Second,
@@ -1491,7 +1473,7 @@ func defaultSpendLogConfig() SpendLogConfig {
 		LogQueueSize:        5000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
-		AuthContext: ShadowAuthContextConfig{
+		AuthContext: SignedAuthContextConfig{
 			PublicKeys:      map[string]string{},
 			ClockSkew:       30 * time.Second,
 			ReplayCacheSize: 10000,
@@ -1791,27 +1773,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.SpendLog.Mode == "" {
-		if c.SpendLog.DatabaseURL != "" || c.SpendLog.ExpectedDatabaseName != "" {
-			c.SpendLog.Mode = SpendLogModeShadow
-		} else {
-			c.SpendLog.Mode = SpendLogModeDisabled
-		}
-	}
-	switch c.SpendLog.Mode {
-	case SpendLogModeDisabled:
-		if c.SpendLog.DatabaseURL != "" || c.SpendLog.ExpectedDatabaseName != "" {
-			return fmt.Errorf("spend_log destination must be empty in disabled mode")
-		}
-	case SpendLogModeShadow, SpendLogModeDirect:
+	if c.SpendLog.IsEnabled() {
 		if !strings.HasPrefix(c.SpendLog.DatabaseURL, "postgres://") && !strings.HasPrefix(c.SpendLog.DatabaseURL, "postgresql://") {
-			return fmt.Errorf("spend_log.database_url is required and must start with postgres:// or postgresql:// in %s mode", c.SpendLog.Mode)
+			return errors.New("spend_log.database_url is required and must start with postgres:// or postgresql://")
 		}
 		if c.SpendLog.ExpectedDatabaseName == "" {
-			return fmt.Errorf("spend_log.expected_database_name is required in %s mode", c.SpendLog.Mode)
+			return errors.New("spend_log.expected_database_name is required")
 		}
-		if c.SpendLog.APIBase != ShadowSpendAPIBase {
-			return fmt.Errorf("spend_log.api_base must be %s in %s mode", ShadowSpendAPIBase, c.SpendLog.Mode)
+		if c.SpendLog.APIBase != SpendAPIBase {
+			return fmt.Errorf("spend_log.api_base must be %s", SpendAPIBase)
 		}
 		if c.SpendLog.MaxConns <= 0 || c.SpendLog.MinConns < 0 || c.SpendLog.MinConns > c.SpendLog.MaxConns {
 			return fmt.Errorf("spend_log connection limits must satisfy max_conns > 0 and 0 <= min_conns <= max_conns")
@@ -1822,28 +1792,24 @@ func (c *Config) Validate() error {
 		if c.SpendLog.LogQueueSize <= 0 || c.SpendLog.LogBatchSize <= 0 || c.SpendLog.LogFlushInterval <= 0 {
 			return fmt.Errorf("spend_log queue size, batch size, and flush interval must be positive")
 		}
-		if c.SpendLog.Mode == SpendLogModeDirect {
-			if !c.LiteLLMDB.Enabled {
-				return fmt.Errorf("direct mode requires litellm_db.enabled=true")
-			}
-			if !c.LiteLLMDB.IsRequired {
-				return fmt.Errorf("direct mode requires litellm_db.is_required=true")
-			}
-			if !c.LiteLLMDB.LoadLitellmDBModels {
-				return fmt.Errorf("direct mode requires litellm_db.load_db_models=true")
-			}
-			if !c.LiteLLMDB.EnforceBudgetReservation {
-				return fmt.Errorf("direct mode requires litellm_db.enforce_budget_reservation=true")
-			}
-			if !c.LiteLLMDB.EnforceKeyRateLimits {
-				return fmt.Errorf("direct mode requires litellm_db.enforce_key_rate_limits=true")
-			}
-			if !c.Redis.Enabled {
-				return fmt.Errorf("direct mode requires redis.enabled=true for atomic budget and rate-limit enforcement")
-			}
+		if !c.LiteLLMDB.Enabled {
+			return errors.New("spend logging requires litellm_db.enabled=true")
 		}
-	default:
-		return fmt.Errorf("spend_log.mode must be disabled, shadow, or direct, got %q", c.SpendLog.Mode)
+		if !c.LiteLLMDB.IsRequired {
+			return errors.New("spend logging requires litellm_db.is_required=true")
+		}
+		if !c.LiteLLMDB.LoadLitellmDBModels {
+			return errors.New("spend logging requires litellm_db.load_db_models=true")
+		}
+		if !c.LiteLLMDB.EnforceBudgetReservation {
+			return errors.New("spend logging requires litellm_db.enforce_budget_reservation=true")
+		}
+		if !c.LiteLLMDB.EnforceKeyRateLimits {
+			return errors.New("spend logging requires litellm_db.enforce_key_rate_limits=true")
+		}
+		if !c.Redis.Enabled {
+			return errors.New("spend logging requires redis.enabled=true for atomic budget and rate-limit enforcement")
+		}
 	}
 
 	if c.Kafka.Enabled {

@@ -112,7 +112,7 @@ func proxyTestVerifier(t *testing.T) (*shadowcontext.Verifier, ed25519.PrivateKe
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
-	verifier, err := shadowcontext.NewVerifier(config.ShadowAuthContextConfig{
+	verifier, err := shadowcontext.NewVerifier(config.SignedAuthContextConfig{
 		Issuer:          "litellm",
 		Audience:        "air-ru01",
 		PublicKeys:      map[string]string{"key-1": base64.RawURLEncoding.EncodeToString(publicKey)},

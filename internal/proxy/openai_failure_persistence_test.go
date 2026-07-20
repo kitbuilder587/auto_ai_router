@@ -37,7 +37,7 @@ func TestExhaustedOpenAIChatRetriesPersistCompletionCallType(t *testing.T) {
 			TPM:     10000,
 		}
 	}
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	proxy := NewTestProxyBuilder().
 		WithCredentials(credentials...).
 		WithMaxProviderRetries(4).
@@ -68,7 +68,7 @@ func TestPreStreamOpenAI429PersistsCompletionCallType(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	proxy := NewTestProxyBuilder().
 		WithSingleCredential("openai-pre-stream", config.ProviderTypeOpenAI, upstream.URL, "upstream-key").
 		WithMaxProviderRetries(0).

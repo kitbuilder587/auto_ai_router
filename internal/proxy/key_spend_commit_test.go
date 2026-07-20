@@ -13,7 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	litellmdbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +45,7 @@ func (s *keySpendTestSink) LogSpend(entry *litellmdbmodels.SpendLogEntry) error 
 	return nil
 }
 
-func (s *keySpendTestSink) CommitSpend(ctx context.Context, entry *litellmdbmodels.SpendLogEntry) (shadowspend.CommitResult, error) {
+func (s *keySpendTestSink) CommitSpend(ctx context.Context, entry *litellmdbmodels.SpendLogEntry) (spendsink.CommitResult, error) {
 	*s.events = append(*s.events, "commit")
 	s.committed = append(s.committed, entry)
 	if deadline, ok := ctx.Deadline(); ok {
@@ -56,15 +56,15 @@ func (s *keySpendTestSink) CommitSpend(ctx context.Context, entry *litellmdbmode
 		if s.commitReplayRetained {
 			s.retained = append(s.retained, entry)
 		}
-		return shadowspend.CommitResult{ReplayRetained: s.commitReplayRetained}, ctx.Err()
+		return spendsink.CommitResult{ReplayRetained: s.commitReplayRetained}, ctx.Err()
 	}
 	if s.commitErr != nil {
 		if s.commitReplayRetained {
 			s.retained = append(s.retained, entry)
 		}
-		return shadowspend.CommitResult{ReplayRetained: s.commitReplayRetained}, s.commitErr
+		return spendsink.CommitResult{ReplayRetained: s.commitReplayRetained}, s.commitErr
 	}
-	return shadowspend.CommitResult{Inserted: true, EffectiveRequestID: entry.RequestID, KeySpend: s.commitSpend, KeySpendKnown: true}, nil
+	return spendsink.CommitResult{Inserted: true, EffectiveRequestID: entry.RequestID, KeySpend: s.commitSpend, KeySpendKnown: true}, nil
 }
 
 func (s *keySpendTestSink) ReadKeySpend(ctx context.Context, apiKeyHash string) (float64, bool, error) {
@@ -132,8 +132,8 @@ func TestProxyNonStreamCommitsSpendBeforeWritingResponse(t *testing.T) {
 			assert.Equal(t, litellmdb.HashToken("master-key"), sink.readKey)
 			assert.Equal(t, sink.readKey, sink.committed[0].APIKey)
 			assert.Empty(t, sink.replayed)
-			assertShadowSpendDeadline(t, sink.readDeadline)
-			assertShadowSpendDeadline(t, sink.commitDeadline)
+			assertSpendDeadline(t, sink.readDeadline)
+			assertSpendDeadline(t, sink.commitDeadline)
 		})
 	}
 }
@@ -309,35 +309,35 @@ func TestCommitAndReplayEnqueueFailureRemainTruthfullyUnlogged(t *testing.T) {
 	logCtx := newKeySpendCommitLogContext(req, cred)
 	headers := make(http.Header)
 
-	result, err := prx.commitShadowSpendBeforeResponse(context.Background(), headers, logCtx)
+	result, err := prx.commitSpendBeforeResponse(context.Background(), headers, logCtx)
 
 	require.Error(t, err)
-	assert.Equal(t, shadowSpendReplayEnqueueFailed, result.Disposition)
+	assert.Equal(t, spendReplayEnqueueFailed, result.Disposition)
 	assert.False(t, logCtx.Logged)
 	require.Len(t, sink.committed, 1)
 	assert.Same(t, sink.committed[0], logCtx.pendingSpendEntry)
 	assert.Empty(t, sink.replayed)
 	assert.Empty(t, headers.Get(liteLLMKeySpendHeader))
 
-	err = prx.finalizeDeferredShadowSpend(logCtx)
+	err = prx.finalizeDeferredSpend(logCtx)
 	require.Error(t, err)
 	assert.False(t, logCtx.Logged, "a rejected replay must not be reported as logged")
 	assert.Same(t, sink.committed[0], logCtx.pendingSpendEntry)
 
 	sink.logErr = nil
-	require.NoError(t, prx.finalizeDeferredShadowSpend(logCtx))
+	require.NoError(t, prx.finalizeDeferredSpend(logCtx))
 	assert.True(t, logCtx.Logged)
 	assert.Nil(t, logCtx.pendingSpendEntry)
 	require.Len(t, sink.replayed, 1)
 	assert.Same(t, sink.committed[0], sink.replayed[0])
 }
 
-func assertShadowSpendDeadline(t *testing.T, deadline time.Time) {
+func assertSpendDeadline(t *testing.T, deadline time.Time) {
 	t.Helper()
 	require.False(t, deadline.IsZero(), "response-path accounting must carry a dedicated deadline")
 	remaining := time.Until(deadline)
 	assert.Greater(t, remaining, time.Duration(0))
-	assert.LessOrEqual(t, remaining, shadowSpendResponseBudget)
+	assert.LessOrEqual(t, remaining, spendResponseBudget)
 }
 
 func newKeySpendCommitLogContext(req *http.Request, cred *config.CredentialConfig) *RequestLogContext {
@@ -363,7 +363,7 @@ func newKeySpendCommitLogContext(req *http.Request, cred *config.CredentialConfi
 	return logCtx
 }
 
-func newKeySpendCommitTestProxy(t *testing.T, sink shadowspend.Sink, providerType config.ProviderType) (*Proxy, *httptest.Server) {
+func newKeySpendCommitTestProxy(t *testing.T, sink spendsink.Sink, providerType config.ProviderType) (*Proxy, *httptest.Server) {
 	t.Helper()
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

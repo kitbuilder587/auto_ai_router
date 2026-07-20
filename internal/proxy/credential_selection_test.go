@@ -12,21 +12,21 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	litellmdbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/models"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/require"
 )
 
 const credentialSelectionKnownModel = "known-model"
 
-type recordingShadowSpendSink struct {
+type recordingSpendSink struct {
 	mu          sync.Mutex
 	entries     []*litellmdbmodels.SpendLogEntry
 	logCalls    int
 	commitCalls int
 }
 
-func (s *recordingShadowSpendSink) LogSpend(entry *litellmdbmodels.SpendLogEntry) error {
+func (s *recordingSpendSink) LogSpend(entry *litellmdbmodels.SpendLogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.logCalls++
@@ -34,45 +34,45 @@ func (s *recordingShadowSpendSink) LogSpend(entry *litellmdbmodels.SpendLogEntry
 	return nil
 }
 
-func (s *recordingShadowSpendSink) CommitSpend(_ context.Context, entry *litellmdbmodels.SpendLogEntry) (shadowspend.CommitResult, error) {
+func (s *recordingSpendSink) CommitSpend(_ context.Context, entry *litellmdbmodels.SpendLogEntry) (spendsink.CommitResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commitCalls++
 	s.entries = append(s.entries, entry)
-	return shadowspend.CommitResult{}, nil
+	return spendsink.CommitResult{}, nil
 }
 
-func (s *recordingShadowSpendSink) ReadKeySpend(context.Context, string) (float64, bool, error) {
+func (s *recordingSpendSink) ReadKeySpend(context.Context, string) (float64, bool, error) {
 	return 0, false, nil
 }
 
-func (s *recordingShadowSpendSink) IsEnabled() bool { return true }
-func (s *recordingShadowSpendSink) IsHealthy() bool { return true }
-func (s *recordingShadowSpendSink) Stats() litellmdbmodels.SpendLoggerStats {
+func (s *recordingSpendSink) IsEnabled() bool { return true }
+func (s *recordingSpendSink) IsHealthy() bool { return true }
+func (s *recordingSpendSink) Stats() litellmdbmodels.SpendLoggerStats {
 	return litellmdbmodels.SpendLoggerStats{}
 }
-func (s *recordingShadowSpendSink) Shutdown(context.Context) error { return nil }
+func (s *recordingSpendSink) Shutdown(context.Context) error { return nil }
 
-func (s *recordingShadowSpendSink) Entries() []*litellmdbmodels.SpendLogEntry {
+func (s *recordingSpendSink) Entries() []*litellmdbmodels.SpendLogEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*litellmdbmodels.SpendLogEntry(nil), s.entries...)
 }
 
-func (s *recordingShadowSpendSink) Calls() (logCalls, commitCalls int) {
+func (s *recordingSpendSink) Calls() (logCalls, commitCalls int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.logCalls, s.commitCalls
 }
 
-func TestFinalizeStreamingLogDirectModeUsesSynchronousCommit(t *testing.T) {
+func TestFinalizeStreamingLogWithSpendWriterUsesSynchronousCommit(t *testing.T) {
 	credential := config.CredentialConfig{
 		Name: "provider", Type: config.ProviderTypeOpenAI, BaseURL: "http://provider.invalid", APIKey: "provider-key",
 	}
 	prx := NewTestProxyBuilder().WithCredentials(credential).Build()
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
-	prx.spendLogMode = config.SpendLogModeDirect
+	prx.spendLoggingRequired = true
 
 	logCtx := &RequestLogContext{
 		RequestID:     "stream-event",
@@ -87,8 +87,8 @@ func TestFinalizeStreamingLogDirectModeUsesSynchronousCommit(t *testing.T) {
 	prx.finalizeStreamingLog(logCtx, 2, nil, "openai", http.StatusOK)
 
 	logCalls, commitCalls := sink.Calls()
-	require.Zero(t, logCalls, "direct streaming spend must not depend on an unflushed async enqueue")
-	require.Equal(t, 1, commitCalls, "direct streaming spend must synchronously commit or retain the exact event")
+	require.Zero(t, logCalls, "streaming spend must not depend on an unflushed async enqueue")
+	require.Equal(t, 1, commitCalls, "streaming spend must synchronously commit or retain the exact event")
 	require.True(t, logCtx.Logged)
 }
 
@@ -163,7 +163,7 @@ func TestProxyRequestKnownUnavailableModelKeeps429AndSpendLogging(t *testing.T) 
 	}
 }
 
-func newCredentialSelectionTestProxy(t *testing.T, rpm int) (*Proxy, *recordingShadowSpendSink, string) {
+func newCredentialSelectionTestProxy(t *testing.T, rpm int) (*Proxy, *recordingSpendSink, string) {
 	t.Helper()
 	logger := testhelpers.NewTestLogger()
 	credential := config.CredentialConfig{
@@ -184,7 +184,7 @@ func newCredentialSelectionTestProxy(t *testing.T, rpm int) (*Proxy, *recordingS
 		WithMasterKey("master-key")
 	builder.config.ModelManager = modelManager
 	prx := builder.Build()
-	sink := &recordingShadowSpendSink{}
+	sink := &recordingSpendSink{}
 	prx.spendLogger = sink
 	return prx, sink, credential.Name
 }

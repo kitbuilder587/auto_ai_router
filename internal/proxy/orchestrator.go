@@ -201,17 +201,17 @@ func (p *Proxy) orchestrateRequest(
 	proxyBody = credentialReq.proxyBody
 	realModelID = credentialReq.realModelID
 	r.URL.Path = credentialReq.path
-	if p.spendLogMode == config.SpendLogModeDirect && !p.hasResolvablePrice(modelID, realModelID) {
+	if p.spendLoggingRequired && !p.hasResolvablePrice(modelID, realModelID) {
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusServiceUnavailable
 		logCtx.ErrorMsg = "model price unavailable"
 		logCtx.Logged = true
-		p.logger.ErrorContext(r.Context(), "Direct request rejected before provider: model price unavailable",
+		p.logger.ErrorContext(r.Context(), "Request rejected before provider: model price unavailable",
 			"model", modelID, "provider_model", realModelID)
 		WriteErrorServiceUnavailable(w, "Model pricing unavailable")
 		return nil, false
 	}
-	if p.spendLogMode == config.SpendLogModeDirect {
+	if p.spendLoggingRequired {
 		if p.modelManager == nil {
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = http.StatusServiceUnavailable
@@ -225,7 +225,7 @@ func (p *Proxy) orchestrateRequest(
 			logCtx.HTTPStatus = http.StatusServiceUnavailable
 			logCtx.ErrorMsg = "deployment identity unavailable"
 			logCtx.Logged = true
-			p.logger.ErrorContext(r.Context(), "Direct request rejected before provider: deployment identity unavailable",
+			p.logger.ErrorContext(r.Context(), "Request rejected before provider: deployment identity unavailable",
 				"model", logCtx.PublicModelID, "credential", cred.Name)
 			WriteErrorServiceUnavailable(w, "Deployment identity unavailable")
 			return nil, false
@@ -837,7 +837,7 @@ func (p *Proxy) selectCredentialForModel(
 		Type: config.ProviderTypeProxy,
 	}
 
-	if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
+	if err := p.finalizeDeferredSpend(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue error log for no credentials",
 			"error", err,
 			"request_id", logCtx.RequestID,

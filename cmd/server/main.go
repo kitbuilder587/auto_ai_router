@@ -33,7 +33,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
 	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
@@ -206,7 +206,7 @@ func main() {
 	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
 	// endpoint and the push pipeline are wired up separately below.
 	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
-	shadowSpendSink := initializeShadowSpendSink(cfg, log, metrics)
+	spendSink := initializeSpendSink(cfg, log, metrics)
 	shadowContextVerifier, shadowContextErr := shadowcontext.NewVerifier(cfg.SpendLog.AuthContext)
 	if shadowContextErr != nil {
 		log.Error("CRITICAL: signed shadow context verification is disabled",
@@ -281,8 +281,8 @@ func main() {
 		Commit:                           Commit,
 		LiteLLMDB:                        litellmDBManager,
 		KafkaLog:                         kafkaLogManager,
-		SpendLogger:                      shadowSpendSink,
-		SpendLogMode:                     cfg.SpendLog.Mode,
+		SpendLogger:                      spendSink,
+		SpendLoggingRequired:             cfg.SpendLog.IsEnabled(),
 		SpendAPIBase:                     cfg.SpendLog.APIBase,
 		ShadowContextVerifier:            shadowContextVerifier,
 		HealthChecker:                    healthChecker,
@@ -454,13 +454,13 @@ func main() {
 	}
 
 	// Shutdown LiteLLM DB
-	if shadowSpendSink.IsEnabled() {
-		log.Info("Shutting down shadow spend sink...")
-		shadowShutdownCtx, shadowShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := shadowSpendSink.Shutdown(shadowShutdownCtx); err != nil {
-			log.Error("Shadow spend sink shutdown error", "error", err)
+	if spendSink.IsEnabled() {
+		log.Info("Shutting down spend sink...")
+		spendShutdownCtx, spendShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := spendSink.Shutdown(spendShutdownCtx); err != nil {
+			log.Error("Spend sink shutdown error", "error", err)
 		}
-		shadowShutdownCancel()
+		spendShutdownCancel()
 	}
 
 	// Shutdown LiteLLM control-plane DB
@@ -929,18 +929,18 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 	return manager
 }
 
-type spendSinkFactory func(context.Context, config.SpendLogConfig, *slog.Logger) (shadowspend.Sink, error)
+type spendSinkFactory func(context.Context, config.SpendLogConfig, *slog.Logger) (spendsink.Sink, error)
 
 func resolveSpendSink(
 	cfg *config.Config,
 	log *slog.Logger,
 	metrics *monitoring.Metrics,
 	factory spendSinkFactory,
-) (shadowspend.Sink, error) {
+) (spendsink.Sink, error) {
 	if !cfg.SpendLog.IsEnabled() {
-		metrics.SetShadowSpendSinkHealthy(false)
+		metrics.SetSpendSinkHealthy(false)
 		log.Info("Spend logging disabled")
-		return shadowspend.NewDisabledSink("disabled by configuration"), nil
+		return spendsink.NewNoopSink("not configured"), nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.SpendLog.ConnectTimeout)
@@ -948,34 +948,29 @@ func resolveSpendSink(
 	sink, err := factory(ctx, cfg.SpendLog, log)
 	if err != nil {
 		reason := "connection_or_preflight"
-		if errors.Is(err, shadowspend.ErrUnexpectedDatabase) {
+		if errors.Is(err, spendsink.ErrUnexpectedDatabase) {
 			reason = "unexpected_database"
 		}
-		metrics.RecordShadowSpendSinkStartupFailure(reason)
+		metrics.RecordSpendSinkStartupFailure(reason)
 		log.Error("CRITICAL: spend sink initialization failed",
 			"error", err,
 			"reason", reason,
-			"mode", cfg.SpendLog.Mode,
 			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 		)
-		if cfg.SpendLog.Mode == config.SpendLogModeDirect {
-			return nil, fmt.Errorf("required direct spend sink is unavailable: %w", err)
-		}
-		return shadowspend.NewDisabledSink(reason), nil
+		return nil, fmt.Errorf("required spend sink is unavailable: %w", err)
 	}
 
 	log.Info("Spend sink initialized",
-		"mode", cfg.SpendLog.Mode,
 		"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 		"api_base", cfg.SpendLog.APIBase,
 	)
 	return sink, nil
 }
 
-func initializeShadowSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) shadowspend.Sink {
-	sink, err := resolveSpendSink(cfg, log, metrics, shadowspend.New)
+func initializeSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) spendsink.Sink {
+	sink, err := resolveSpendSink(cfg, log, metrics, spendsink.New)
 	if err != nil {
-		log.Error("CRITICAL: direct spend sink is required; refusing to start", "error", err)
+		log.Error("CRITICAL: spend sink is required; refusing to start", "error", err)
 		os.Exit(1)
 	}
 	return sink

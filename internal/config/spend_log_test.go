@@ -26,6 +26,17 @@ credentials:
     rpm: 10
 monitoring:
   prometheus_enabled: false
+litellm_db:
+  enabled: true
+  is_required: true
+  load_db_models: true
+  database_url: postgresql://localhost/control-db
+  enforce_budget_reservation: true
+  enforce_key_rate_limits: true
+redis:
+  enabled: true
+  addresses:
+    - localhost:6379
 spend_log:
   database_url: os.environ/SHADOW_DATABASE_URL
   expected_database_name: test-db
@@ -71,16 +82,12 @@ func TestSpendLogConfigDefaultsToDisabled(t *testing.T) {
 	assert.False(t, cfg.SpendLog.IsEnabled())
 }
 
-func TestSpendLogConfigLegacyProgrammaticDestinationIsEnabled(t *testing.T) {
+func TestSpendLogConfigDestinationIsEnabled(t *testing.T) {
 	cfg := SpendLogConfig{DatabaseURL: "postgresql://localhost/test-db"}
 	assert.True(t, cfg.IsEnabled())
-
-	cfg.Mode = SpendLogModeDisabled
-	assert.False(t, cfg.IsEnabled(), "explicit disabled mode must override a stale destination")
 }
 
-func TestLoadSpendLogDirectModeRequiresFailClosedControlPlane(t *testing.T) {
-	t.Setenv("DIRECT_DATABASE_URL", "postgresql://direct:secret@db.example/direct-db")
+func TestLoadSpendLogRejectsRemovedModeSwitch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 server:
@@ -96,6 +103,31 @@ monitoring:
   prometheus_enabled: false
 spend_log:
   mode: direct
+  database_url: postgresql://localhost/direct-db
+  expected_database_name: direct-db
+`), 0o600))
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spend_log.mode has been removed")
+}
+
+func TestLoadSpendLogRequiresFailClosedControlPlane(t *testing.T) {
+	t.Setenv("DIRECT_DATABASE_URL", "postgresql://direct:secret@db.example/direct-db")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  port: 8080
+  master_key: test-master-key
+credentials:
+  - name: upstream
+    type: openai
+    api_key: test-key
+    base_url: https://api.openai.com
+    rpm: 10
+monitoring:
+  prometheus_enabled: false
+spend_log:
   database_url: os.environ/DIRECT_DATABASE_URL
   expected_database_name: direct-db
   api_base: http://air-ru01/v1
@@ -103,7 +135,7 @@ spend_log:
 
 	_, err := Load(path)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "direct mode requires litellm_db.enabled=true")
+	assert.Contains(t, err.Error(), "spend logging requires litellm_db.enabled=true")
 }
 
 func TestValidateSpendLogConfig(t *testing.T) {
@@ -140,13 +172,13 @@ func TestValidateSpendLogConfig(t *testing.T) {
 		},
 		{
 			name:        "configured writer is valid",
-			spendLog:    validShadowSpendLogConfig(),
+			spendLog:    validSpendDestinationConfig(),
 			wantNoError: true,
 		},
 		{
 			name: "configured writer requires canonical api base",
 			spendLog: func() SpendLogConfig {
-				cfg := validShadowSpendLogConfig()
+				cfg := validSpendDestinationConfig()
 				cfg.APIBase = "http://another-air/v1"
 				return cfg
 			}(),
@@ -155,7 +187,7 @@ func TestValidateSpendLogConfig(t *testing.T) {
 		{
 			name: "configured writer rejects unsafe queue values",
 			spendLog: func() SpendLogConfig {
-				cfg := validShadowSpendLogConfig()
+				cfg := validSpendDestinationConfig()
 				cfg.LogBatchSize = -1
 				return cfg
 			}(),
@@ -164,7 +196,7 @@ func TestValidateSpendLogConfig(t *testing.T) {
 		{
 			name: "configured writer rejects invalid pool limits",
 			spendLog: func() SpendLogConfig {
-				cfg := validShadowSpendLogConfig()
+				cfg := validSpendDestinationConfig()
 				cfg.MinConns = cfg.MaxConns + 1
 				return cfg
 			}(),
@@ -175,6 +207,9 @@ func TestValidateSpendLogConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := minimalValidConfig()
+			if tt.spendLog.IsEnabled() {
+				cfg = validMigrationConfig()
+			}
 			cfg.SpendLog = tt.spendLog
 			err := cfg.Validate()
 			if tt.wantNoError {
@@ -187,7 +222,7 @@ func TestValidateSpendLogConfig(t *testing.T) {
 	}
 }
 
-func TestValidateDirectSpendLogDependencies(t *testing.T) {
+func TestValidateSpendLogDependencies(t *testing.T) {
 	tests := []struct {
 		name    string
 		mutate  func(*Config)
@@ -203,7 +238,7 @@ func TestValidateDirectSpendLogDependencies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := validDirectConfig()
+			cfg := validMigrationConfig()
 			if tt.mutate != nil {
 				tt.mutate(cfg)
 			}
@@ -218,13 +253,12 @@ func TestValidateDirectSpendLogDependencies(t *testing.T) {
 	}
 }
 
-func validShadowSpendLogConfig() SpendLogConfig {
+func validSpendDestinationConfig() SpendLogConfig {
 	return defaultSpendLogConfigWithDestination("postgres://localhost/test-db", "test-db")
 }
 
 func defaultSpendLogConfigWithDestination(databaseURL, expectedDatabaseName string) SpendLogConfig {
 	cfg := defaultSpendLogConfig()
-	cfg.Mode = SpendLogModeShadow
 	cfg.DatabaseURL = databaseURL
 	cfg.ExpectedDatabaseName = expectedDatabaseName
 	return cfg
@@ -249,12 +283,11 @@ func minimalValidConfig() *Config {
 	}
 }
 
-func validDirectConfig() *Config {
+func validMigrationConfig() *Config {
 	cfg := minimalValidConfig()
 	cfg.SpendLog = defaultSpendLogConfigWithDestination(
 		"postgres://localhost/direct-db", "direct-db",
 	)
-	cfg.SpendLog.Mode = SpendLogModeDirect
 	cfg.LiteLLMDB = defaultLiteLLMDBConfig()
 	cfg.LiteLLMDB.Enabled = true
 	cfg.LiteLLMDB.IsRequired = true
