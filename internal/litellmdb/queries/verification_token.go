@@ -5,7 +5,7 @@ package queries
 // Uses PostgreSQL JOINs and COALESCE for organization_id resolution
 //
 // The SELECT list is positional: it must stay in lockstep (count and order,
-// currently 49 columns) with the Scan targets in
+// currently 51 columns) with the Scan targets in
 // internal/litellmdb/auth/auth.go fetchTokenFromDB. Dropping a column here
 // (as the spend-logs base branch did) breaks every auth query with pgx's
 // "number of field descriptions must equal number of destinations" — this
@@ -45,6 +45,8 @@ SELECT
   u.user_email,
   u.max_budget as user_max_budget,
   u.spend as user_spend,
+  u.tpm_limit as user_tpm_limit,
+  u.rpm_limit as user_rpm_limit,
   u.models as user_models,
 
   -- ============ Team ============

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
@@ -18,6 +19,11 @@ type aggregateTagKey struct {
 	customLLMProvider     string
 	mcpNamespacedToolName string
 	endpoint              string
+}
+
+func (k aggregateTagKey) lockOrder() string {
+	return strings.Join([]string{k.tag, k.date, k.apiKey, k.model, k.modelGroup,
+		k.customLLMProvider, k.mcpNamespacedToolName, k.endpoint}, "\x00")
 }
 
 // aggregateTagValue holds aggregated metrics for a tag with request_id
@@ -102,7 +108,8 @@ func aggregateDailyTagSpendLogs(
 	}
 
 	// Insert aggregated data into DailyTagSpend
-	for key, value := range aggregations {
+	for _, key := range sortedDailyKeys(aggregations) {
+		value := aggregations[key]
 		_, err := conn.Exec(ctx,
 			queries.QueryUpsertDailyTagSpend,
 			key.tag, value.requestID, key.date, key.apiKey, key.model, key.modelGroup,

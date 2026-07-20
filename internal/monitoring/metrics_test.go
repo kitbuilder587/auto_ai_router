@@ -258,22 +258,22 @@ func TestMultipleEndpoints(t *testing.T) {
 	assert.Greater(t, count, 0)
 }
 
-func TestShadowSpendObservabilityMetrics(t *testing.T) {
-	ShadowSpendComparisonRowsTotal.Reset()
-	droppedBefore := testutil.ToFloat64(ShadowSpendDroppedTotal)
-	dlqOverflowBefore := testutil.ToFloat64(ShadowSpendDLQOverflowTotal)
-	duplicatesBefore := testutil.ToFloat64(ShadowSpendDuplicatesTotal)
-	aggregationErrorsBefore := testutil.ToFloat64(ShadowSpendAggregationErrorsTotal)
-	pendingOverflowBefore := testutil.ToFloat64(ShadowSpendPendingAggregationOverflowTotal)
+func TestSpendObservabilityMetrics(t *testing.T) {
+	SpendComparisonRowsTotal.Reset()
+	droppedBefore := testutil.ToFloat64(SpendDroppedTotal)
+	dlqOverflowBefore := testutil.ToFloat64(SpendDLQOverflowTotal)
+	duplicatesBefore := testutil.ToFloat64(SpendDuplicatesTotal)
+	aggregationErrorsBefore := testutil.ToFloat64(SpendAggregationErrorsTotal)
+	pendingOverflowBefore := testutil.ToFloat64(SpendPendingAggregationOverflowTotal)
 
-	RecordShadowSpendDropped(2)
-	RecordShadowSpendDLQOverflow(1)
-	RecordShadowSpendDuplicates(3)
-	RecordShadowSpendAggregationErrors(4)
-	RecordShadowSpendPendingAggregationOverflow(5)
-	RecordShadowSpendComparisonRows(true, 6)
-	RecordShadowSpendComparisonRows(false, 7)
-	ObserveShadowSpendSnapshot(ShadowSpendSnapshot{
+	RecordSpendDropped(2)
+	RecordSpendDLQOverflow(1)
+	RecordSpendDuplicates(3)
+	RecordSpendAggregationErrors(4)
+	RecordSpendPendingAggregationOverflow(5)
+	RecordSpendComparisonRows(true, 6)
+	RecordSpendComparisonRows(false, 7)
+	ObserveSpendSnapshot(SpendSnapshot{
 		QueueDepth:            8,
 		PendingEntries:        9,
 		PendingAggregation:    10,
@@ -282,30 +282,30 @@ func TestShadowSpendObservabilityMetrics(t *testing.T) {
 		ComparisonWindowValid: false,
 	})
 
-	assert.Equal(t, droppedBefore+2, testutil.ToFloat64(ShadowSpendDroppedTotal))
-	assert.Equal(t, dlqOverflowBefore+1, testutil.ToFloat64(ShadowSpendDLQOverflowTotal))
-	assert.Equal(t, duplicatesBefore+3, testutil.ToFloat64(ShadowSpendDuplicatesTotal))
-	assert.Equal(t, aggregationErrorsBefore+4, testutil.ToFloat64(ShadowSpendAggregationErrorsTotal))
-	assert.Equal(t, pendingOverflowBefore+5, testutil.ToFloat64(ShadowSpendPendingAggregationOverflowTotal))
-	assert.Equal(t, 6.0, testutil.ToFloat64(ShadowSpendComparisonRowsTotal.WithLabelValues("eligible")))
-	assert.Equal(t, 7.0, testutil.ToFloat64(ShadowSpendComparisonRowsTotal.WithLabelValues("ineligible")))
-	assert.Equal(t, 8.0, testutil.ToFloat64(ShadowSpendQueueDepth))
-	assert.Equal(t, 9.0, testutil.ToFloat64(ShadowSpendPendingEntries))
-	assert.Equal(t, 10.0, testutil.ToFloat64(ShadowSpendPendingAggregationDepth))
-	assert.Equal(t, 2.0, testutil.ToFloat64(ShadowSpendDLQSize))
-	assert.InDelta(t, 3.0, testutil.ToFloat64(ShadowSpendAggregationLagSeconds), 0.05)
-	assert.Equal(t, 0.0, testutil.ToFloat64(ShadowSpendComparisonWindowValid))
+	assert.Equal(t, droppedBefore+2, testutil.ToFloat64(SpendDroppedTotal))
+	assert.Equal(t, dlqOverflowBefore+1, testutil.ToFloat64(SpendDLQOverflowTotal))
+	assert.Equal(t, duplicatesBefore+3, testutil.ToFloat64(SpendDuplicatesTotal))
+	assert.Equal(t, aggregationErrorsBefore+4, testutil.ToFloat64(SpendAggregationErrorsTotal))
+	assert.Equal(t, pendingOverflowBefore+5, testutil.ToFloat64(SpendPendingAggregationOverflowTotal))
+	assert.Equal(t, 6.0, testutil.ToFloat64(SpendComparisonRowsTotal.WithLabelValues("eligible")))
+	assert.Equal(t, 7.0, testutil.ToFloat64(SpendComparisonRowsTotal.WithLabelValues("ineligible")))
+	assert.Equal(t, 8.0, testutil.ToFloat64(SpendQueueDepth))
+	assert.Equal(t, 9.0, testutil.ToFloat64(SpendPendingEntries))
+	assert.Equal(t, 10.0, testutil.ToFloat64(SpendPendingAggregationDepth))
+	assert.Equal(t, 2.0, testutil.ToFloat64(SpendDLQSize))
+	assert.InDelta(t, 3.0, testutil.ToFloat64(SpendAggregationLagSeconds), 0.05)
+	assert.Equal(t, 0.0, testutil.ToFloat64(SpendComparisonWindowValid))
 }
 
-func TestShadowSpendSinkHealthyTracksLiveState(t *testing.T) {
-	SetShadowSpendSinkHealthy(false)
-	assert.Zero(t, testutil.ToFloat64(ShadowSpendSinkHealthy))
+func TestSpendSinkHealthyTracksLiveState(t *testing.T) {
+	SetSpendSinkHealthy(false)
+	assert.Zero(t, testutil.ToFloat64(SpendSinkHealthy))
 
-	SetShadowSpendSinkHealthy(true)
-	assert.Equal(t, 1.0, testutil.ToFloat64(ShadowSpendSinkHealthy))
+	SetSpendSinkHealthy(true)
+	assert.Equal(t, 1.0, testutil.ToFloat64(SpendSinkHealthy))
 
-	SetShadowSpendSinkHealthy(false)
-	assert.Zero(t, testutil.ToFloat64(ShadowSpendSinkHealthy))
+	SetSpendSinkHealthy(false)
+	assert.Zero(t, testutil.ToFloat64(SpendSinkHealthy))
 }
 
 func TestUpdateCredentialTPM(t *testing.T) {

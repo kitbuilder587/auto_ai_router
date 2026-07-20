@@ -639,3 +639,16 @@ func TestTokenInfo_ComplexValidation(t *testing.T) {
 	err = token.Validate("gpt-4")
 	assert.ErrorIs(t, err, ErrBudgetExceeded)
 }
+
+func TestTokenInfo_Validate_AllTeamModelsSentinel_ResolvedThroughFullValidate(t *testing.T) {
+	token := &TokenInfo{
+		Token:      "test-token",
+		UserID:     "user1",
+		TeamID:     "team1",
+		Models:     []string{"all-team-models"},
+		TeamModels: []string{"gpt-4"},
+	}
+
+	assert.NoError(t, token.Validate("gpt-4"))
+	assert.ErrorIs(t, token.Validate("claude-3"), ErrModelNotAllowed)
+}
