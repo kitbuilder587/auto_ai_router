@@ -135,6 +135,19 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ==================== Model access sentinels ====================
+
+// LiteLLM stores these special values inside VerificationToken.models instead
+// of (or alongside) real model names:
+//   - "all-proxy-models": key may call every model on the proxy.
+//   - "all-team-models":  key inherits its parent team's model allow-list
+//     (LiteLLM_TeamTable.models). A key with no team has nothing to inherit
+//     from, so it falls back to unrestricted access, same as an empty list.
+const (
+	specialModelAllProxyModels = "all-proxy-models"
+	specialModelAllTeamModels  = "all-team-models"
+)
+
 // ==================== TokenInfo ====================
 
 // TokenInfo holds information about a validated token from LiteLLM_VerificationToken
@@ -397,6 +410,21 @@ func (t *TokenInfo) IsModelAllowedBy(model string, matcher ModelScopeMatcher) bo
 // IsModelAllowed checks all applicable allowlists using exact IDs.
 func (t *TokenInfo) IsModelAllowed(model string) bool {
 	return t.IsModelAllowedBy(model, exactModelScopeMatch)
+}
+
+// IsAnyModelAllowed reports whether at least one candidate name passes every
+// applicable model scope. The same provider model is often exposed under
+// several route aliases (e.g. "claude-haiku-4.5" and
+// "anthropic/claude-haiku-4.5" for the same credential+model); callers resolve
+// the alias-equivalence group (models.Manager.GetAliasesForModel) and pass it
+// here so the check isn't defeated by which spelling the client used.
+func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
+	for _, candidate := range candidates {
+		if t.IsModelAllowed(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkUserBudget checks user budget (personal key only - embedded, use >)

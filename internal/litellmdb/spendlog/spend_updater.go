@@ -288,6 +288,12 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 	return nil
 }
 
+// sortedKeys preserves the current-main helper contract for scalar counter
+// maps while sharing the typed deterministic ordering used by migration rows.
+func sortedKeys(values map[string]float64) []string {
+	return sortedSpendKeys(values, strings.Compare)
+}
+
 // updateTokens updates Token.spend and model_spend in LiteLLM_VerificationToken.
 // Executes a single UPDATE per apiKey/model pair.
 // Falls back to query without last_active if the column doesn't exist (older DB schema).

@@ -522,6 +522,11 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Apply exponential backoff before attempt (except first)
 		if attempt > 0 {
+			// Jitter (up to +50%): without it, every pod retries on the exact
+			// same fixed schedule, so two batches that just deadlocked on the
+			// same rows (see sortedKeys in spend_updater.go) retry in lockstep
+			// and can deadlock again. litellm's db_spend_update_writer.py hits
+			// the same problem and randomizes retry sleep for this reason.
 			backoff := backoffDurations[attempt]
 			// Desynchronize replicas after a transient lock conflict. Fixed retry
 			// intervals can make the same batches collide again in lockstep.

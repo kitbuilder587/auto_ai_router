@@ -758,13 +758,21 @@ type LiteLLMDBConfig struct {
 	// where Kafka (see KafkaConfig) is the sole spend-analytics write-path.
 	DisableSpendLogsWrite bool `yaml:"disable_spend_logs_write"` // default: false
 
-	// Redis-backed runtime enforcement. Both switches are opt-in during the AIR
-	// migration so existing deployments keep their current auth behavior until
-	// Redis and pricing coverage have been verified.
-	EnforceBudgetReservation         bool          `yaml:"enforce_budget_reservation"`          // default: false
-	BudgetReservationTTL             time.Duration `yaml:"budget_reservation_ttl"`              // default: 15m
-	EnforceKeyRateLimits             bool          `yaml:"enforce_key_rate_limits"`             // default: false
-	DefaultEstimatedCompletionTokens int           `yaml:"default_estimated_completion_tokens"` // default: 1000
+	// EnforceBudgetReservation enables atomic Redis-backed budget pre-reservation
+	// (prevents the overspend race described in todo_auth_billing.md P1.4).
+	// Auto-disabled (safe no-op) if redis.enabled=false, regardless of this flag.
+	EnforceBudgetReservation bool `yaml:"enforce_budget_reservation"` // default: false (opt-in)
+	// BudgetReservationTTL bounds how long a Redis budget counter survives without
+	// activity before it expires and is reseeded from the DB spend value on next use.
+	// Also bounds how stale an out-of-band DB spend reset (e.g. admin resetting
+	// budget_duration) can make the counter before it self-corrects.
+	BudgetReservationTTL time.Duration `yaml:"budget_reservation_ttl"` // default: 15m
+	// EnforceKeyRateLimits enables atomic Redis-backed RPM/TPM enforcement per
+	// key/user/team/org/team-member/org-member (previously loaded but unused fields).
+	EnforceKeyRateLimits bool `yaml:"enforce_key_rate_limits"` // default: false (opt-in)
+	// DefaultEstimatedCompletionTokens is the completion-token estimate used for
+	// budget pre-reservation when the request doesn't specify max_tokens.
+	DefaultEstimatedCompletionTokens int `yaml:"default_estimated_completion_tokens"` // default: 1000
 }
 
 // KafkaConfig holds configuration for the Kafka spend-log analytics write-path
