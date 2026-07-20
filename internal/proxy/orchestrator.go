@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
 )
 
 type orchestratedRequest struct {
@@ -212,15 +213,7 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 	if p.spendLoggingRequired {
-		if p.modelManager == nil {
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusServiceUnavailable
-			logCtx.ErrorMsg = "deployment identity unavailable"
-			logCtx.Logged = true
-			WriteErrorServiceUnavailable(w, "Deployment identity unavailable")
-			return nil, false
-		}
-		if _, found := p.modelManager.GetDeploymentID(logCtx.PublicModelID, cred.Name); !found {
+		if !p.hasAuthoritativeDeploymentIdentity(logCtx, cred.Name) {
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = http.StatusServiceUnavailable
 			logCtx.ErrorMsg = "deployment identity unavailable"
@@ -262,6 +255,17 @@ func (p *Proxy) orchestrateRequest(
 		responsesMetadata:    responsesMetadata,
 		stickyCacheEligible:  stickyCacheEligible,
 	}, true
+}
+
+func (p *Proxy) hasAuthoritativeDeploymentIdentity(logCtx *RequestLogContext, credentialName string) bool {
+	if logCtx != nil && logCtx.ShadowContext.State == shadowcontext.StateValid {
+		return logCtx.ShadowContext.Identity.DeploymentID != ""
+	}
+	if p == nil || p.modelManager == nil || logCtx == nil {
+		return false
+	}
+	_, found := p.modelManager.GetDeploymentID(logCtx.PublicModelID, credentialName)
+	return found
 }
 
 func (p *Proxy) prepareRequestForCredential(

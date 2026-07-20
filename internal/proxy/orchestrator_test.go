@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,8 +9,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
@@ -99,6 +102,112 @@ func TestOrchestrateRequestAppliesLiteLLMFinancialHeaderOwnership(t *testing.T) 
 				assert.Empty(t, w.Header().Get(liteLLMKeySpendHeader))
 				assert.Empty(t, w.Header().Get(liteLLMResponseCostHeader))
 			}
+		})
+	}
+}
+
+func TestOrchestrateRequestTrustsValidSignedDeploymentIdentityAbsentFromLocalSnapshot(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	credential := config.CredentialConfig{
+		Name: "provider", Type: config.ProviderTypeOpenAI, BaseURL: "http://test.local", APIKey: "provider-key",
+		RPM: 100, TPM: 10000,
+	}
+	manager := models.New(logger, 100, []config.ModelRPMConfig{{
+		Name: "backend-chat", Model: "backend-chat", Credential: credential.Name, RPM: 100, TPM: 10000,
+	}})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	builder := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key")
+	builder.config.ModelManager = manager
+	prx := builder.Build()
+	prx.LiteLLMDB = &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{}}
+	prx.spendLogger = &recordingSpendSink{}
+	prx.spendLoggingRequired = true
+	prx.budgetReserver = budget.New(nil, "test:", time.Minute)
+	prx.budgetReservationEnabled = true
+	prx.keyRateLimiter = prx.rateLimiter
+	prx.keyRateLimitsEnabled = true
+	prx.enforcementHealth = func(context.Context) bool { return true }
+	prx.priceRegistry = models.NewModelPriceRegistry()
+	prx.priceRegistry.Update(map[string]*models.ModelPrice{
+		"backend-chat": {InputCostPerToken: 0.001},
+	})
+
+	identity := shadowcontext.Identity{
+		APIKeyHash: "signed-key-hash", PublicModel: "outer-public-model",
+		DeploymentID: "signed-deployment", OriginalCallType: "acompletion", CallID: "signed-call",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"backend-chat","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	logCtx := &RequestLogContext{
+		RequestID: "event-signed", CallID: identity.CallID, Request: req,
+		ShadowContext: shadowcontext.Result{State: shadowcontext.StateValid, Identity: identity},
+	}
+	logCtx.Billing = NewBillingContext(logCtx.RequestID, logCtx.CallID, req.URL.Path, identity)
+	w := httptest.NewRecorder()
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+	assert.Equal(t, credential.Name, prepared.cred.Name)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestAuthoritativeDeploymentIdentityRequiresSignedIDOrLocalResolution(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 10000}
+	manager := models.New(logger, 100, nil)
+	manager.UpdateDBModels([]config.ModelRPMConfig{{
+		Name: "local-model", Credential: credential.Name, DeploymentID: "local-deployment", RPM: 100, TPM: 10000,
+	}}, []config.CredentialConfig{credential}, []config.CredentialConfig{credential})
+
+	tests := []struct {
+		name           string
+		proxy          *Proxy
+		contextState   shadowcontext.State
+		deploymentID   string
+		publicModel    string
+		credentialName string
+		want           bool
+	}{
+		{
+			name: "valid signed deployment is authoritative without local model", proxy: &Proxy{modelManager: manager},
+			contextState: shadowcontext.StateValid, deploymentID: "signed-deployment", publicModel: "absent-model",
+			credentialName: "absent-provider", want: true,
+		},
+		{
+			name: "valid signed context cannot fall back when deployment is empty", proxy: &Proxy{modelManager: manager},
+			contextState: shadowcontext.StateValid, publicModel: "local-model", credentialName: "provider", want: false,
+		},
+		{
+			name: "missing signed context requires and accepts local resolution", proxy: &Proxy{modelManager: manager},
+			contextState: shadowcontext.StateMissing, publicModel: "local-model", credentialName: "provider", want: true,
+		},
+		{
+			name: "invalid signed context cannot bypass missing local resolution", proxy: &Proxy{modelManager: manager},
+			contextState: shadowcontext.StateInvalid, deploymentID: "untrusted-deployment", publicModel: "absent-model",
+			credentialName: "absent-provider", want: false,
+		},
+		{
+			name: "missing signed context fails without local model manager", proxy: &Proxy{},
+			contextState: shadowcontext.StateMissing, publicModel: "local-model", credentialName: "provider", want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logCtx := &RequestLogContext{
+				PublicModelID: tt.publicModel,
+				ShadowContext: shadowcontext.Result{
+					State:    tt.contextState,
+					Identity: shadowcontext.Identity{DeploymentID: tt.deploymentID},
+				},
+			}
+
+			assert.Equal(t, tt.want, tt.proxy.hasAuthoritativeDeploymentIdentity(logCtx, tt.credentialName))
 		})
 	}
 }
