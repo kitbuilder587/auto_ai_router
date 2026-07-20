@@ -5,7 +5,7 @@ package queries
 // Uses PostgreSQL JOINs and COALESCE for organization_id resolution
 //
 // The SELECT list is positional: it must stay in lockstep (count and order,
-// currently 51 columns) with the Scan targets in
+// currently 53 columns) with the Scan targets in
 // internal/litellmdb/auth/auth.go fetchTokenFromDB. Dropping a column here
 // (as the spend-logs base branch did) breaks every auth query with pgx's
 // "number of field descriptions must equal number of destinations" — this
@@ -83,7 +83,13 @@ SELECT
   omem.spend as org_member_spend,
   b_omem.max_budget as org_member_max_budget,
   b_omem.tpm_limit as org_member_tpm_limit,
-  b_omem.rpm_limit as org_member_rpm_limit
+  b_omem.rpm_limit as org_member_rpm_limit,
+
+  -- ============ Access groups ============
+  -- Group IDs only; the group rows themselves are resolved by a follow-up
+  -- QuerySelectAccessGroups call (LiteLLM caches them separately too).
+  t.access_group_ids as token_access_group_ids,
+  tm.access_group_ids as team_access_group_ids
 
 FROM "LiteLLM_VerificationToken" t
 
@@ -127,6 +133,29 @@ LEFT JOIN "LiteLLM_OrganizationMembership" omem ON
 LEFT JOIN "LiteLLM_BudgetTable" b_omem ON omem.budget_id = b_omem.budget_id
 
 WHERE t.token = $1
+`
+
+// QueryLookupDeprecatedToken resolves a rotated key that is still inside its
+// grace period, mirroring LiteLLM's _lookup_deprecated_key: the old hash maps
+// to the currently active token until revoke_at passes. $2 is caller-supplied
+// UTC now — revoke_at is timestamp WITHOUT time zone storing UTC wall-clock,
+// so comparing against now() would shift on non-UTC sessions.
+const QueryLookupDeprecatedToken = `
+SELECT active_token_id
+FROM "LiteLLM_DeprecatedVerificationToken"
+WHERE token = $1 AND revoke_at > $2
+LIMIT 1
+`
+
+// QuerySelectAccessGroups loads the unified access groups referenced by a
+// key's or team's access_group_ids. Model-access expansion mirrors LiteLLM's
+// can_key_call_model / can_team_access_model fallbacks and
+// _key_access_group_grants_model (which additionally requires the group to
+// authorize the caller via assigned_team_ids / assigned_key_ids).
+const QuerySelectAccessGroups = `
+SELECT access_group_id, access_model_names, assigned_team_ids, assigned_key_ids
+FROM "LiteLLM_AccessGroupTable"
+WHERE access_group_id = ANY($1)
 `
 
 // QuerySelectKeySpend reads the latest committed scalar spend for a virtual

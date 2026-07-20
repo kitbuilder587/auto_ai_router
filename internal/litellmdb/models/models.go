@@ -172,6 +172,13 @@ type TokenInfo struct {
 	ProjectBlocked *bool    // Project is blocked
 	Blocked        bool     // Is token blocked
 
+	// Access-group model expansion (LiteLLM_AccessGroupTable), resolved at
+	// fetch time by ResolveAccessGroupModels. These extend, never replace,
+	// the corresponding native allowlists — and only when those are
+	// non-empty, because an empty native list already means unrestricted.
+	KeyAccessGroupModels  []string // models granted by the key's access groups
+	TeamAccessGroupModels []string // models granted by the team's groups + owner-authorized key groups
+
 	// TeamDangling / ProjectDangling are set when the token carries a
 	// team_id / project_id but the LEFT JOIN found no parent row (the
 	// team_id_check / project_id_check sentinel scanned as NULL). A dangling
@@ -290,6 +297,8 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
 	clone.ProjectModels = append([]string(nil), t.ProjectModels...)
 	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
+	clone.KeyAccessGroupModels = append([]string(nil), t.KeyAccessGroupModels...)
+	clone.TeamAccessGroupModels = append([]string(nil), t.TeamAccessGroupModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
@@ -350,25 +359,29 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 // to an unrestricted empty one.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	keyModels := t.Models
+	keyGroupModels := t.KeyAccessGroupModels
 	for _, model := range t.Models {
 		if model == AllTeamModels {
 			// LiteLLM fails closed when all-team-models is used without a team.
 			// With a team it replaces, rather than extends, the key allowlist.
 			// A dangling team keeps TeamModels empty here and is rejected by
-			// the DenyAll team scope below.
+			// the DenyAll team scope below. LiteLLM skips the key-level check
+			// entirely for such keys, so the substituted key scope must carry
+			// the team's access-group grants, not the key's.
 			if t.TeamID != "" {
 				keyModels = t.TeamModels
+				keyGroupModels = t.TeamAccessGroupModels
 			}
 			break
 		}
 	}
 
-	scopes := []ModelAccessScope{{Name: "key", Models: keyModels}}
+	scopes := []ModelAccessScope{{Name: "key", Models: expandWithAccessGroups(keyModels, keyGroupModels)}}
 	if t.TeamID != "" {
 		if t.TeamDangling {
 			scopes = append(scopes, ModelAccessScope{Name: "team", DenyAll: true})
 		} else {
-			scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+			scopes = append(scopes, ModelAccessScope{Name: "team", Models: expandWithAccessGroups(t.TeamModels, t.TeamAccessGroupModels)})
 			if t.UserID != "" && len(t.TeamMemberModels) > 0 {
 				scopes = append(scopes, ModelAccessScope{Name: "team_member", Models: t.TeamMemberModels})
 			}
@@ -391,6 +404,94 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 		}
 	}
 	return scopes
+}
+
+// expandWithAccessGroups appends access-group-granted models to a native
+// allowlist. An empty native list stays empty: it already means unrestricted,
+// and appending grants would turn it into a restriction. This matches
+// LiteLLM's fallback shape — groups are only consulted after the native list
+// denied, so "native allows OR groups allow" equals matching the union.
+func expandWithAccessGroups(native, granted []string) []string {
+	if len(native) == 0 || len(granted) == 0 {
+		return native
+	}
+	return append(append([]string(nil), native...), granted...)
+}
+
+// AccessGroup is one LiteLLM_AccessGroupTable row, reduced to the fields the
+// model-access expansion needs.
+type AccessGroup struct {
+	ID              string
+	Models          []string // access_model_names
+	AssignedTeamIDs []string
+	AssignedKeyIDs  []string
+}
+
+// ResolveAccessGroupModels mirrors LiteLLM's access-group model expansion:
+//   - can_key_call_model: every group listed in the key's access_group_ids
+//     contributes its models to the key scope, unconditionally;
+//   - can_team_access_model: every group listed in the team's own
+//     access_group_ids contributes to the team scope, unconditionally;
+//   - _key_access_group_grants_model: a group listed on the key overrides a
+//     team denial only when it authorizes the caller as an owner — its
+//     assigned_team_ids contains the key's team or its assigned_key_ids
+//     contains the key's token hash.
+//
+// groups is the resolved union of both ID lists; unknown IDs are skipped,
+// matching LiteLLM's swallow-and-continue per-group fetch.
+func ResolveAccessGroupModels(
+	tokenHash string,
+	teamID string,
+	keyGroupIDs []string,
+	teamGroupIDs []string,
+	groups []AccessGroup,
+) (keyModels []string, teamModels []string) {
+	byID := make(map[string]AccessGroup, len(groups))
+	for _, group := range groups {
+		byID[group.ID] = group
+	}
+
+	appendUnique := func(dst []string, seen map[string]bool, values []string) []string {
+		for _, value := range values {
+			if !seen[value] {
+				seen[value] = true
+				dst = append(dst, value)
+			}
+		}
+		return dst
+	}
+	contains := func(values []string, target string) bool {
+		if target == "" {
+			return false
+		}
+		for _, value := range values {
+			if value == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	keySeen := make(map[string]bool)
+	teamSeen := make(map[string]bool)
+	for _, id := range keyGroupIDs {
+		group, ok := byID[id]
+		if !ok {
+			continue
+		}
+		keyModels = appendUnique(keyModels, keySeen, group.Models)
+		if contains(group.AssignedTeamIDs, teamID) || contains(group.AssignedKeyIDs, tokenHash) {
+			teamModels = appendUnique(teamModels, teamSeen, group.Models)
+		}
+	}
+	for _, id := range teamGroupIDs {
+		group, ok := byID[id]
+		if !ok {
+			continue
+		}
+		teamModels = appendUnique(teamModels, teamSeen, group.Models)
+	}
+	return keyModels, teamModels
 }
 
 func exactModelScopeMatch(model string, allowedModels []string) bool {

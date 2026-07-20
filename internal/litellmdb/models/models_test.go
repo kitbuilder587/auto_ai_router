@@ -652,3 +652,150 @@ func TestTokenInfo_Validate_AllTeamModelsSentinel_ResolvedThroughFullValidate(t 
 	assert.NoError(t, token.Validate("gpt-4"))
 	assert.ErrorIs(t, token.Validate("claude-3"), ErrModelNotAllowed)
 }
+
+func TestResolveAccessGroupModels(t *testing.T) {
+	groups := []AccessGroup{
+		{ID: "ag-key", Models: []string{"claude-3"}},
+		{ID: "ag-team", Models: []string{"gemini-pro"}},
+		{ID: "ag-owner-team", Models: []string{"gpt-4o"}, AssignedTeamIDs: []string{"team1"}},
+		{ID: "ag-owner-key", Models: []string{"o3"}, AssignedKeyIDs: []string{"hash1"}},
+	}
+
+	t.Run("key groups contribute unconditionally, team override needs ownership", func(t *testing.T) {
+		keyModels, teamModels := ResolveAccessGroupModels(
+			"hash1", "team1",
+			[]string{"ag-key", "ag-owner-team", "ag-owner-key"},
+			nil,
+			groups,
+		)
+		assert.ElementsMatch(t, []string{"claude-3", "gpt-4o", "o3"}, keyModels)
+		// ag-key authorizes neither team1 nor hash1, so it must not reach the team scope
+		assert.ElementsMatch(t, []string{"gpt-4o", "o3"}, teamModels)
+	})
+
+	t.Run("team's own groups contribute unconditionally", func(t *testing.T) {
+		keyModels, teamModels := ResolveAccessGroupModels(
+			"hash1", "team1",
+			nil,
+			[]string{"ag-team"},
+			groups,
+		)
+		assert.Empty(t, keyModels)
+		assert.ElementsMatch(t, []string{"gemini-pro"}, teamModels)
+	})
+
+	t.Run("unknown group IDs are skipped", func(t *testing.T) {
+		keyModels, teamModels := ResolveAccessGroupModels(
+			"hash1", "team1",
+			[]string{"ag-missing"},
+			[]string{"ag-missing-too"},
+			groups,
+		)
+		assert.Empty(t, keyModels)
+		assert.Empty(t, teamModels)
+	})
+
+	t.Run("duplicate grants are deduplicated", func(t *testing.T) {
+		_, teamModels := ResolveAccessGroupModels(
+			"hash1", "team1",
+			[]string{"ag-owner-team"},
+			[]string{"ag-owner-team"},
+			groups,
+		)
+		assert.Equal(t, []string{"gpt-4o"}, teamModels)
+	})
+
+	t.Run("no ownership match without team or hash", func(t *testing.T) {
+		_, teamModels := ResolveAccessGroupModels(
+			"", "",
+			[]string{"ag-owner-team", "ag-owner-key"},
+			nil,
+			groups,
+		)
+		assert.Empty(t, teamModels)
+	})
+}
+
+func TestTokenInfo_AccessGroupModelExpansion(t *testing.T) {
+	t.Run("key group grant allows model denied by native key list", func(t *testing.T) {
+		token := &TokenInfo{
+			Token:                "hash1",
+			Models:               []string{"gpt-4"},
+			KeyAccessGroupModels: []string{"claude-3"},
+		}
+		assert.True(t, token.IsModelAllowed("claude-3"))
+		assert.True(t, token.IsModelAllowed("gpt-4"))
+		assert.False(t, token.IsModelAllowed("gemini-pro"))
+	})
+
+	t.Run("empty native key list stays unrestricted, grants do not restrict", func(t *testing.T) {
+		token := &TokenInfo{
+			Token:                "hash1",
+			KeyAccessGroupModels: []string{"claude-3"},
+		}
+		assert.True(t, token.IsModelAllowed("anything"))
+	})
+
+	t.Run("key grant alone cannot override team denial", func(t *testing.T) {
+		token := &TokenInfo{
+			Token:                "hash1",
+			TeamID:               "team1",
+			Models:               []string{"gpt-4"},
+			TeamModels:           []string{"gpt-4"},
+			KeyAccessGroupModels: []string{"claude-3"},
+		}
+		assert.False(t, token.IsModelAllowed("claude-3"))
+	})
+
+	t.Run("owner-authorized grant reaches team scope and allows the model", func(t *testing.T) {
+		token := &TokenInfo{
+			Token:                 "hash1",
+			TeamID:                "team1",
+			Models:                []string{"gpt-4"},
+			TeamModels:            []string{"gpt-4"},
+			KeyAccessGroupModels:  []string{"claude-3"},
+			TeamAccessGroupModels: []string{"claude-3"},
+		}
+		assert.True(t, token.IsModelAllowed("claude-3"))
+	})
+
+	t.Run("all-team-models key uses team grants for the substituted key scope", func(t *testing.T) {
+		token := &TokenInfo{
+			Token:                 "hash1",
+			TeamID:                "team1",
+			Models:                []string{AllTeamModels},
+			TeamModels:            []string{"gpt-4"},
+			KeyAccessGroupModels:  []string{"o3"},
+			TeamAccessGroupModels: []string{"claude-3"},
+		}
+		assert.True(t, token.IsModelAllowed("claude-3"))
+		assert.True(t, token.IsModelAllowed("gpt-4"))
+		// o3 is a key-scope grant; the key scope was replaced by the team's,
+		// so it must not leak through
+		assert.False(t, token.IsModelAllowed("o3"))
+	})
+
+	t.Run("dangling team stays deny-all despite grants", func(t *testing.T) {
+		token := &TokenInfo{
+			Token:                 "hash1",
+			TeamID:                "team1",
+			TeamDangling:          true,
+			Models:                []string{"gpt-4"},
+			TeamAccessGroupModels: []string{"gpt-4"},
+		}
+		assert.False(t, token.IsModelAllowed("gpt-4"))
+	})
+}
+
+func TestTokenInfo_Clone_CopiesAccessGroupModels(t *testing.T) {
+	token := &TokenInfo{
+		Token:                 "hash1",
+		KeyAccessGroupModels:  []string{"claude-3"},
+		TeamAccessGroupModels: []string{"gemini-pro"},
+	}
+	clone := token.Clone()
+	clone.KeyAccessGroupModels[0] = "mutated"
+	clone.TeamAccessGroupModels[0] = "mutated"
+	assert.Equal(t, []string{"claude-3"}, token.KeyAccessGroupModels)
+	assert.Equal(t, []string{"gemini-pro"}, token.TeamAccessGroupModels)
+}

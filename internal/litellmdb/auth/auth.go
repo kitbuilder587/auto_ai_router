@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/connection"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // Authenticator provides token authentication via LiteLLM database
@@ -105,8 +107,19 @@ func (a *Authenticator) ValidateToken(ctx context.Context, rawToken string) (*mo
 		return info, nil
 	}
 
-	// 3. Query database
+	// 3. Query database. A miss may be a rotated key inside its grace period:
+	// LiteLLM keeps the old hash working until revoke_at via
+	// LiteLLM_DeprecatedVerificationToken (utils.py _lookup_deprecated_key),
+	// so mirror that with a single non-chaining fallback to the active token.
 	info, err := a.fetchTokenFromDB(ctx, hashedToken)
+	if err == models.ErrTokenNotFound {
+		if activeToken := a.lookupDeprecatedToken(ctx, hashedToken); activeToken != "" {
+			a.logger.Debug("Deprecated key used during grace period",
+				"token_prefix", security.MaskToken(hashedToken),
+			)
+			info, err = a.fetchTokenFromDB(ctx, activeToken)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +221,9 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var orgMemberMaxBudget *float64
 	var orgMemberTPMLimit, orgMemberRPMLimit *int64
 
+	// ============ Access group IDs ============
+	var tokenAccessGroupIDs, teamAccessGroupIDs []string
+
 	err = conn.QueryRow(ctx, queries.QueryValidateTokenWithHierarchy, hashedToken).Scan(
 		// Token
 		&info.Token,
@@ -273,6 +289,10 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&orgMemberMaxBudget,
 		&orgMemberTPMLimit,
 		&orgMemberRPMLimit,
+
+		// Access groups
+		&tokenAccessGroupIDs,
+		&teamAccessGroupIDs,
 	)
 
 	if err != nil {
@@ -379,6 +399,12 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.OrgMemberTPMLimit = orgMemberTPMLimit
 	info.OrgMemberRPMLimit = orgMemberRPMLimit
 
+	// Expand model scopes with unified access groups. A failed group fetch
+	// degrades to no expansion (denial stays denial), matching LiteLLM's
+	// swallow-and-continue in _get_resources_from_access_groups: it can never
+	// grant more access than the DB row authorizes.
+	a.applyAccessGroups(ctx, conn, &info, tokenAccessGroupIDs, teamAccessGroupIDs)
+
 	a.logger.Debug("Token loaded with full hierarchy",
 		"token_prefix", security.MaskToken(hashedToken),
 		"user_id", info.UserID,
@@ -387,6 +413,87 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	)
 
 	return &info, nil
+}
+
+// applyAccessGroups resolves the key's and team's access_group_ids into
+// model grants on info. Resolution errors are logged and swallowed: the
+// expansion only ever widens access, so skipping it fails closed.
+func (a *Authenticator) applyAccessGroups(
+	ctx context.Context,
+	conn *pgxpool.Conn,
+	info *models.TokenInfo,
+	tokenGroupIDs []string,
+	teamGroupIDs []string,
+) {
+	if len(tokenGroupIDs) == 0 && len(teamGroupIDs) == 0 {
+		return
+	}
+
+	allIDs := make([]string, 0, len(tokenGroupIDs)+len(teamGroupIDs))
+	allIDs = append(allIDs, tokenGroupIDs...)
+	allIDs = append(allIDs, teamGroupIDs...)
+
+	rows, err := conn.Query(ctx, queries.QuerySelectAccessGroups, allIDs)
+	if err != nil {
+		a.logger.Warn("Failed to load access groups; model access falls back to native allowlists",
+			"error", err,
+		)
+		return
+	}
+	defer rows.Close()
+
+	var groups []models.AccessGroup
+	for rows.Next() {
+		var group models.AccessGroup
+		if err := rows.Scan(&group.ID, &group.Models, &group.AssignedTeamIDs, &group.AssignedKeyIDs); err != nil {
+			a.logger.Warn("Failed to scan access group row; model access falls back to native allowlists",
+				"error", err,
+			)
+			return
+		}
+		groups = append(groups, group)
+	}
+	if err := rows.Err(); err != nil {
+		a.logger.Warn("Failed to iterate access groups; model access falls back to native allowlists",
+			"error", err,
+		)
+		return
+	}
+
+	info.KeyAccessGroupModels, info.TeamAccessGroupModels = models.ResolveAccessGroupModels(
+		info.Token, info.TeamID, tokenGroupIDs, teamGroupIDs, groups,
+	)
+}
+
+// lookupDeprecatedToken returns the active token hash for a rotated key that
+// is still inside its grace period, or "" when there is none. Mirrors
+// LiteLLM's _lookup_deprecated_key: lookup failures are swallowed so a
+// missing table or DB hiccup degrades to the plain token-not-found outcome.
+func (a *Authenticator) lookupDeprecatedToken(ctx context.Context, hashedToken string) string {
+	conn, err := a.pool.Acquire(ctx)
+	if err != nil {
+		a.logger.Warn("Failed to acquire connection for deprecated key lookup",
+			"error", err,
+		)
+		return ""
+	}
+	defer conn.Release()
+
+	var activeTokenID *string
+	err = conn.QueryRow(ctx, queries.QueryLookupDeprecatedToken, hashedToken, utils.NowUTC()).Scan(&activeTokenID)
+	if err != nil {
+		if err != pgx.ErrNoRows {
+			a.logger.Warn("Deprecated key lookup failed",
+				"error", err,
+				"token_prefix", security.MaskToken(hashedToken),
+			)
+		}
+		return ""
+	}
+	if activeTokenID == nil {
+		return ""
+	}
+	return *activeTokenID
 }
 
 func decodeTokenMetadata(raw []byte) (map[string]interface{}, []string) {
