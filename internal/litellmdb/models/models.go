@@ -524,6 +524,21 @@ func (t *TokenInfo) IsModelAllowed(model string) bool {
 	return t.IsModelAllowedBy(model, exactModelScopeMatch)
 }
 
+// IsAnyModelAllowed reports whether at least one candidate name passes every
+// applicable model scope. The same provider model is often exposed under
+// several route aliases (e.g. "claude-haiku-4.5" and
+// "anthropic/claude-haiku-4.5" for the same credential+model); callers resolve
+// the alias-equivalence group (models.Manager.GetAliasesForModel) and pass it
+// here so the check isn't defeated by which spelling the client used.
+func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
+	for _, candidate := range candidates {
+		if t.IsModelAllowed(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkUserBudget checks user budget (personal key only).
 // LiteLLM 1.90.0 uses `user_spend >= user_budget` (auth_checks.py
 // _user_max_budget_check), so reaching the budget rejects.

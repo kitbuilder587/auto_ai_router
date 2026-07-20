@@ -233,7 +233,7 @@ type dailyEntity struct {
 	RequestID string            `json:"request_id,omitempty"`
 }
 
-func TestGoldenFixturesMatchLiteLLMShadowContract(t *testing.T) {
+func TestGoldenFixturesMatchLiteLLMSpendContract(t *testing.T) {
 	for endpoint, route := range routeContract {
 		endpoint, route := endpoint, route
 		t.Run(route.file, func(t *testing.T) {

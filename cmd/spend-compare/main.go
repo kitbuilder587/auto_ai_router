@@ -19,8 +19,8 @@ const (
 	exitDiverged = 1
 	exitInvalid  = 2
 
-	testDSNEnvironment      = "AIR_SHADOW_TEST_DSN"
-	referenceDSNEnvironment = "AIR_SHADOW_REFERENCE_DSN"
+	testDSNEnvironment      = "AIR_SPEND_TEST_DSN"
+	referenceDSNEnvironment = "AIR_SPEND_REFERENCE_DSN"
 )
 
 type compareFunc func(context.Context, string, string, spendcompare.Filter) (spendcompare.Report, error)
@@ -77,8 +77,8 @@ func parseOptions(args []string, getenv func(string) string) (cliOptions, error)
 	)
 	flags.StringVar(&fromValue, "from", "", "inclusive UTC RFC3339 start")
 	flags.StringVar(&toValue, "to", "", "exclusive UTC RFC3339 end")
-	flags.StringVar(&testDSN, "test-dsn", "", "test PostgreSQL DSN (prefer AIR_SHADOW_TEST_DSN)")
-	flags.StringVar(&referenceDSN, "reference-dsn", "", "reference PostgreSQL DSN (prefer AIR_SHADOW_REFERENCE_DSN)")
+	flags.StringVar(&testDSN, "test-dsn", "", "test PostgreSQL DSN (prefer AIR_SPEND_TEST_DSN)")
+	flags.StringVar(&referenceDSN, "reference-dsn", "", "reference PostgreSQL DSN (prefer AIR_SPEND_REFERENCE_DSN)")
 	flags.StringVar(&requestID, "request-id", "", "optional response/request ID")
 	flags.StringVar(&callID, "call-id", "", "optional LiteLLM call ID")
 	flags.DurationVar(&timeout, "timeout", time.Minute, "overall comparison timeout")

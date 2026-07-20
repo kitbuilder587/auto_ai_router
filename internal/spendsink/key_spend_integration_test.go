@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSynchronousKeySpendSerializesAcrossShadowWriterInstances(t *testing.T) {
+func TestSynchronousKeySpendSerializesAcrossSpendWriterInstances(t *testing.T) {
 	baseDSN := os.Getenv("SPEND_TEST_DATABASE_URL")
 	if baseDSN == "" {
 		t.Fatal("SPEND_TEST_DATABASE_URL is required for integration tests")

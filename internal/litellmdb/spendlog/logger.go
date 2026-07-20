@@ -199,8 +199,8 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 	}
 }
 
-// TryLog performs the fail-open shadow enqueue. It never waits for queue space;
-// callers can return the provider response without shadow DB backpressure. A
+// TryLog performs the fail-open spend enqueue. It never waits for queue space;
+// callers can return the provider response without spend DB backpressure. A
 // full writer queue is not itself data loss: the exact entry is retained in the
 // bounded DLQ and recovered by the same idempotent atomic writer. Only a later
 // DLQ overflow is a terminal loss and invalidates the comparison window.

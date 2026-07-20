@@ -73,7 +73,7 @@ func aggregateDailyUserSpendLogs(
 
 	for _, record := range records {
 		// No skip for empty user_id: LiteLLM records daily user rows with
-		// user_id="" for unattributed traffic, and the shadow comparison
+		// user_id="" for unattributed traffic, and the spend comparison
 		// counts them.
 		key := aggregationKey{
 			userID:                record.UserID,

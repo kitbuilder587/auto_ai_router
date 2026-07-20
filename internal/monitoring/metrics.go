@@ -319,7 +319,7 @@ var (
 	SpendComparisonRowsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_spend_comparison_rows_total",
-			Help: "Newly persisted shadow rows by comparison eligibility",
+			Help: "Newly persisted spend rows by comparison eligibility",
 		},
 		[]string{"eligibility"},
 	)
@@ -462,7 +462,7 @@ func (m *Metrics) SetSpendSinkHealthy(healthy bool) {
 }
 
 // SetSpendSinkHealthy publishes live health transitions from the
-// isolated shadow connection pool. Registration/export remains controlled by
+// isolated spend connection pool. Registration/export remains controlled by
 // the configured Prometheus/OTEL sinks.
 func SetSpendSinkHealthy(healthy bool) {
 	if healthy {

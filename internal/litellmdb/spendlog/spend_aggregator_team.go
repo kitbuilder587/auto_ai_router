@@ -49,7 +49,7 @@ func aggregateDailyTeamSpendLogs(
 		totalRows++
 
 		// No skip for empty team_id: LiteLLM records daily team rows with
-		// team_id="" for keys without a team, and the shadow comparison
+		// team_id="" for keys without a team, and the spend comparison
 		// counts them.
 		key := aggregateTeamKey{
 			teamID:                record.TeamID,

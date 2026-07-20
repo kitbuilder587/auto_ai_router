@@ -17,7 +17,7 @@ import (
 // reflects broker connectivity independently, see
 // auto_ai_router_kafka_spend_log_tz.md section 6) — but the returned error is
 // still surfaced to the caller so a queue-full failure can be flagged on the
-// request's shadow Postgres row for later re-send, instead of being silently
+// request's spend Postgres row for later re-send, instead of being silently
 // dropped.
 func (p *Proxy) logSpendToKafka(
 	logCtx *RequestLogContext,

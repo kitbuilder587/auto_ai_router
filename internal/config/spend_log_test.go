@@ -11,8 +11,8 @@ import (
 )
 
 func TestLoadSpendLogConfig(t *testing.T) {
-	t.Setenv("SHADOW_DATABASE_URL", "postgresql://shadow:secret@db.example/test-db")
-	t.Setenv("SHADOW_PUBLIC_KEY", "cHVibGljLWtleQ==")
+	t.Setenv("SPEND_DATABASE_URL", "postgresql://spend:secret@db.example/test-db")
+	t.Setenv("SPEND_PUBLIC_KEY", "cHVibGljLWtleQ==")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 server:
@@ -38,7 +38,7 @@ redis:
   addresses:
     - localhost:6379
 spend_log:
-  database_url: os.environ/SHADOW_DATABASE_URL
+  database_url: os.environ/SPEND_DATABASE_URL
   expected_database_name: test-db
   api_base: http://air-ru01/v1
   max_conns: 7
@@ -51,7 +51,7 @@ spend_log:
     issuer: litellm
     audience: air-ru01
     public_keys:
-      test-key: os.environ/SHADOW_PUBLIC_KEY
+      test-key: os.environ/SPEND_PUBLIC_KEY
     clock_skew: 15s
     replay_cache_size: 321
 `), 0o600))
@@ -60,7 +60,7 @@ spend_log:
 	require.NoError(t, err)
 
 	assert.True(t, cfg.SpendLog.IsEnabled())
-	assert.Equal(t, "postgresql://shadow:secret@db.example/test-db", cfg.SpendLog.DatabaseURL)
+	assert.Equal(t, "postgresql://spend:secret@db.example/test-db", cfg.SpendLog.DatabaseURL)
 	assert.Equal(t, "test-db", cfg.SpendLog.ExpectedDatabaseName)
 	assert.Equal(t, "http://air-ru01/v1", cfg.SpendLog.APIBase)
 	assert.Equal(t, 7, cfg.SpendLog.MaxConns)
