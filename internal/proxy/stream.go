@@ -764,7 +764,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 		}
 	}
-	if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
+	if err := p.finalizeDeferredSpend(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue streaming spend log",
 			"error", err,
 			"request_id", logCtx.RequestID,

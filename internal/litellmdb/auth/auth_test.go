@@ -130,10 +130,10 @@ func TestTokenInfo_IsBudgetExceeded(t *testing.T) {
 		assert.False(t, info.IsBudgetExceeded())
 	})
 
-	t.Run("spend == max_budget - not exceeded (embedded uses >)", func(t *testing.T) {
+	t.Run("spend == max_budget - exceeded (LiteLLM 1.90.0 key check uses >=)", func(t *testing.T) {
 		maxBudget := 100.0
 		info := &models.TokenInfo{Spend: 100, MaxBudget: &maxBudget}
-		assert.False(t, info.IsBudgetExceeded())
+		assert.True(t, info.IsBudgetExceeded())
 	})
 
 	t.Run("spend > max_budget - exceeded", func(t *testing.T) {
@@ -157,6 +157,32 @@ func TestTokenInfo_IsModelAllowed(t *testing.T) {
 
 	t.Run("model not in list - not allowed", func(t *testing.T) {
 		info := &models.TokenInfo{Models: []string{"gpt-4", "gpt-3.5-turbo"}}
+		assert.False(t, info.IsModelAllowed("claude-3"))
+	})
+
+	// LiteLLM stores these sentinel values inside VerificationToken.models
+	// instead of real model names - confirmed present in a production dump
+	// (178 keys use all-proxy-models, 42 use all-team-models).
+	t.Run("all-proxy-models sentinel - any model allowed", func(t *testing.T) {
+		info := &models.TokenInfo{Models: []string{"all-proxy-models"}}
+		assert.True(t, info.IsModelAllowed("gpt-4"))
+		assert.True(t, info.IsModelAllowed("claude-3"))
+	})
+
+	t.Run("all-team-models sentinel with no team - fail closed", func(t *testing.T) {
+		// LiteLLM fails closed when all-team-models is used without a team;
+		// the fail-open behavior from PR #82 is intentionally not carried over.
+		info := &models.TokenInfo{Models: []string{"all-team-models"}, TeamID: ""}
+		assert.False(t, info.IsModelAllowed("gpt-4"))
+	})
+
+	t.Run("all-team-models sentinel - resolves against team allow-list", func(t *testing.T) {
+		info := &models.TokenInfo{
+			Models:     []string{"all-team-models"},
+			TeamID:     "team1",
+			TeamModels: []string{"gpt-4"},
+		}
+		assert.True(t, info.IsModelAllowed("gpt-4"))
 		assert.False(t, info.IsModelAllowed("claude-3"))
 	})
 }
@@ -285,6 +311,28 @@ func TestTokenInfo_Validate(t *testing.T) {
 			UserModels: nil,
 		}
 		assert.NoError(t, info.Validate("gpt-4"))
+	})
+
+	t.Run("dangling team reference fails closed", func(t *testing.T) {
+		// Unlike an orphan user (intentionally unrestricted, see above), a
+		// team_id whose LiteLLM_TeamTable row is gone must deny: the team
+		// scope cannot be resolved, and an empty scope would otherwise be
+		// treated as unrestricted — a fail-open for all-team-models keys.
+		info := &models.TokenInfo{
+			Models:       []string{models.AllTeamModels},
+			TeamID:       "deleted-team",
+			TeamDangling: true,
+		}
+		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
+	})
+
+	t.Run("dangling project reference fails closed", func(t *testing.T) {
+		info := &models.TokenInfo{
+			Models:          []string{"gpt-4"},
+			ProjectID:       "deleted-project",
+			ProjectDangling: true,
+		}
+		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
 	})
 }
 
@@ -521,6 +569,54 @@ func TestAuthenticator_ValidateTokenForModel_ModelNotAllowed(t *testing.T) {
 	assert.ErrorIs(t, err, models.ErrModelNotAllowed)
 }
 
+func TestAuthenticator_ValidateTokenForModel_AllProxyModelsSentinel(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	tokenInfo := &models.TokenInfo{
+		Token:   "test-token",
+		UserID:  "user1",
+		Blocked: false,
+		Models:  []string{"all-proxy-models"},
+	}
+	hashedToken := HashToken("sk-all-proxy-models-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	info, err := auth.ValidateTokenForModel(context.Background(), "sk-all-proxy-models-token", "claude-3")
+	assert.NoError(t, err)
+	assert.Equal(t, "user1", info.UserID)
+}
+
+func TestAuthenticator_ValidateTokenForModel_AllTeamModelsSentinel(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	tokenInfo := &models.TokenInfo{
+		Token:      "test-token",
+		UserID:     "user1",
+		TeamID:     "team1",
+		Blocked:    false,
+		Models:     []string{"all-team-models"},
+		TeamModels: []string{"gpt-4"},
+	}
+	hashedToken := HashToken("sk-all-team-models-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Allowed: in the team's allow-list.
+	info, err := auth.ValidateTokenForModel(context.Background(), "sk-all-team-models-token", "gpt-4")
+	assert.NoError(t, err)
+	assert.Equal(t, "user1", info.UserID)
+
+	// Not allowed: outside the team's allow-list.
+	info, err = auth.ValidateTokenForModel(context.Background(), "sk-all-team-models-token", "claude-3")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrModelNotAllowed)
+}
+
 func TestAuthenticator_ValidateTokenForModel_EmptyToken(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)
@@ -671,4 +767,27 @@ func TestAuthenticator_CacheHitRate(t *testing.T) {
 	stats := auth.CacheStats()
 	assert.Greater(t, stats.HitRate, 0.0)
 	assert.LessOrEqual(t, stats.HitRate, 100.0)
+}
+
+func TestFetchMasterKey_ConfigKeyCachedWhenDBUnavailable(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	require.NoError(t, auth.FetchMasterKey(context.Background(), "sk-config-master"))
+
+	info, ok := cache.Get(HashToken("sk-config-master"))
+	require.True(t, ok)
+	assert.Equal(t, "litellm-master-key", info.UserID)
+	assert.Equal(t, "litellm-master-key", info.KeyName)
+}
+
+func TestFetchMasterKey_EmptyConfigAndNoDB(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	assert.ErrorIs(t, auth.FetchMasterKey(context.Background(), ""), models.ErrTokenNotFound)
+	_, ok := cache.Get(HashToken(""))
+	assert.False(t, ok)
 }

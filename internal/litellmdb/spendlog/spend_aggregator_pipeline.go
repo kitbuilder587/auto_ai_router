@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -55,10 +57,14 @@ var dailyEndpointByCallType = map[string]string{
 	"aresponses":        "/responses",
 	"aimage_generation": "/image/generations",
 	"aimage_edit":       "/images/edits",
+	"atranscription":    "/audio/transcriptions",
+	"aspeech":           "/audio/speech",
+	"amoderation":       "/moderations",
+	"arerank":           "/rerank",
 }
 
 // dailyEndpoint mirrors LiteLLM ROUTE_ENDPOINT_MAPPING for AIR-supported
-// shadow routes. Unknown call types intentionally yield an empty/NULL-like
+// spend routes. Unknown call types intentionally yield an empty/NULL-like
 // endpoint rather than leaking api_base into the daily dimension.
 func dailyEndpoint(callType string) string {
 	return dailyEndpointByCallType[callType]
@@ -124,11 +130,16 @@ func loadUnprocessedSpendLogRecords(
 		effectiveCallType := derefString(aggregationCallType)
 		if effectiveCallType == "" {
 			record.SkipDaily = true
+		} else if _, knownEndpoint := dailyEndpointByCallType[effectiveCallType]; !knownEndpoint {
+			// A call_type outside the endpoint map is a permanent property of
+			// the row, not a transient fault: failing here would poison the
+			// whole batch (retries → DLQ) and lose valid rows alongside it.
+			// The raw spend row is already inserted in this transaction, so
+			// only its daily aggregation is skipped.
+			logger.Warn("[DB] "+scope+" aggregation: unknown call_type, skipping daily aggregation",
+				"call_type", effectiveCallType, "request_id", record.RequestID)
+			record.SkipDaily = true
 		} else {
-			_, knownEndpoint := dailyEndpointByCallType[effectiveCallType]
-			if !knownEndpoint {
-				return nil, fmt.Errorf("unsupported LiteLLM daily call_type %q for request %q", effectiveCallType, record.RequestID)
-			}
 			if rawCallType == "" {
 				if record.Status != "failure" {
 					return nil, fmt.Errorf(
@@ -136,14 +147,9 @@ func loadUnprocessedSpendLogRecords(
 						record.Status, record.RequestID,
 					)
 				}
-				if record.Spend != 0 || record.PromptTokens != 0 ||
-					record.CompletionTokens != 0 || record.CacheReadInputTokens != 0 ||
-					record.CacheCreationInputTokens != 0 {
-					return nil, fmt.Errorf(
-						"empty raw LiteLLM call_type on a nonzero failure for request %q",
-						record.RequestID,
-					)
-				}
+				// No nonzero-spend rejection here: LiteLLM legitimately writes
+				// failure rows with partial cost and usage (interrupted streams,
+				// recovered_response_cost in proxy_track_cost_callback).
 				// LiteLLM failure rows use the public model as their daily model and
 				// leave provider and endpoint empty. Keep the richer raw
 				// AIR dimensions intact while projecting the compatible daily key.
@@ -183,6 +189,28 @@ func derefString(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// dailyLockOrdered is implemented by every daily aggregation key. lockOrder
+// serializes the key fields so keys sort identically across AIR replicas.
+type dailyLockOrdered interface {
+	comparable
+	lockOrder() string
+}
+
+// sortedDailyKeys returns daily upsert keys in a stable order so concurrent
+// transactions acquire row locks consistently and queue instead of
+// deadlocking — Go map iteration order is randomized. Same rationale as
+// sortedSpendKeys in spend_updater.go.
+func sortedDailyKeys[K dailyLockOrdered, V any](aggregations map[K]V) []K {
+	keys := make([]K, 0, len(aggregations))
+	for key := range aggregations {
+		keys = append(keys, key)
+	}
+	slices.SortFunc(keys, func(a, b K) int {
+		return strings.Compare(a.lockOrder(), b.lockOrder())
+	})
+	return keys
 }
 
 // runAggregators runs all six daily aggregators sequentially on the transaction

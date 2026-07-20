@@ -170,9 +170,6 @@ func TestAtomicWriterKeepsLegacyFailureRawCallTypeEmptyButProjectsOriginalRoute(
 	entry.CallType = ""
 	entry.Status = "failure"
 	entry.Spend = 0
-	entry.PromptTokens = 0
-	entry.CompletionTokens = 0
-	entry.TotalTokens = 0
 	entry.Metadata = `{"spend_logs_metadata":{"original_call_type":"acompletion"}}`
 	spendRow := atomicTestSpendRow(entry)
 	spendRow[8] = "acompletion" // Metadata fallback makes the raw failure row aggregation-eligible.
@@ -198,10 +195,6 @@ func TestLegacyFailureOriginalRouteEnablesDailyAggregationWithoutPopulatingEndpo
 	entry := atomicTestEntry("req-failure-dimensions")
 	entry.CallType = ""
 	entry.Status = "failure"
-	entry.Spend = 0
-	entry.PromptTokens = 0
-	entry.CompletionTokens = 0
-	entry.TotalTokens = 0
 	row := atomicTestSpendRow(entry)
 	row[8] = "acompletion"
 	tx := &atomicTestTx{spendRows: [][]any{row}}

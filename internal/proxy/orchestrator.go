@@ -774,7 +774,7 @@ func (p *Proxy) selectCredentialForModel(
 		Type: config.ProviderTypeProxy,
 	}
 
-	if err := p.finalizeDeferredShadowSpend(logCtx); err != nil {
+	if err := p.finalizeDeferredSpend(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue error log for no credentials",
 			"error", err,
 			"request_id", logCtx.RequestID,

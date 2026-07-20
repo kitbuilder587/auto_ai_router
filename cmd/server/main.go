@@ -33,7 +33,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
-	"github.com/mixaill76/auto_ai_router/internal/shadowspend"
+	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
 	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
@@ -149,35 +149,30 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 
+	// ==================== Budget reservation & key-level RPM/TPM ====================
+	// Both are Redis-backed and reuse the shared valkey client with isolated key
+	// namespaces. When Redis is disabled they stay nil and the proxy falls back to
+	// snapshot-only budget checks (see todo_auth_billing.md P1.4).
 	var budgetReserver *budget.Reserver
 	var keyRateLimiter *ratelimit.RPMLimiter
-	if litellmDBManager.IsEnabled() && redisBackend != nil {
+	if redisBackend != nil && cfg.LiteLLMDB.Enabled {
 		if cfg.LiteLLMDB.EnforceBudgetReservation {
-			budgetReserver = budget.New(
-				redisBackend.Client(),
-				cfg.Redis.KeyPrefix+"litellmbudget:",
-				cfg.LiteLLMDB.BudgetReservationTTL,
-			)
-			log.Info("Atomic budget reservation enabled", "backend", "redis")
+			budgetReserver = budget.New(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmbudget:", cfg.LiteLLMDB.BudgetReservationTTL, log)
+			log.Info("Budget reservation: enabled (Redis-backed, atomic overspend protection)")
 		}
 		if cfg.LiteLLMDB.EnforceKeyRateLimits {
-			authBackend := ratelimit.NewRedisBackendFromClient(
-				redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:",
-			)
+			authRedisBackend := ratelimit.NewRedisBackendFromClient(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:")
 			if cfg.Redis.Hybrid {
-				hybridAuthBackend := ratelimit.NewHybridBackend(authBackend, cfg.Redis.SyncInterval)
+				hybridAuthBackend := ratelimit.NewHybridBackend(authRedisBackend, cfg.Redis.SyncInterval)
 				defer hybridAuthBackend.Close()
 				keyRateLimiter = ratelimit.NewWithHybrid(hybridAuthBackend)
 			} else {
-				keyRateLimiter = ratelimit.NewWithRedis(authBackend)
+				keyRateLimiter = ratelimit.NewWithRedis(authRedisBackend)
 			}
-			log.Info("Hierarchical key rate limits enabled", "backend", "redis")
+			log.Info("Key-level TPM/RPM enforcement: enabled (Redis-backed, per key/user/team/org)")
 		}
-	} else if cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits {
-		log.Warn("Redis-backed LiteLLM enforcement requested but unavailable; using authenticated DB snapshots only",
-			"litellm_db_enabled", litellmDBManager.IsEnabled(),
-			"redis_available", redisBackend != nil,
-		)
+	} else if cfg.LiteLLMDB.Enabled {
+		log.Warn("Budget reservation and key-level rate limits disabled: Redis is not enabled (redis.enabled=false). Falling back to snapshot-only budget checks (see todo_auth_billing.md P1.4 for the overspend race this leaves open).")
 	}
 
 	// ==================== Initialize Balancer & Model Manager (YAML-only) ====================
@@ -206,7 +201,7 @@ func main() {
 	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
 	// endpoint and the push pipeline are wired up separately below.
 	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
-	shadowSpendSink := initializeShadowSpendSink(cfg, log, metrics)
+	spendSink := initializeSpendSink(cfg, log, metrics)
 	shadowContextVerifier, shadowContextErr := shadowcontext.NewVerifier(cfg.SpendLog.AuthContext)
 	if shadowContextErr != nil {
 		log.Error("CRITICAL: signed shadow context verification is disabled",
@@ -273,7 +268,7 @@ func main() {
 		Commit:                           Commit,
 		LiteLLMDB:                        litellmDBManager,
 		KafkaLog:                         kafkaLogManager,
-		SpendLogger:                      shadowSpendSink,
+		SpendLogger:                      spendSink,
 		SpendAPIBase:                     cfg.SpendLog.APIBase,
 		ShadowContextVerifier:            shadowContextVerifier,
 		HealthChecker:                    healthChecker,
@@ -444,13 +439,13 @@ func main() {
 	}
 
 	// Shutdown LiteLLM DB
-	if shadowSpendSink.IsEnabled() {
-		log.Info("Shutting down shadow spend sink...")
-		shadowShutdownCtx, shadowShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := shadowSpendSink.Shutdown(shadowShutdownCtx); err != nil {
-			log.Error("Shadow spend sink shutdown error", "error", err)
+	if spendSink.IsEnabled() {
+		log.Info("Shutting down spend sink...")
+		spendShutdownCtx, spendShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := spendSink.Shutdown(spendShutdownCtx); err != nil {
+			log.Error("Spend sink shutdown error", "error", err)
 		}
-		shadowShutdownCancel()
+		spendShutdownCancel()
 	}
 
 	// Shutdown LiteLLM control-plane DB
@@ -573,7 +568,14 @@ func initializeModelManager(
 	if len(cfg.ModelAlias) > 0 {
 		modelManager.SetModelAliases(cfg.ModelAlias)
 	}
+	// client_model_ids is a deny-by-default product boundary: an omitted key
+	// preserves the legacy inferred model surface, while an explicitly empty
+	// list intentionally denies every client-facing model ID. yaml.v3 keeps
+	// the slice nil only when the key is absent, so nil means "not configured".
 	if cfg.ClientModelIDs != nil {
+		if len(cfg.ClientModelIDs) == 0 {
+			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
+		}
 		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
 	}
 	if len(cfg.PublicModelAlias) > 0 {
@@ -895,31 +897,31 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 	return manager
 }
 
-func initializeShadowSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) shadowspend.Sink {
+func initializeSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) spendsink.Sink {
 	if !cfg.SpendLog.IsEnabled() {
-		metrics.SetShadowSpendSinkHealthy(false)
-		log.Info("Shadow spend logging disabled")
-		return shadowspend.NewDisabledSink("disabled by configuration")
+		metrics.SetSpendSinkHealthy(false)
+		log.Info("Spend logging disabled")
+		return spendsink.NewDisabledSink("disabled by configuration")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.SpendLog.ConnectTimeout)
 	defer cancel()
-	sink, err := shadowspend.New(ctx, cfg.SpendLog, log)
+	sink, err := spendsink.New(ctx, cfg.SpendLog, log)
 	if err != nil {
 		reason := "connection_or_preflight"
-		if errors.Is(err, shadowspend.ErrUnexpectedDatabase) {
+		if errors.Is(err, spendsink.ErrUnexpectedDatabase) {
 			reason = "unexpected_database"
 		}
-		metrics.RecordShadowSpendSinkStartupFailure(reason)
-		log.Error("CRITICAL: shadow spend sink disabled; proxy traffic remains available",
+		metrics.RecordSpendSinkStartupFailure(reason)
+		log.Error("CRITICAL: spend sink disabled; proxy traffic remains available",
 			"error", err,
 			"reason", reason,
 			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 		)
-		return shadowspend.NewDisabledSink(reason)
+		return spendsink.NewDisabledSink(reason)
 	}
 
-	log.Info("Shadow spend sink initialized",
+	log.Info("Spend sink initialized",
 		"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
 		"api_base", cfg.SpendLog.APIBase,
 	)

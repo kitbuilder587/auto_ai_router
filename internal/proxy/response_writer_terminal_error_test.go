@@ -101,7 +101,7 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 			assert.Equal(t, "stream_error", logCtx.StreamOutcome)
 			assert.Contains(t, logCtx.ErrorMsg, tt.wantMarker)
 
-			entry := prx.buildShadowSpendEntry(logCtx)
+			entry := prx.buildSpendEntry(logCtx)
 			require.NotNil(t, entry)
 			assert.Equal(t, "failure", entry.Status, "terminal provider errors must produce failed spend rows")
 		})

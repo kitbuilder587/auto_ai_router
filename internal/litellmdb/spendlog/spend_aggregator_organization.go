@@ -3,6 +3,7 @@ package spendlog
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
@@ -17,6 +18,11 @@ type aggregateOrgKey struct {
 	customLLMProvider     string
 	mcpNamespacedToolName string
 	endpoint              string
+}
+
+func (k aggregateOrgKey) lockOrder() string {
+	return strings.Join([]string{k.organizationID, k.date, k.apiKey, k.model, k.modelGroup,
+		k.customLLMProvider, k.mcpNamespacedToolName, k.endpoint}, "\x00")
 }
 
 // aggregateDailyOrganizationSpendLogs aggregates spend logs into DailyOrganizationSpend
@@ -79,7 +85,8 @@ func aggregateDailyOrganizationSpendLogs(
 
 	// Insert aggregated data into DailyOrganizationSpend
 	upsertCount := 0
-	for key, value := range aggregations {
+	for _, key := range sortedDailyKeys(aggregations) {
+		value := aggregations[key]
 		_, err := conn.Exec(ctx,
 			queries.QueryUpsertDailyOrganizationSpend,
 			key.organizationID, key.date, key.apiKey, key.model, key.modelGroup,

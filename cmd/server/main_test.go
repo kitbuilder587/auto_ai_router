@@ -93,9 +93,9 @@ func TestSplitCredentialModel(t *testing.T) {
 	}
 }
 
-func TestInitializeShadowSpendSinkDisabledDoesNotCreateWriter(t *testing.T) {
+func TestInitializeSpendSinkDisabledDoesNotCreateWriter(t *testing.T) {
 	cfg := &config.Config{SpendLog: config.SpendLogConfig{}}
-	sink := initializeShadowSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
+	sink := initializeSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
 
 	assert.False(t, sink.IsEnabled())
 	assert.NoError(t, sink.LogSpend(nil))
@@ -131,12 +131,12 @@ func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *test
 	}
 }
 
-func TestInitializeShadowSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
+func TestInitializeSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
 	cfg := &config.Config{SpendLog: config.SpendLogConfig{
 		DatabaseURL:          "postgres://%zz",
 		ExpectedDatabaseName: "test-db",
 	}}
-	sink := initializeShadowSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
+	sink := initializeSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
 
 	assert.False(t, sink.IsEnabled())
 	assert.NoError(t, sink.LogSpend(nil))

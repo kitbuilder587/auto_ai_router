@@ -291,7 +291,7 @@ func TestOrchestrateRequestResolvesAcceptedCompletionAliasWithoutChangingPublicS
 	)
 }
 
-func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T) {
+func TestOrchestrateRequestAcceptedAliasCollisionPreservesTrustedBackendAndClientSurface(t *testing.T) {
 	const (
 		canonicalModel = "anthropic/claude-sonnet-4.5"
 		backendModel   = "claude-sonnet-4.5"
@@ -314,9 +314,9 @@ func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T
 	}, []config.CredentialConfig{credential}, []config.CredentialConfig{credential})
 	manager.SetAcceptedModelAliases(map[string]string{backendModel: canonicalModel})
 	resolved, accepted, aliasErr := manager.ResolvePublicModelAlias(backendModel)
-	assert.Equal(t, backendModel, resolved)
+	assert.Equal(t, canonicalModel, resolved)
 	assert.True(t, accepted)
-	require.Error(t, aliasErr, "the collision must fail if it enters the client alias resolver")
+	require.NoError(t, aliasErr, "deployment-ID ambiguity must not deactivate a routable client alias")
 	assert.NotEmpty(t, manager.GetCredentialsForModel(backendModel), "the same ID is an exact configured backend")
 
 	builder := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key")
@@ -364,9 +364,11 @@ func TestOrchestrateRequestTrustedBackendWinsAcceptedAliasCollision(t *testing.T
 
 	prepared, ok := prx.orchestrateRequest(clientWriter, clientReq, clientLogCtx)
 
-	assert.False(t, ok)
-	assert.Nil(t, prepared)
-	testhelpers.AssertJSONErrorResponse(t, clientWriter, http.StatusNotFound, "not_found_error", "Model "+backendModel+" not found")
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+	assert.Equal(t, backendModel, clientLogCtx.PublicModelID)
+	assert.Equal(t, backendModel, prepared.modelID)
+	assert.Equal(t, backendModel, prepared.realModelID)
 }
 
 func TestOrchestrateRequestRejectsOrphanPublicAliasBeforeProviderSelection(t *testing.T) {

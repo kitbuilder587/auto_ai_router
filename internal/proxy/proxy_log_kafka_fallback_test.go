@@ -15,7 +15,7 @@ func TestPublishKafkaSpendCopy_FlagsShadowEntryOnQueueFull(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	prx.kafkaLog = &stubKafkaManager{enabled: true, err: kafkalog.ErrQueueFull}
 	logCtx := testLogCtx(t)
-	entry := prx.buildShadowSpendEntry(logCtx)
+	entry := prx.buildSpendEntry(logCtx)
 	require.NotNil(t, entry)
 
 	err := prx.publishKafkaSpendCopy(logCtx, entry)
@@ -32,7 +32,7 @@ func TestPublishKafkaSpendCopy_NoFallbackFlagOnSuccess(t *testing.T) {
 	kafkaStub := &stubKafkaManager{enabled: true}
 	prx.kafkaLog = kafkaStub
 	logCtx := testLogCtx(t)
-	entry := prx.buildShadowSpendEntry(logCtx)
+	entry := prx.buildSpendEntry(logCtx)
 	require.NotNil(t, entry)
 
 	require.NoError(t, prx.publishKafkaSpendCopy(logCtx, entry))
@@ -49,7 +49,7 @@ func TestPublishKafkaSpendCopy_ExactlyOnceAcrossReplayPaths(t *testing.T) {
 	kafkaStub := &stubKafkaManager{enabled: true}
 	prx.kafkaLog = kafkaStub
 	logCtx := testLogCtx(t)
-	entry := prx.buildShadowSpendEntry(logCtx)
+	entry := prx.buildSpendEntry(logCtx)
 	require.NotNil(t, entry)
 
 	require.NoError(t, prx.publishKafkaSpendCopy(logCtx, entry))

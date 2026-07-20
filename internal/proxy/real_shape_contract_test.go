@@ -470,7 +470,7 @@ func TestSyntheticBillingContractAtIndependentObservedTokenAndDurationBounds(t *
 			billing := NewBillingContext("fixture-event", "fixture-call", tc.endpoint, identity).
 				WithRouting("fixture-backend-model", "fixture-priced-model", "fixture-provider", "fixture-credential", "https://fixture.invalid/v1")
 			request := httptest.NewRequest(http.MethodPost, tc.endpoint, nil)
-			entry := prx.buildShadowSpendEntry(&RequestLogContext{
+			entry := prx.buildSpendEntry(&RequestLogContext{
 				RequestID:           "fixture-event",
 				CallID:              "fixture-call",
 				ShadowContext:       shadowcontext.Result{State: shadowcontext.StateValid, Identity: identity},

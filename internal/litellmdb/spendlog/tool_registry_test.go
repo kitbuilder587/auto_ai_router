@@ -61,8 +61,9 @@ func TestUpsertDiscoveredToolsUsesPinnedLiteLLMConflictSemantics(t *testing.T) {
 	require.NoError(t, err)
 	_, err = uuid.Parse(second.args[0].(string))
 	require.NoError(t, err)
-	assert.Equal(t, "weather", first.args[1])
-	assert.Equal(t, "local_time", second.args[1])
+	// Upserts run in sorted tool-name order (stable cross-replica lock order).
+	assert.Equal(t, "local_time", first.args[1])
+	assert.Equal(t, "weather", second.args[1])
 	assert.Equal(t, "key-hash", first.args[2])
 	assert.Equal(t, "team-1", first.args[3])
 	assert.Equal(t, "fixture-key", first.args[4])
@@ -95,7 +96,7 @@ func TestUpsertDiscoveredToolsStopsOnFirstDatabaseError(t *testing.T) {
 	}})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `upsert tool "local_time"`)
+	assert.Contains(t, err.Error(), `upsert tool "weather"`)
 	assert.Len(t, recorder.calls, 2)
 }
 
